@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <base href="/official/">
+    <script src="/codex-web-config.js"></script>
+    <script src="/codex-bridge-polyfill.js"></script>
+    <!-- PROD_BASE_TAG_HERE -->
+    <!-- PROD_CSP_TAG_HERE -->
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex</title>
+    <style>
+      :root {
+        --startup-background: transparent;
+        --startup-logo-base: #adadad;
+        --startup-logo-shimmer-soft: rgb(255 255 255 / 0.02);
+        --startup-logo-shimmer-peak: rgb(255 255 255 / 0.46);
+        --startup-logo-shimmer-tail: rgb(255 255 255 / 0.06);
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: var(--startup-background);
+      }
+
+      body {
+        outline: none;
+      }
+
+      #root {
+        width: 100%;
+        height: 100%;
+      }
+
+      .startup-loader {
+        display: flex;
+        width: 100%;
+        height: 100%;
+        align-items: center;
+        justify-content: center;
+        background: var(--startup-background);
+        -webkit-app-region: drag;
+      }
+
+      .startup-loader__logo {
+        position: relative;
+        width: 56px;
+        height: 56px;
+        opacity: 0;
+        animation: startup-codex-logo-fade-in 180ms ease-out 60ms forwards;
+      }
+
+      .startup-loader__base,
+      .startup-loader__overlay {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      .startup-loader__base {
+        color: var(--startup-logo-base);
+      }
+
+      .startup-loader__overlay {
+        background-image: linear-gradient(
+          112deg,
+          transparent 22%,
+          var(--startup-logo-shimmer-soft) 38%,
+          var(--startup-logo-shimmer-peak) 49%,
+          var(--startup-logo-shimmer-tail) 56%,
+          transparent 74%
+        );
+        background-position: 140% 0;
+        background-repeat: no-repeat;
+        background-size: 220% 100%;
+        animation: startup-codex-logo-shimmer 2200ms cubic-bezier(0.4, 0, 0.2, 1)
+          infinite;
+        -webkit-mask-image: url("data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%20500%20500%22%20fill%3D%22black%22%3E%3Cpath%20d%3D%22M330.34%20313.62h-67.84c-7.65%200-13.85-6.2-13.85-13.85s6.2-13.85%2013.85-13.85h67.84c7.65%200%2013.85%206.2%2013.85%2013.85s-6.2%2013.85-13.85%2013.85Z%22/%3E%3Cpath%20d%3D%22M169.65%20313.38c-2.36%200-4.74-.6-6.93-1.87-6.62-3.83-8.88-12.31-5.05-18.93l23.78-41.08-23.91-43.21c-3.7-6.69-1.28-15.12%205.41-18.82%206.69-3.71%2015.12-1.28%2018.82%205.41l31.51%2056.94-31.64%2054.65c-2.57%204.43-7.22%206.91-12%206.91Z%22/%3E%3Cpath%20d%3D%22M144.61%20144.5c1.42-41.82%2035.79-75.27%2077.95-75.25%2027.89.02%2052.35%2014.68%2066.11%2036.71%2010.93-5.82%2023.41-9.12%2036.65-9.11%2043.05.02%2077.94%2034.94%2077.91%2078%200%2013.24-3.32%2025.72-9.16%2036.64%2022.02%2013.79%2036.66%2038.26%2036.64%2066.15-.02%2042.16-33.52%2076.48-75.34%2077.86-1.42%2041.82-35.78%2075.28-77.94%2075.25-27.89-.02-52.35-14.68-66.11-36.72-10.93%205.82-23.4%209.13-36.65%209.12-43.05-.02-77.94-34.94-77.91-78%200-13.24%203.32-25.72%209.16-36.64-22.02-13.79-36.65-38.26-36.64-66.15.02-42.16%2033.51-76.48%2075.33-77.86ZM297.77%2071.99c-19.24-19.26-45.83-31.17-75.2-31.19-49.23-.03-90.67%2033.39-102.84%2078.79-45.41%2012.12-78.87%2053.52-78.9%20102.76-.02%2029.37%2011.87%2055.97%2031.1%2075.23-2.35%208.79-3.62%2018.03-3.63%2027.56-.03%2058.77%2047.58%20106.44%20106.35%20106.47%209.53%200%2018.77-1.25%2027.55-3.6%2019.24%2019.26%2045.84%2031.18%2075.21%2031.2%2049.24.03%2090.67-33.39%20102.84-78.8%2045.42-12.11%2078.88-53.51%2078.91-102.75.02-29.37-11.87-55.98-31.11-75.24%202.35-8.78%203.62-18.02%203.63-27.55.03-58.77-47.58-106.44-106.35-106.47-9.53%200-18.77%201.25-27.56%203.59Z%22/%3E%3C/svg%3E");
+        mask-image: url("data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%20500%20500%22%20fill%3D%22black%22%3E%3Cpath%20d%3D%22M330.34%20313.62h-67.84c-7.65%200-13.85-6.2-13.85-13.85s6.2-13.85%2013.85-13.85h67.84c7.65%200%2013.85%206.2%2013.85%2013.85s-6.2%2013.85-13.85%2013.85Z%22/%3E%3Cpath%20d%3D%22M169.65%20313.38c-2.36%200-4.74-.6-6.93-1.87-6.62-3.83-8.88-12.31-5.05-18.93l23.78-41.08-23.91-43.21c-3.7-6.69-1.28-15.12%205.41-18.82%206.69-3.71%2015.12-1.28%2018.82%205.41l31.51%2056.94-31.64%2054.65c-2.57%204.43-7.22%206.91-12%206.91Z%22/%3E%3Cpath%20d%3D%22M144.61%20144.5c1.42-41.82%2035.79-75.27%2077.95-75.25%2027.89.02%2052.35%2014.68%2066.11%2036.71%2010.93-5.82%2023.41-9.12%2036.65-9.11%2043.05.02%2077.94%2034.94%2077.91%2078%200%2013.24-3.32%2025.72-9.16%2036.64%2022.02%2013.79%2036.66%2038.26%2036.64%2066.15-.02%2042.16-33.52%2076.48-75.34%2077.86-1.42%2041.82-35.78%2075.28-77.94%2075.25-27.89-.02-52.35-14.68-66.11-36.72-10.93%205.82-23.4%209.13-36.65%209.12-43.05-.02-77.94-34.94-77.91-78%200-13.24%203.32-25.72%209.16-36.64-22.02-13.79-36.65-38.26-36.64-66.15.02-42.16%2033.51-76.48%2075.33-77.86ZM297.77%2071.99c-19.24-19.26-45.83-31.17-75.2-31.19-49.23-.03-90.67%2033.39-102.84%2078.79-45.41%2012.12-78.87%2053.52-78.9%20102.76-.02%2029.37%2011.87%2055.97%2031.1%2075.23-2.35%208.79-3.62%2018.03-3.63%2027.56-.03%2058.77%2047.58%20106.44%20106.35%20106.47%209.53%200%2018.77-1.25%2027.55-3.6%2019.24%2019.26%2045.84%2031.18%2075.21%2031.2%2049.24.03%2090.67-33.39%20102.84-78.8%2045.42-12.11%2078.88-53.51%2078.91-102.75.02-29.37-11.87-55.98-31.11-75.24%202.35-8.78%203.62-18.02%203.63-27.55.03-58.77-47.58-106.44-106.35-106.47-9.53%200-18.77%201.25-27.56%203.59Z%22/%3E%3C/svg%3E");
+        -webkit-mask-position: center;
+        mask-position: center;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .startup-loader__logo {
+          animation: none;
+          opacity: 1;
+        }
+
+        .startup-loader__overlay {
+          animation: none;
+        }
+      }
+
+      @keyframes startup-codex-logo-fade-in {
+        0% {
+          opacity: 0;
+        }
+
+        100% {
+          opacity: 1;
+        }
+      }
+
+      @keyframes startup-codex-logo-shimmer {
+        0% {
+          background-position: 140% 0;
+        }
+
+        100% {
+          background-position: -120% 0;
+        }
+      }
+    </style>
+    <script type="module" crossorigin src="/official/assets/index-D-3V455n.js"></script>
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-Bj-mKKzh.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/preload-helper-Chd9yIcd.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/react-BE0_fAZJ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/logger-VlXfBBlQ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/jsx-runtime-ebkFq_df.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/vscode-api-B799guuX.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/dist-Cya8pHUx.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/tslib.es6-B5Jv-ZTa.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/Combination-SdIXk5x6.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/modifiers.esm-BnVedqZn.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/clsx-Dvwdlz9p.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chevron-DcusO_5C.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/string-DoVAyxAZ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/src-ClLCzxTM.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/monotone-CKRMtPBl.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/math-Br3uWwAb.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-ABZYJK2D-DJBL64l8.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/_createAssigner-D9Bn9m0s.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-S3R3BYOJ-B_CcVm51.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-JA3XYJ7Z-BmxACiu8.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/ccount-CqOziAUI.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/lib-DeTqxYIG.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-configuration-BTquchCK.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-resolved-theme-variant-xDFBgTIX.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/statsig-BdmfNNCa.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/copy-D_WCPQju.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/lib-Bp2TAtv6.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/v4-yNApTAaM.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/app-server-manager-signals-w7HK0qNP.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/global-settings-ie-SDHx2.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/config-queries-BnDNwHSj.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/app-server-manager-hooks-MC_xEqyP.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-global-state-Dv1QOjFI.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-window-type-COloFNqY.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-auth-B63EuMZf.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/product-event-signal-C6y00MgX.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/font-settings-BX-67rCi.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/dist-B7uHcJu-.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/tooltip-dismiss-CiPD4jOq.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/tooltip-BSHnrZI2.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/arrow-left-DMJnhnqD.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-git-stable-metadata-DDqBCSvL.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/check-md-DlfmSgZN.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/open-project-setup-dialog-DTIur99i.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/dist-DzGP97zQ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/dist-DdsuVrEL.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/with-window-Bx_ZNyt_.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/x-BFKl6KI6.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/dialog-layout-BK6qzDHM.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/dropdown-B2ggZhOB.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-OIYGIGL5-CJrBIAxA.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/info-KsIp52Nv.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/error-boundary-LK6T93zS.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/_baseOrderBy-C12L-qrM.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/invalidate-queries-and-broadcast-AuabhOrp.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/codex-api-DrTUwOnh.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/lib-B4EaukS7.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/katex-DTxSPMaJ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/isEmpty-CS-E9_hG.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-remote-connection-states-D0du_Adz.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-EXTU4WIE-BUYVeOhi.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-KS23V3DP-y9KNEPws.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-MI3HLSF2-du820Xtl.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-ATLVNIR6-DP5h076a.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-CVBHYZKI-wgukDUwP.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-JZLCHNYA-B8a-4Wf2.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/path-BMC90ub1.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/array-Di_Lvpzq.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/line-BsrwVjsz.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-HN2XXSSU-CmiFNGQ5.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-QXUST7PY-BtCDnvTY.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chunk-N4CR4FBY-O8pLKOkd.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/pdf-qI8F2e6n.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/format-relative-date-time-Bia3xjyp.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/loading-page-BlHYhSXp.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/segmented-toggle-Bra1CxSq.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/toast-signal-BRACgwrY.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/toggle-BfxflrTc.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-permissions-mode-BuZhkYOo.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/diff-view-mode-DIEiyLLM.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-is-background-subagents-enabled-DLEmpSNH.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/arrow-top-right-DvsjkAJQ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/check-circle-filled-Dd7KtKMJ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/link-external-CLjA2D-9.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/trash-MFsv13c5.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/regenerate-ei7PsrzH.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/projectless-thread-Ba1sGCPM.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/electron-menu-shortcuts-CcziXTyR.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-hotkey-ZqJZNHrU.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-model-settings-D-IrMVLP.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-connected-remote-connections-BZQuGP1A.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/plugins-cards-grid-h88kymIn.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/banner-DHSr9pZq.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/settings-content-layout-BjONwvMQ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/initial-route-atom-N48PJ4Fm.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-start-new-conversation-DN0zm3mn.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/laptop-DWvdH_oy.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/control-group-DOzRCsgY.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/settings-row-BvM2YylR.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-merged-ref-CEJz7YoW.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/plugins-page-BtSNkn7-.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/alert-CxepwHjJ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/analytics-logger-provider-D3wIfH10.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/codex-avatar-CDUa11Ip.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/skus-Dd2BTypC.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/local-environments-utils-BUCgQCYq.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/gpu-tearing-debug-settings-D1_imFfE.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-navigate-to-local-conversation-frmxCdv4.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/worktree-paths-CrrOJR2G.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/external-agent-config-utils-CFkmJoMZ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/dist-Ww2HMLDJ.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/popover-CH0le2W4.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/chronicle-setup-state-CN9xT5ku.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/settings-sections-DewZtWS1.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-browser-agent-availability-BzEed0oY.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/worktree-D122e9PI.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/settings-host-selection-BOLr2K2-.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/settings-shared-CP3mMT1x.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/skills-page-BCdOEWii.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/use-usage-settings-access-DAYfQFwx.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/computer-use-app-approvals-query-86O7_Xw2.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/settings-host-context-DQTBRp_G.js">
+    <link rel="modulepreload" crossorigin href="/official/assets/get-project-name-gzYcN2Zc.js">
+    <link rel="stylesheet" crossorigin href="/official/assets/dialog-layout-CyrLYBi9.css">
+    <link rel="stylesheet" crossorigin href="/official/assets/dropdown-D5D_cQD4.css">
+    <link rel="stylesheet" crossorigin href="/official/assets/use-model-settings-DSYwWnRy.css">
+    <link rel="stylesheet" crossorigin href="/official/assets/plugins-cards-grid-DoKhPslE.css">
+    <link rel="stylesheet" crossorigin href="/official/assets/plugins-page-K_5trxVX.css">
+    <link rel="stylesheet" crossorigin href="/official/assets/codex-avatar-D82knaKt.css">
+    <link rel="stylesheet" crossorigin href="/official/assets/index-Demj-qjn.css">
+  <meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; img-src &#39;self&#39; app: blob: data: https:; child-src &#39;self&#39; blob: https://*.web-sandbox.oaiusercontent.com https://web-sandbox.oaiusercontent.com; frame-src &#39;self&#39; blob: https://*.web-sandbox.oaiusercontent.com https://web-sandbox.oaiusercontent.com; worker-src &#39;self&#39; blob:; script-src &#39;self&#39; &#39;sha256-Z2/iFzh9VMlVkEOar1f/oSHWwQk3ve1qk/C2WdsC4Xk=&#39; &#39;wasm-unsafe-eval&#39;; style-src &#39;self&#39; &#39;unsafe-inline&#39;; font-src &#39;self&#39; data:; media-src &#39;self&#39; app: blob: data:; connect-src &#39;self&#39; https://ab.chatgpt.com https://cdn.openai.com;">
+</head>
+  <body tabindex="0" style="outline: none">
+    <div id="root">
+      <div class="startup-loader" aria-hidden="true">
+        <div class="startup-loader__logo">
+          <svg
+            class="startup-loader__base"
+            viewBox="0 0 500 500"
+            fill="currentColor"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              d="M330.34 313.62h-67.84c-7.65 0-13.85-6.2-13.85-13.85s6.2-13.85 13.85-13.85h67.84c7.65 0 13.85 6.2 13.85 13.85s-6.2 13.85-13.85 13.85Z"
+            />
+            <path
+              d="M169.65 313.38c-2.36 0-4.74-.6-6.93-1.87-6.62-3.83-8.88-12.31-5.05-18.93l23.78-41.08-23.91-43.21c-3.7-6.69-1.28-15.12 5.41-18.82 6.69-3.71 15.12-1.28 18.82 5.41l31.51 56.94-31.64 54.65c-2.57 4.43-7.22 6.91-12 6.91Z"
+            />
+            <path
+              d="M144.61 144.5c1.42-41.82 35.79-75.27 77.95-75.25 27.89.02 52.35 14.68 66.11 36.71 10.93-5.82 23.41-9.12 36.65-9.11 43.05.02 77.94 34.94 77.91 78 0 13.24-3.32 25.72-9.16 36.64 22.02 13.79 36.66 38.26 36.64 66.15-.02 42.16-33.52 76.48-75.34 77.86-1.42 41.82-35.78 75.28-77.94 75.25-27.89-.02-52.35-14.68-66.11-36.72-10.93 5.82-23.4 9.13-36.65 9.12-43.05-.02-77.94-34.94-77.91-78 0-13.24 3.32-25.72 9.16-36.64-22.02-13.79-36.65-38.26-36.64-66.15.02-42.16 33.51-76.48 75.33-77.86ZM297.77 71.99c-19.24-19.26-45.83-31.17-75.2-31.19-49.23-.03-90.67 33.39-102.84 78.79-45.41 12.12-78.87 53.52-78.9 102.76-.02 29.37 11.87 55.97 31.1 75.23-2.35 8.79-3.62 18.03-3.63 27.56-.03 58.77 47.58 106.44 106.35 106.47 9.53 0 18.77-1.25 27.55-3.6 19.24 19.26 45.84 31.18 75.21 31.2 49.24.03 90.67-33.39 102.84-78.8 45.42-12.11 78.88-53.51 78.91-102.75.02-29.37-11.87-55.98-31.11-75.24 2.35-8.78 3.62-18.02 3.63-27.55.03-58.77-47.58-106.44-106.35-106.47-9.53 0-18.77 1.25-27.56 3.59Z"
+            />
+          </svg>
+          <div class="startup-loader__overlay"></div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

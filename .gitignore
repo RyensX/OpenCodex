@@ -1,0 +1,47 @@
+# Original app bundle (reference only)
+Codex.app/
+
+# Dependencies
+node_modules/
+
+# Build outputs
+out/
+dist/
+cache/
+
+# Upstream ASAR extracts and build-time copies (all generated)
+src/
+!gateway/src/
+!gateway/src/**
+
+# Version check state (local only)
+scripts/.versions.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.temp
+
+# Native binaries (downloaded via npm in CI)
+resources/bin/
+resources/codex
+resources/codex.exe
+.claude/
