@@ -421,6 +421,15 @@ function patchOfficialJsModuleSpecifiers(source, authToken = "") {
   );
 }
 
+/** 官方源码/diff 渲染器用 new URL(worker.js, import.meta.url) 创建 module worker，也必须带认证 query。 */
+function patchOfficialJsWorkerUrls(source, authToken = "") {
+  return source.replace(
+    /new URL\((["'`])((?:\.\/)?[^"'`?#]+\.(?:js|mjs))\1\s*,\s*import\.meta\.url\)/g,
+    (_match, quote, specifier) =>
+      `new URL(${quote}${specifier}?${officialAssetPatchQuery(authToken)}${quote},import.meta.url)`
+  );
+}
+
 /** 恢复历史 turn 时旧 renderer 转换漏了 firstTurnWorkItemStartedAtMs，导致折叠摘要退回“上 x 条消息”。 */
 function patchAppServerManagerSignalsChunk(source) {
   const alreadyPatched =
@@ -444,7 +453,7 @@ function patchAppServerManagerSignalsChunk(source) {
 function patchOfficialAsset(reqPath, data, authToken = "") {
   if (!shouldPatchOfficialAsset(reqPath)) return data;
   const source = data.toString("utf-8");
-  const withPatchedImports = patchOfficialJsModuleSpecifiers(source, authToken);
+  const withPatchedImports = patchOfficialJsWorkerUrls(patchOfficialJsModuleSpecifiers(source, authToken), authToken);
   const patched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
     ? patchAppServerManagerSignalsChunk(withPatchedImports)
     : withPatchedImports;
