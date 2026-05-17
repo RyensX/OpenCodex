@@ -50,9 +50,9 @@ const AUTH_TOKEN_TTL_MS = Math.max(
 const DEBUG_LOGS = process.env.CODEX_WEB_DEBUG === "1" || process.env.CODEX_WEB_DEBUG === "true";
 const IPC_SLOW_LOG_MS = Number(process.env.CODEX_WEB_SLOW_LOG_MS || 750);
 const LOCAL_FILE_TOKEN_TTL_MS = Math.max(1_000, Number(process.env.CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS || 5 * 60 * 1000));
-const OFFICIAL_ASSET_PATCH_QUERY = "codex-web-worked-for=1";
+const PATCHED_OFFICIAL_PREFIX = "/official-patched/";
 let officialBundle = null;
-let hasWarnedWorkedForPatchMiss = false;
+let hasWarnedHistoryPatchMiss = false;
 // AsyncLocalStorage 用来把当前请求的 clientId/remoteAddress 传入更深层的 IPC handler。
 const requestContext = new AsyncLocalStorage();
 // 这些 channel 必须优先定向回触发请求的浏览器，避免局域网多设备访问时互相收到审批/fetch 响应。
@@ -224,7 +224,6 @@ function authTokenFromRequest(req, url = null) {
   if (authorizationToken) return authorizationToken;
   const queryToken = url && url.searchParams ? String(url.searchParams.get("token") || "").trim() : "";
   if (queryToken) return queryToken;
-  if (!PERSIST_AUTH_TOKEN) return "";
   const cookies = parseCookies(req.headers.cookie || "");
   return String(cookies[COOKIE_NAME] || "").trim();
 }
@@ -246,9 +245,10 @@ function isAuthed(req, url = null) {
   return authResultForRequest(req, url).authenticated;
 }
 
-function authCookieHeader(token, expiresAtMs) {
+function authCookieHeader(token, expiresAtMs, persistent = PERSIST_AUTH_TOKEN) {
   const maxAge = Math.max(0, Math.floor((expiresAtMs - Date.now()) / 1000));
-  return `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+  const maxAgePart = persistent ? `; Max-Age=${maxAge}` : "";
+  return `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax${maxAgePart}`;
 }
 
 function clearAuthCookieHeader() {
@@ -256,7 +256,7 @@ function clearAuthCookieHeader() {
 }
 
 function authRefreshHeaders(auth) {
-  if (!PERSIST_AUTH_TOKEN || !auth || !auth.authenticated || !auth.token || !auth.expiresAtMs) return {};
+  if (!auth || !auth.authenticated || !auth.token || !auth.expiresAtMs) return {};
   return { "set-cookie": authCookieHeader(auth.token, auth.expiresAtMs) };
 }
 
@@ -295,39 +295,28 @@ function readBody(req) {
   });
 }
 
-function officialAssetPatchQuery(authToken = "") {
-  const params = [OFFICIAL_ASSET_PATCH_QUERY];
-  if (!PERSIST_AUTH_TOKEN && authToken) params.push(`token=${encodeURIComponent(authToken)}`);
-  return params.join("&");
-}
-
-function authenticatedScriptSrc(src, authToken = "") {
-  if (!PERSIST_AUTH_TOKEN && authToken) return `${src}?token=${encodeURIComponent(authToken)}`;
-  return src;
-}
-
 /** 给官方 renderer HTML 注入 web-shell polyfill 和运行时配置。 */
-function transformOfficialHtml(rawHtml, authToken = "") {
+function transformOfficialHtml(rawHtml) {
   let html = rawHtml;
   html = html.replace(/(src|href)=["']\/(?!official\/)([^"'#?]+)["']/g, '$1="/official/$2"');
   html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
   const base = [
     '<base href="/official/">',
-    `<script src="${authenticatedScriptSrc("/codex-web-config.js", authToken)}"></script>`,
-    `<script src="${authenticatedScriptSrc("/codex-bridge-polyfill.js", authToken)}"></script>`,
+    '<script src="/codex-web-config.js"></script>',
+    '<script src="/codex-bridge-polyfill.js"></script>',
   ].join("\n    ");
   if (/<head[^>]*>/i.test(html)) {
     html = html.replace(/<head([^>]*)>/i, `<head$1>\n    ${base}`);
   }
-  return patchOfficialHtmlForWeb(html, authToken);
+  return patchOfficialHtmlForWeb(html);
 }
 
-/** 给少量运行时 patch 过的官方 chunk 加 query，绕开浏览器 immutable 缓存。 */
-function patchOfficialAssetUrls(rawHtml, authToken = "") {
+/** 给少量运行时 patch 过的官方 chunk 换路径命名空间，绕开浏览器 immutable 缓存。 */
+function patchOfficialAssetUrls(rawHtml) {
   return rawHtml
     .replace(
       /((?:src|href)=["']\/official\/assets\/[^"'?#]+\.js)(["'])/g,
-      (_match, prefix, quote) => `${prefix}?${officialAssetPatchQuery(authToken)}${quote}`
+      (_match, prefix, quote) => `${prefix.replace("/official/assets/", "/official-patched/assets/")}${quote}`
     );
 }
 
@@ -339,8 +328,8 @@ function patchOfficialCspForWeb(rawHtml) {
     .replace("'wasm-unsafe-eval'", "'wasm-unsafe-eval' 'unsafe-eval'");
 }
 
-function patchOfficialHtmlForWeb(rawHtml, authToken = "") {
-  return patchOfficialCspForWeb(patchOfficialAssetUrls(rawHtml, authToken));
+function patchOfficialHtmlForWeb(rawHtml) {
+  return patchOfficialCspForWeb(patchOfficialAssetUrls(rawHtml));
 }
 
 /** 查找 provider 准备好的官方 renderer 入口；运行链路不再依赖 CodexDesktop-Rebuild 的 src/ 快照。 */
@@ -392,16 +381,17 @@ function createWebShellIndexResponse() {
   return html;
 }
 
-function isPublicOfficialStyleAsset(reqPath) {
+function isPublicOfficialAsset(reqPath) {
+  if (/^\/official-patched\/assets\/[^/]+$/.test(reqPath)) return true;
   return /^\/official\/assets\/[^/]+\.(?:css|woff2?|ttf|otf)$/.test(reqPath);
 }
 
 /** 读取并转换官方 renderer HTML，作为浏览器访问 Codex 的主页面。 */
-function createRendererResponse(authToken = "") {
+function createRendererResponse() {
   const located = locateOfficialIndex();
   if (!located) return null;
   const html = readText(located.file);
-  return transformOfficialHtml(html, authToken);
+  return transformOfficialHtml(html);
 }
 
 /** 判断是否应该回退到 SPA shell；刷新 /local/:id 这类官方前端路由时不能返回 404。 */
@@ -414,26 +404,9 @@ function isAppShellRoute(req, pathname) {
   return !accept || accept.includes("text/html") || accept.includes("*/*");
 }
 
-/** 所有官方 JS 都可能包含相对 import，需要统一加 query，避免新旧模块图混用。 */
+/** 所有响应期 patch 过的官方 JS 统一从独立路径命名空间加载，避免和官方 immutable 缓存混用。 */
 function shouldPatchOfficialAsset(reqPath) {
-  return /^\/official\/assets\/[^/]+\.js$/.test(reqPath);
-}
-
-/** JS module graph 内的相对 import 也要带同一个 query，否则会出现同一 chunk 两份实例。 */
-function patchOfficialJsModuleSpecifiers(source, authToken = "") {
-  return source.replace(
-    /((?:from|import)\s*(?:\(\s*)?)(["'`])(\.\/[^"'`?#]+\.js)\2/g,
-    (_match, prefix, quote, specifier) => `${prefix}${quote}${specifier}?${officialAssetPatchQuery(authToken)}${quote}`
-  );
-}
-
-/** 官方源码/diff 渲染器用 new URL(worker.js, import.meta.url) 创建 module worker，也必须带认证 query。 */
-function patchOfficialJsWorkerUrls(source, authToken = "") {
-  return source.replace(
-    /new URL\((["'`])((?:\.\/)?[^"'`?#]+\.(?:js|mjs))\1\s*,\s*import\.meta\.url\)/g,
-    (_match, quote, specifier) =>
-      `new URL(${quote}${specifier}?${officialAssetPatchQuery(authToken)}${quote},import.meta.url)`
-  );
+  return /^\/official-patched\/assets\/[^/]+\.js$/.test(reqPath);
 }
 
 /** 恢复历史 turn 时旧 renderer 转换漏了 firstTurnWorkItemStartedAtMs，导致折叠摘要退回“上 x 条消息”。 */
@@ -444,9 +417,9 @@ function patchAppServerManagerSignalsChunk(source) {
   const historyTurnShape =
     /(turnStartedAtMs:([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.startedAt\),)(finalAssistantStartedAtMs:\2\(\3\.completedAt\),status:\3\.status)/;
   if (!historyTurnShape.test(source)) {
-    if (!hasWarnedWorkedForPatchMiss) {
-      hasWarnedWorkedForPatchMiss = true;
-      console.warn("[gateway] app-server-manager worked-for patch skipped: current bundle shape did not match");
+    if (!hasWarnedHistoryPatchMiss) {
+      hasWarnedHistoryPatchMiss = true;
+      console.warn("[gateway] app-server-manager history patch skipped: current bundle shape did not match");
     }
     return source;
   }
@@ -456,19 +429,22 @@ function patchAppServerManagerSignalsChunk(source) {
 }
 
 /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
-function patchOfficialAsset(reqPath, data, authToken = "") {
+function patchOfficialAsset(reqPath, data) {
   if (!shouldPatchOfficialAsset(reqPath)) return data;
   const source = data.toString("utf-8");
-  const withPatchedImports = patchOfficialJsWorkerUrls(patchOfficialJsModuleSpecifiers(source, authToken), authToken);
   const patched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
-    ? patchAppServerManagerSignalsChunk(withPatchedImports)
-    : withPatchedImports;
+    ? patchAppServerManagerSignalsChunk(source)
+    : source;
   return Buffer.from(patched, "utf-8");
 }
 
 /** 将 URL path 映射到 web-shell 或官方 asset 的真实文件。 */
 function staticFile(reqPath) {
   if (reqPath === "/codex-bridge-polyfill.js") return path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js");
+  if (reqPath.startsWith(PATCHED_OFFICIAL_PREFIX)) {
+    const rel = reqPath.slice(PATCHED_OFFICIAL_PREFIX.length);
+    return locateOfficialAsset(rel);
+  }
   if (reqPath.startsWith("/official/")) {
     const rel = reqPath.slice("/official/".length);
     return locateOfficialAsset(rel);
@@ -534,7 +510,7 @@ async function handleAuthLogin(req, res) {
     },
     {
       "cache-control": "no-store",
-      "set-cookie": PERSIST_AUTH_TOKEN ? authCookieHeader(issued.token, issued.expiresAtMs) : clearAuthCookieHeader(),
+      "set-cookie": authCookieHeader(issued.token, issued.expiresAtMs),
     }
   );
 }
@@ -583,14 +559,15 @@ function sendUnauthorized(req, res) {
 function cacheControlForRequestPath(reqPath) {
   if (process.env.CODEX_WEB_DISABLE_ASSET_CACHE === "1") return "no-store";
   if (shouldPatchOfficialAsset(reqPath)) return "no-store";
+  if (reqPath.startsWith("/official-patched/assets/")) return "public, max-age=31536000, immutable";
   if (reqPath.startsWith("/official/assets/")) return "public, max-age=31536000, immutable";
   if (reqPath.startsWith("/official/")) return "public, max-age=3600";
   return "no-store";
 }
 
 /** 发送静态文件，并按路径套用合适的缓存策略。 */
-function serveFile(res, file, status = 200, reqPath = "", authToken = "") {
-  const data = patchOfficialAsset(reqPath, fs.readFileSync(file), authToken);
+function serveFile(res, file, status = 200, reqPath = "") {
+  const data = patchOfficialAsset(reqPath, fs.readFileSync(file));
   send(res, status, { "content-type": mimeType(file), "cache-control": cacheControlForRequestPath(reqPath) }, data);
 }
 
@@ -926,7 +903,7 @@ async function createGateway() {
     if (pathname === "/api/auth/logout") return handleAuthLogout(req, res, url);
     if (pathname === "/login") return send(res, 302, { location: "/" }, "");
 
-    if (isPublicOfficialStyleAsset(pathname)) {
+    if (isPublicOfficialAsset(pathname)) {
       const file = staticFile(pathname);
       if (file && exists(file)) return serveFile(res, file, 200, pathname);
     }
@@ -970,10 +947,9 @@ async function createGateway() {
     }
   } catch {}
   if (!authToken && requestAuthToken) authToken = requestAuthToken;
-  const wsTokenQuery = authToken ? "?token=" + encodeURIComponent(authToken) : "";
   window.__CODEX_WEB_CONFIG__ = {
   gatewayBaseUrl: location.origin,
-  gatewayWsUrl: location.origin.replace(/^http/, "ws") + "/ws" + wsTokenQuery,
+  gatewayWsUrl: location.origin.replace(/^http/, "ws") + "/ws",
   authToken,
   authExpiresAtMs,
   persistAuthToken,
@@ -1154,7 +1130,7 @@ async function createGateway() {
 
     if (pathname === "/official-index.patched.html") {
       await ensureAppServerStarted();
-      const html = createRendererResponse(authTokenFromRequest(req, url));
+      const html = createRendererResponse();
       if (!html) {
         return send(res, 404, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }, "Official renderer bundle is not available yet.");
       }
@@ -1162,7 +1138,7 @@ async function createGateway() {
     }
 
     const file = staticFile(pathname);
-    if (file && exists(file)) return serveFile(res, file, 200, pathname, authTokenFromRequest(req, url));
+    if (file && exists(file)) return serveFile(res, file, 200, pathname);
 
     if (isAppShellRoute(req, pathname)) {
       // 所有无扩展名前端路由都走同一个 bootstrap，让官方 router 接管 /local、/remote 等路径。

@@ -55,19 +55,6 @@
     return result;
   }
 
-  function gatewayWsUrlWithAuth() {
-    const rawUrl = cfg.gatewayWsUrl || "";
-    const token = gatewayAuthToken();
-    if (!rawUrl || !token) return rawUrl;
-    try {
-      const url = new URL(rawUrl, location.href);
-      if (!url.searchParams.has("token")) url.searchParams.set("token", token);
-      return url.href;
-    } catch {
-      return rawUrl;
-    }
-  }
-
   /** 官方 renderer 依赖 crypto.randomUUID，旧浏览器缺失时在 web-shell 侧补齐。 */
   function installRandomUUIDPolyfill() {
     let cryptoObject = w.crypto || {};
@@ -1588,7 +1575,7 @@
   function connect() {
     if (!cfg.gatewayWsUrl || !("WebSocket" in w)) return;
     try {
-      ws = new WebSocket(gatewayWsUrlWithAuth());
+      ws = new WebSocket(cfg.gatewayWsUrl || "");
     } catch (error) {
       console.warn("[codex-web] failed to open gateway socket", error);
       scheduleReconnect();
