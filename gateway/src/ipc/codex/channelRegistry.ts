@@ -538,6 +538,13 @@ const BRIDGE_MAP_ENTRIES = [
     notes: "先在允许的工作区内尝试本地 git status 兜底，再按需转发 app-server。",
   },
   {
+    renderer: "apply-patch",
+    gateway: "apply-patch",
+    appServer: "n/a",
+    status: "bridge",
+    notes: "按官方 review_patch/thread_diff payload 在 allowlist 内执行 git apply，返回 applied/skipped/conflicted 路径。",
+  },
+  {
     renderer: "list-archived-threads",
     gateway: "list-archived-threads",
     appServer: "n/a",

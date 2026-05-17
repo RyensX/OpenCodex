@@ -85,6 +85,7 @@
 | file:readPreview | file:readPreview | file/readPreview | 已桥接 | 在 gateway 内做 workspace-root 校验后处理。 |
 | file:stat | file:stat | file/stat | 已桥接 | 在 gateway 内做 workspace-root 校验后处理。 |
 | git:status | git:status | git/status | 已桥接 | 先在允许的工作区内尝试本地 git status 兜底，再按需转发 app-server。 |
+| apply-patch | apply-patch | n/a | 已桥接 | 按官方 `review_patch`/`thread_diff` payload 在 allowlist 内执行 `git apply`，返回 applied/skipped/conflicted 路径。 |
 | list-archived-threads | list-archived-threads | n/a | 已桥接 | 从本机 Codex Desktop globalState 返回归档会话列表。 |
 | archive-conversation | archive-conversation | n/a | 已桥接 | 在本机 Codex Desktop globalState 中把会话标记为归档。 |
 | unarchive-conversation | unarchive-conversation | n/a | 已桥接 | 从本机 Codex Desktop globalState 的归档列表中移除该会话。 |

@@ -803,6 +803,8 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return gitIpc.ghCliStatus();
       case "stable-metadata":
         return gitIpc.gitStableMetadataForPayload(payload || {});
+      case "apply-patch":
+        return gitIpc.applyPatchForPayload(payload || {});
       case "current-branch":
         return gitIpc.currentBranchForPayload(payload || {});
       case "recent-branches":

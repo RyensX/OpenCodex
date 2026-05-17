@@ -567,6 +567,27 @@ function createGitIpcHandlers(deps) {
     }
   }
 
+  function gitExecWithInput(gitRoot, args, input, options = {}) {
+    try {
+      const stdout = execFileSync("git", ["-C", gitRoot, ...args], {
+        encoding: options.encoding || "utf8",
+        input,
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: options.timeoutMs || GIT_OPERATION_TIMEOUT_MS,
+        maxBuffer: options.maxBuffer || GIT_DIFF_MAX_BUFFER_BYTES,
+        env: { ...process.env, GIT_NO_LAZY_FETCH: "1" },
+      });
+      return { success: true, stdout: String(stdout || ""), stderr: "", code: 0 };
+    } catch (error) {
+      return {
+        success: false,
+        stdout: error && error.stdout ? String(error.stdout) : "",
+        stderr: error && error.stderr ? String(error.stderr) : "",
+        code: typeof error.status === "number" ? error.status : 1,
+      };
+    }
+  }
+
   function normalizeGitRelativePath(gitRoot, filePath) {
     if (typeof filePath !== "string" || !filePath.trim()) return null;
     const stripped = filePath.trim().replace(/^([ab])[\\/]/, "");
@@ -917,6 +938,96 @@ function createGitIpcHandlers(deps) {
     return map;
   }
 
+  function pathsFromUnifiedDiff(diffText) {
+    const paths = [];
+    for (const line of String(diffText || "").split(/\r?\n/)) {
+      if (line.startsWith("diff --git ")) {
+        const header = parseDiffHeader(line);
+        if (header) {
+          paths.push(header.oldPath, header.newPath);
+        }
+        continue;
+      }
+      if (line.startsWith("+++ b/") || line.startsWith("--- a/")) {
+        paths.push(line.slice(6));
+      }
+    }
+    return uniqueGitPaths(paths.filter((entry) => entry && entry !== "/dev/null"));
+  }
+
+  function applyPatchResult(status, paths, options = {}) {
+    return {
+      status,
+      appliedPaths: options.appliedPaths || (status === "success" ? paths : []),
+      skippedPaths: options.skippedPaths || [],
+      conflictedPaths: options.conflictedPaths || (status === "error" ? paths : []),
+      ...(options.errorCode ? { errorCode: options.errorCode } : {}),
+      ...(options.error ? { error: options.error, message: options.error } : {}),
+    };
+  }
+
+  function applyPatchArgsForTarget(target, revert) {
+    const args = ["apply", "--whitespace=nowarn"];
+    if (revert) args.push("-R");
+    if (target === "staged") args.push("--cached");
+    return args;
+  }
+
+  function runApplyPatchTarget(gitRoot, diff, target, revert) {
+    return gitExecWithInput(gitRoot, applyPatchArgsForTarget(target, revert), diff, {
+      maxBuffer: GIT_DIFF_MAX_BUFFER_BYTES,
+    });
+  }
+
+  function applyPatchForPayload(payload) {
+    const params = payloadParams(payload);
+    const diff = params && typeof params.diff === "string" ? params.diff : "";
+    const paths = pathsFromUnifiedDiff(diff);
+    const target = params && typeof params.target === "string" ? params.target : "unstaged";
+    const revert = !!(params && params.revert);
+    const requestedPath = resolveGitTargetPath(params);
+
+    if (!requestedPath) {
+      return applyPatchResult("error", paths, { errorCode: "not-git-repo", error: "Missing cwd" });
+    }
+    const gitRoot = findGitRoot(requestedPath);
+    if (!gitRoot) {
+      return applyPatchResult("error", paths, { errorCode: "not-git-repo", error: "Not a git repository" });
+    }
+    if (!diff.trim()) {
+      return applyPatchResult("success", []);
+    }
+
+    if (target === "staged-and-unstaged") {
+      const stagedResult = runApplyPatchTarget(gitRoot, diff, "staged", revert);
+      if (!stagedResult.success) {
+        return applyPatchResult("error", paths, {
+          conflictedPaths: paths,
+          error: stagedResult.stderr || stagedResult.stdout || "Failed to apply patch",
+        });
+      }
+      const unstagedResult = runApplyPatchTarget(gitRoot, diff, "unstaged", revert);
+      if (!unstagedResult.success) {
+        return applyPatchResult("partial-success", paths, {
+          appliedPaths: paths,
+          conflictedPaths: paths,
+          error: unstagedResult.stderr || unstagedResult.stdout || "Failed to apply patch",
+        });
+      }
+      return applyPatchResult("success", paths);
+    }
+
+    const normalizedTarget = target === "staged" ? "staged" : "unstaged";
+    const result = runApplyPatchTarget(gitRoot, diff, normalizedTarget, revert);
+    if (!result.success) {
+      return applyPatchResult("error", paths, {
+        conflictedPaths: paths,
+        error: result.stderr || result.stdout || "Failed to apply patch",
+      });
+    }
+    return applyPatchResult("success", paths);
+  }
+
   function escapePatchLine(line) {
     return String(line).replace(/\r?\n$/, "");
   }
@@ -1239,6 +1350,8 @@ function createGitIpcHandlers(deps) {
         return reviewDiffForPayload(params);
       case "review-patch":
         return reviewPatchForPayload(params);
+      case "apply-patch":
+        return applyPatchForPayload(params);
       case "submodule-paths":
         return gitSubmodulePathsForPayload(params);
       case "recent-branches":
@@ -1267,6 +1380,7 @@ function createGitIpcHandlers(deps) {
 
 
   return {
+    applyPatchForPayload,
     baseBranchForPayload,
     checkoutGitBranchForPayload,
     createGitBranchForPayload,
