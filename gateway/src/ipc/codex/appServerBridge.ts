@@ -1,6 +1,12 @@
 // @ts-nocheck
 export {};
 
+const {
+  enrichNotificationForReviewDiff,
+  enrichThreadForReviewDiff,
+  enrichTurnListForReviewDiff,
+} = require("./reviewDiffSnapshots");
+
 function createAppServerBridge(deps) {
   const appServer = deps.appServer;
   const logger = deps.logger;
@@ -55,20 +61,22 @@ function createAppServerBridge(deps) {
     return changed ? { ...thread, turns } : thread;
   }
 
-  function enrichWorkedForAppServerResult(method, result) {
+  function enrichAppServerResultForRenderer(method, result) {
     if (!result || typeof result !== "object") return result;
     if (method === "thread/resume" || method === "thread/read") {
-      const thread = enrichWorkedForThreadTimings(result.thread);
+      const timedThread = enrichWorkedForThreadTimings(result.thread);
+      const thread = enrichThreadForReviewDiff(timedThread);
       return thread !== result.thread ? { ...result, thread } : result;
     }
     if (method === "thread/turns/list" && Array.isArray(result.data)) {
       let changed = false;
-      const data = result.data.map((turn) => {
+      const timedData = result.data.map((turn) => {
         const enriched = enrichWorkedForTurnTiming(turn);
         if (enriched !== turn) changed = true;
         return enriched;
       });
-      return changed ? { ...result, data } : result;
+      const data = enrichTurnListForReviewDiff(timedData);
+      return changed || data !== result.data ? { ...result, data } : result;
     }
     return result;
   }
@@ -95,7 +103,7 @@ function createAppServerBridge(deps) {
       if (!appServer || !appServer.isConnected()) {
         throw new Error(`app-server is not connected for ${appServerMethod}`);
       }
-      return enrichWorkedForAppServerResult(appServerMethod, await appServer.request(appServerMethod, appServerPayload));
+      return enrichAppServerResultForRenderer(appServerMethod, await appServer.request(appServerMethod, appServerPayload));
     } catch (error) {
       logger && logger.warn(`[app-server] ${appServerMethod} failed`, error);
       throw error;
@@ -164,6 +172,7 @@ function createAppServerBridge(deps) {
 
   return {
     callAppServer,
+    enrichNotificationForReviewDiff,
     listModelsForHost,
     readCodexConfig,
     respondToAppServerRequest,

@@ -4,6 +4,7 @@ export {};
 const { spawn } = require("child_process");
 const net = require("net");
 const path = require("path");
+const { enrichNotificationForReviewDiff } = require("./ipc/codex/reviewDiffSnapshots");
 
 let WebSocketImpl = globalThis.WebSocket;
 try {
@@ -308,20 +309,21 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
   function broadcastNotification(method, payload) {
     if (!method) return;
     const normalized = String(method);
+    const notificationPayload = enrichNotificationForReviewDiff(normalized, payload);
     scheduleCacheRefresh(invalidateCacheForNotification(normalized));
     if (typeof broadcast !== "function") return;
-    if (normalized === "turn/started" && payload && typeof payload === "object") {
-      const threadId = typeof payload.threadId === "string" ? payload.threadId : null;
-      const turnId = payload.turn && typeof payload.turn.id === "string" ? payload.turn.id : null;
+    if (normalized === "turn/started" && notificationPayload && typeof notificationPayload === "object") {
+      const threadId = typeof notificationPayload.threadId === "string" ? notificationPayload.threadId : null;
+      const turnId = notificationPayload.turn && typeof notificationPayload.turn.id === "string" ? notificationPayload.turn.id : null;
       if (threadId && turnId) {
         pendingTurnsByThreadId.set(threadId, {
           turnId,
-          startedAt: payload.turn.startedAt ?? Math.floor(Date.now() / 1000),
+          startedAt: notificationPayload.turn.startedAt ?? Math.floor(Date.now() / 1000),
         });
       }
     }
-    if (normalized === "turn/completed" && payload && typeof payload === "object") {
-      const threadId = typeof payload.threadId === "string" ? payload.threadId : null;
+    if (normalized === "turn/completed" && notificationPayload && typeof notificationPayload === "object") {
+      const threadId = typeof notificationPayload.threadId === "string" ? notificationPayload.threadId : null;
       if (threadId) {
         pendingTurnsByThreadId.delete(threadId);
         const timer = pendingTurnIdleTimers.get(threadId);
@@ -337,32 +339,32 @@ function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath 
         payload: {
           hostId: "local",
           method: normalized,
-          params: payload,
+          params: notificationPayload,
         },
       },
-      { channel: `app-server:${normalized}`, payload },
-      { channel: normalized, payload },
+      { channel: `app-server:${normalized}`, payload: notificationPayload },
+      { channel: normalized, payload: notificationPayload },
     ];
     if (colonVariant !== normalized) {
-      envelopes.push({ channel: colonVariant, payload });
+      envelopes.push({ channel: colonVariant, payload: notificationPayload });
     }
     if (dashVariant !== normalized && dashVariant !== colonVariant) {
-      envelopes.push({ channel: dashVariant, payload });
+      envelopes.push({ channel: dashVariant, payload: notificationPayload });
     }
     for (const entry of envelopes) {
       broadcast(entry);
     }
     if (
       normalized === "thread/status/changed" &&
-      payload &&
-      typeof payload === "object" &&
-      payload.status &&
-      payload.status.type === "idle" &&
-      typeof payload.threadId === "string" &&
-      pendingTurnsByThreadId.has(payload.threadId) &&
-      !pendingTurnIdleTimers.has(payload.threadId)
+      notificationPayload &&
+      typeof notificationPayload === "object" &&
+      notificationPayload.status &&
+      notificationPayload.status.type === "idle" &&
+      typeof notificationPayload.threadId === "string" &&
+      pendingTurnsByThreadId.has(notificationPayload.threadId) &&
+      !pendingTurnIdleTimers.has(notificationPayload.threadId)
     ) {
-      const threadId = payload.threadId;
+      const threadId = notificationPayload.threadId;
       const timer = setTimeout(() => {
         pendingTurnIdleTimers.delete(threadId);
         const pendingTurn = pendingTurnsByThreadId.get(threadId);

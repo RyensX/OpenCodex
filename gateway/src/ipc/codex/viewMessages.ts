@@ -136,6 +136,11 @@ function createViewMessageHandlers(deps) {
         }
         return true;
       }
+      if (payload.type === "update-diff-if-open") {
+        // 审查侧栏 diff 刷新是 renderer 发给 Desktop host 的通知型消息。
+        // Web 侧当前由同一个 renderer 持有 diff 状态，这里显式 ACK，避免落入通用 noop 或未知 IPC。
+        return true;
+      }
       if (DESKTOP_VIEW_NOOP_MESSAGE_TYPES.has(String(payload.type || ""))) {
         // 这些是 Desktop 主进程/系统 UI 状态同步消息。Web 没有对应原生窗口、
         // 托盘、遥测或系统电源能力，ACK 即可；返回 500 会让官方 renderer

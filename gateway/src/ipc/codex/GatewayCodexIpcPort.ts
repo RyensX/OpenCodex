@@ -101,11 +101,18 @@ const GLOBAL_STATE = new Map([
 const PERSISTED_STATE = {};
 // settings/configuration 只作为当前进程内的热缓存；真实持久化统一写回本机 Codex Desktop 状态。
 const SETTINGS_STATE = {};
+const REVIEW_PANE_SNAPSHOT_METRICS = new Map();
+const OPEN_REVIEW_FILE_SOURCE_TABS = new Map();
+const OPEN_FILE_TABS = new Map();
 const DESKTOP_VIEW_NOOP_MESSAGE_TYPES = new Set([
   "app-shell-shortcut-state-changed",
   "avatar-overlay-open-state-request",
   "browser-sidebar-owner-sync",
+  "browser-use-turn-route-capture",
+  "browser-use-turn-route-release",
   "browser-use-non-local-sites-allowed-changed",
+  "computer-use-turn-route-capture",
+  "computer-use-turn-route-release",
   "codex-runtimes-config-changed",
   "desktop-notification-hide",
   "electron-desktop-features-changed",
@@ -150,6 +157,48 @@ function buildGatewayConfig() {
     appServer: process.env.CODEX_APP_SERVER_URL ? "remote" : "local",
     sharedObjectSnapshot: desktopState.sharedObjectSnapshotObject(),
   };
+}
+
+/** 归一化 renderer 上报的打开文件 tab 列表，只保留后续刷新需要的最小字段。 */
+function normalizeOpenFileTabs(openFiles) {
+  if (!Array.isArray(openFiles)) return [];
+  return openFiles
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const hostId = typeof entry.hostId === "string" && entry.hostId ? entry.hostId : "local";
+      const filePath = typeof entry.path === "string" && entry.path ? entry.path : null;
+      return filePath ? { hostId, path: filePath } : null;
+    })
+    .filter(Boolean);
+}
+
+/** 保存审查/文件侧栏状态；Web 暂不需要持久化，只要 ACK 并保留进程内快照。 */
+function recordOpenFileTabs(store, payload) {
+  const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+  const conversationId =
+    params && typeof params === "object" && typeof params.conversationId === "string"
+      ? params.conversationId
+      : "";
+  if (!conversationId) return { ok: true, openFiles: [] };
+  const openFiles = normalizeOpenFileTabs(params.openFiles);
+  store.set(conversationId, openFiles);
+  return { ok: true, conversationId, openFiles };
+}
+
+/** 保存审查 diff 指标，兼容官方 host manager 的 setReviewPaneSnapshotMetrics 语义。 */
+function recordReviewPaneSnapshotMetrics(payload) {
+  const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+  const hostId =
+    params && typeof params === "object" && typeof params.hostId === "string" && params.hostId
+      ? params.hostId
+      : "local";
+  const metrics = {
+    reviewDiffFilesTotal: Math.max(0, Number(params && params.reviewDiffFilesTotal) || 0),
+    reviewDiffLinesTotal: Math.max(0, Number(params && params.reviewDiffLinesTotal) || 0),
+    reviewDiffBytesEstimate: Math.max(0, Number(params && params.reviewDiffBytesEstimate) || 0),
+  };
+  REVIEW_PANE_SNAPSHOT_METRICS.set(hostId, metrics);
+  return { ok: true, hostId, ...metrics };
 }
 
 const diagnostics = createCodexDiagnostics({
@@ -219,6 +268,7 @@ const localFiles = createLocalFileIpcHandlers({
   reportsDir: REPORTS_DIR,
   projectRoot: PROJECT_ROOT,
   parseWorkspaceRoots: workspaceIpc.parseWorkspaceRoots,
+  activeWorkspaceRootPaths: workspaceIpc.activeWorkspaceRootPaths,
   realpathSafe: workspaceIpc.realpathSafe,
   isWithinAllowedRoots: workspaceIpc.isWithinAllowedRoots,
 });
@@ -241,6 +291,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     realpathSafe: workspaceIpc.realpathSafe,
     isWithinAllowedRoots: workspaceIpc.isWithinAllowedRoots,
     parseWorkspaceRoots: workspaceIpc.parseWorkspaceRoots,
+    activeWorkspaceRootPaths: workspaceIpc.activeWorkspaceRootPaths,
   });
   const workerIpc = createWorkerIpcHandlers({
     broadcast,
@@ -265,6 +316,33 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     filterUnsupportedFeatureEnablements,
     patchCodexConfigResult,
   });
+
+  /** 官方 AppServerRequestClient 的 host bridge：renderer 发 channel，gateway 转 app-server。 */
+  async function callAppServerForHost(payload, fallbackMethod = null, fallbackParams = null) {
+    const input =
+      payload &&
+      typeof payload === "object" &&
+      typeof payload.method !== "string" &&
+      !Object.prototype.hasOwnProperty.call(payload, "hostId") &&
+      payload.params &&
+      typeof payload.params === "object"
+        ? payload.params
+        : payload;
+    const method =
+      input && typeof input === "object" && typeof input.method === "string" && input.method
+        ? input.method
+        : fallbackMethod;
+    if (!method) return true;
+    const params =
+      input && typeof input === "object" && Object.prototype.hasOwnProperty.call(input, "params")
+        ? input.params
+        : fallbackParams;
+    const result = await appServerBridge.callAppServer(method, params);
+    if (method === "thread/start") {
+      workspaceRuntime.recordThreadStartMetadata(result, params);
+    }
+    return result;
+  }
 
   /** 从 invoke context 中取浏览器 clientId。 */
   function contextClientId(context) {
@@ -478,10 +556,18 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
       case "pick-files":
         // 文件选择由 web-shell 调浏览器 picker，gateway 负责落盘并返回官方 renderer 需要的 fsPath。
         return localFiles.pickFilesForWeb(payload);
+      case "read-file":
+        return localFiles.readFile(payload);
       case "read-file-metadata":
         return localFiles.readFileMetadata(payload);
       case "read-file-binary":
         return localFiles.readFileBinary(payload);
+      case "set-open-review-file-source-tabs":
+        return recordOpenFileTabs(OPEN_REVIEW_FILE_SOURCE_TABS, payload);
+      case "set-open-file-tabs":
+        return recordOpenFileTabs(OPEN_FILE_TABS, payload);
+      case "set-review-pane-snapshot-metrics-for-host":
+        return recordReviewPaneSnapshotMetrics(payload);
       case "list-automations":
         // 自动化列表直接读取 Desktop 的本机 TOML，不再返回空列表。
         return automationIpc.listAutomations();
@@ -669,6 +755,31 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         workspaceRuntime.recordThreadStartMetadata(result, payload);
         return result;
       }
+      case "send-cli-request-for-host":
+        return callAppServerForHost(payload);
+      case "prewarm-thread-start-for-host": {
+        const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+        return callAppServerForHost(payload, "thread/start", params && params.params);
+      }
+      case "refresh-recent-conversations-for-host": {
+        const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+        return appServerBridge.callAppServer("thread/list", {
+          archived: false,
+          cursor: null,
+          limit: null,
+          sortKey:
+            params && typeof params === "object" && typeof params.sortKey === "string"
+              ? params.sortKey
+              : "updated_at",
+        });
+      }
+      case "unsubscribe-thread-for-host":
+      case "broadcast-conversation-snapshot":
+      case "capture-browser-use-turn-route":
+      case "capture-computer-use-turn-route":
+      case "start-windows-sandbox-setup-for-host":
+      case "update-thread-git-branch":
+        return true;
       case "turn:start":
         return appServerBridge.callAppServer("turn/start", payload);
       case "turn:interrupt":

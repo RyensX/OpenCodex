@@ -54,7 +54,7 @@ function createWorkspaceIpcHandlers(deps) {
   function isWithinAllowedRoots(filePath) {
     const candidate = realpathSafe(filePath);
     if (!candidate) return false;
-    for (const root of [...parseWorkspaceRoots(), ...CODEX_ASSET_ROOTS]) {
+    for (const root of [...activeWorkspaceRootPaths(), ...parseWorkspaceRoots(), ...CODEX_ASSET_ROOTS]) {
       const rootReal = realpathSafe(root);
       if (!rootReal) continue;
       const rel = path.relative(rootReal, candidate);

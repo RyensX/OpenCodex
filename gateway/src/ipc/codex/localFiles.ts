@@ -12,6 +12,7 @@ function createLocalFileIpcHandlers(deps) {
   const REPORTS_DIR = deps.reportsDir;
   const PROJECT_ROOT = deps.projectRoot;
   const parseWorkspaceRoots = deps.parseWorkspaceRoots;
+  const activeWorkspaceRootPaths = deps.activeWorkspaceRootPaths || (() => []);
   const realpathSafe = deps.realpathSafe;
   const isWithinAllowedRoots = deps.isWithinAllowedRoots;
 
@@ -30,6 +31,36 @@ function createLocalFileIpcHandlers(deps) {
     return candidate.startsWith("file://") ? decodeURIComponent(candidate.slice("file://".length)) : candidate;
   }
   
+  /** 官方 getWorkspaceRoot 语义：优先当前 active workspace，再退回保存的 workspace root。 */
+  function getWorkspaceRoot() {
+    const activeRoots = activeWorkspaceRootPaths();
+    if (Array.isArray(activeRoots) && typeof activeRoots[0] === "string" && activeRoots[0].trim()) {
+      return activeRoots[0].trim();
+    }
+    const roots = parseWorkspaceRoots();
+    if (Array.isArray(roots) && typeof roots[0] === "string" && roots[0].trim()) {
+      return roots[0].trim();
+    }
+    return PROJECT_ROOT;
+  }
+
+  /** 对齐官方 resolveOpenFilePath：相对路径以 workspace root 为基准，并兼容 a/、b/ 前缀。 */
+  function resolveOpenFilePath(openPath, workspaceRoot) {
+    const strippedPath = String(openPath || "").replace(/^([ab])[\\/]/, "");
+    const normalizedPath = path.normalize(strippedPath);
+    if (path.isAbsolute(normalizedPath) || !workspaceRoot) return normalizedPath;
+    const segments = normalizedPath.split(/[\\/]+/).filter(Boolean);
+    if (segments.length === 0) return workspaceRoot;
+    const joinedPath = path.join(workspaceRoot, ...segments);
+    if (fs.existsSync(joinedPath)) return joinedPath;
+    const rootBaseName = path.basename(workspaceRoot);
+    const rootNameIndex = segments.indexOf(rootBaseName);
+    if (rootNameIndex !== -1) {
+      return path.join(workspaceRoot, ...segments.slice(rootNameIndex + 1));
+    }
+    return joinedPath;
+  }
+
   /** 把 payload 中的相对/绝对/file:// 路径解析成真实本机路径。 */
   function resolvePayloadFilePath(payload) {
     if (!payload || typeof payload !== "object") return null;
@@ -38,9 +69,10 @@ function createLocalFileIpcHandlers(deps) {
     if (!rawPath) return null;
     const cwd = typeof params.cwd === "string" && params.cwd.trim() ? params.cwd.trim() : null;
     const expandedPath = rawPath.startsWith("~") ? path.join(os.homedir(), rawPath.slice(1)) : rawPath;
+    const workspaceRoot = cwd || getWorkspaceRoot();
     const absolutePath = path.isAbsolute(expandedPath)
       ? expandedPath
-      : path.resolve(cwd || parseWorkspaceRoots()[0] || PROJECT_ROOT, expandedPath);
+      : resolveOpenFilePath(expandedPath, workspaceRoot);
     return realpathSafe(absolutePath) || (fs.existsSync(absolutePath) ? path.resolve(absolutePath) : null);
   }
   
@@ -80,7 +112,7 @@ function createLocalFileIpcHandlers(deps) {
     return { opened: false, path: filePath };
   }
   
-  /** 图片文件优先走 open-file 预览，让 Codex 原侧边栏打开。 */
+  /** 图片文件可由浏览器 picker 的 imagesOnly 过滤复用。 */
   function isBrowserPreviewImagePath(filePath) {
     const ext = path.extname(String(filePath || "")).toLowerCase();
     return [".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"].includes(ext);
@@ -92,35 +124,36 @@ function createLocalFileIpcHandlers(deps) {
     if (!filePath || !isWithinAllowedRoots(filePath)) return { isFile: false, sizeBytes: null };
     try {
       const stats = fs.statSync(filePath);
-      if (stats.isFile() && isBrowserPreviewImagePath(filePath)) {
-        return {
-          path: filePath,
-          isFile: false,
-          isDirectory: false,
-          sizeBytes: stats.size,
-          mtimeMs: stats.mtimeMs,
-          previewViaOpenFile: true,
-        };
-      }
       return {
-        path: filePath,
         isFile: stats.isFile(),
-        isDirectory: stats.isDirectory(),
         sizeBytes: stats.size,
-        mtimeMs: stats.mtimeMs,
       };
     } catch {
-      return { path: filePath, isFile: false, sizeBytes: null };
+      return { isFile: false, sizeBytes: null };
     }
   }
   
+  /** read-file IPC 的本地实现，按官方 handler 返回 { contents }。 */
+  function readFile(payload) {
+    const filePath = resolvePayloadFilePath(payload);
+    if (!filePath || !isWithinAllowedRoots(filePath)) return null;
+    try {
+      const stats = fs.statSync(filePath);
+      if (!stats.isFile()) return null;
+      return {
+        contents: fs.readFileSync(filePath, "utf8"),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /** read-file-binary IPC 的本地实现，只允许 allowlist 内文件。 */
   function readFileBinary(payload) {
     const filePath = resolvePayloadFilePath(payload);
     if (!filePath || !isWithinAllowedRoots(filePath)) return null;
     try {
       return {
-        path: filePath,
         contentsBase64: fs.readFileSync(filePath).toString("base64"),
       };
     } catch {
@@ -195,6 +228,7 @@ function createLocalFileIpcHandlers(deps) {
   return {
     openFileForPayload,
     pickFilesForWeb,
+    readFile,
     readFileBinary,
     readFileMetadata,
     resolvePayloadFilePath,
