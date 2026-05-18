@@ -333,10 +333,18 @@ function createDesktopState(deps) {
     return { success: true };
   }
   
+  /** 官方 fetch IPC 会把参数包在 params 下，业务层统一先解包。 */
+  function payloadParams(payload) {
+    if (!payload || typeof payload !== "object") return payload;
+    const params = payload.params;
+    return params && typeof params === "object" && !Array.isArray(params) ? params : payload;
+  }
+
   /** 从 settings payload 中提取 key，兼容 key/name/setting 等多种字段。 */
   function getSettingKey(payload) {
-    if (!payload || typeof payload !== "object") return null;
-    return payload.key || payload.name || payload.setting || payload.settingKey || null;
+    const input = payloadParams(payload);
+    if (!input || typeof input !== "object") return null;
+    return input.key || input.name || input.setting || input.settingKey || null;
   }
   
   /** configuration 在 Desktop globalState 中的兼容 key，优先读 configuration:*，必要时兼容官方裸 key。 */
@@ -448,9 +456,10 @@ function createDesktopState(deps) {
   
   /** settings:get 实现：Codex config 读 app-server，Electron UI 设置读 Desktop globalState。 */
   async function getSettingValue(payload, options = {}) {
-    const key = getSettingKey(payload);
+    const input = payloadParams(payload);
+    const key = getSettingKey(input);
     if (key == null) {
-      if (payload != null) return null;
+      if (input != null) return null;
       loadDesktopGlobalState();
       const snapshot = { ...SETTINGS_STATE, codexConfig: await readCodexConfigSetting(options) };
       for (const rawKey of CONFIGURATION_RAW_DESKTOP_KEYS) {
@@ -472,20 +481,21 @@ function createDesktopState(deps) {
   
   /** settings:set 实现：Codex config 写 app-server，Electron UI 设置写 Desktop globalState。 */
   async function setSettingValue(payload, options = {}) {
-    if (!payload || typeof payload !== "object") return true;
-    if (payload.key && Object.prototype.hasOwnProperty.call(payload, "value")) {
-      return setDesktopSettingValue(payload.key, payload.value, options);
+    const input = payloadParams(payload);
+    if (!input || typeof input !== "object") return true;
+    if (input.key && Object.prototype.hasOwnProperty.call(input, "value")) {
+      return setDesktopSettingValue(input.key, input.value, options);
     }
-    if (payload.name && Object.prototype.hasOwnProperty.call(payload, "value")) {
-      return setDesktopSettingValue(payload.name, payload.value, options);
+    if (input.name && Object.prototype.hasOwnProperty.call(input, "value")) {
+      return setDesktopSettingValue(input.name, input.value, options);
     }
-    if (payload.settings && typeof payload.settings === "object") {
-      for (const [key, value] of Object.entries(payload.settings)) {
+    if (input.settings && typeof input.settings === "object") {
+      for (const [key, value] of Object.entries(input.settings)) {
         await setDesktopSettingValue(key, value, options);
       }
       return true;
     }
-    for (const [key, value] of Object.entries(payload)) {
+    for (const [key, value] of Object.entries(input)) {
       await setDesktopSettingValue(key, value, options);
     }
     return true;
@@ -493,9 +503,10 @@ function createDesktopState(deps) {
   
   /** get-configuration 兜底值，优先复用 Desktop-backed 设置，再关闭 Web 当前没有实现的原生能力。 */
   function getConfigurationValue(payload) {
+    const input = payloadParams(payload);
     const key =
-      payload && typeof payload === "object"
-        ? payload.key || payload.name || payload.configurationKey || null
+      input && typeof input === "object"
+        ? input.key || input.name || input.configurationKey || null
         : null;
     if (key == null) return null;
     const normalized = String(key);
@@ -522,10 +533,11 @@ function createDesktopState(deps) {
   
   /** set-configuration 的本地持久化实现。 */
   function setConfigurationValue(payload) {
-    if (!payload || typeof payload !== "object") return { success: true };
-    const key = payload.key || payload.name || payload.configurationKey || null;
+    const input = payloadParams(payload);
+    if (!input || typeof input !== "object") return { success: true };
+    const key = input.key || input.name || input.configurationKey || null;
     if (typeof key !== "string" || !key) return { success: true };
-    setDesktopConfigurationValue(key, Object.prototype.hasOwnProperty.call(payload, "value") ? payload.value : null);
+    setDesktopConfigurationValue(key, Object.prototype.hasOwnProperty.call(input, "value") ? input.value : null);
     return { success: true };
   }
   

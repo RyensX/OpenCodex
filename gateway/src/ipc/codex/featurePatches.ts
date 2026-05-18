@@ -4,10 +4,19 @@ export {};
 const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
 
 const STATSIG_DEFAULT_FEATURE_OVERRIDES = {
+  // Settings entry is bundled, but upstream hides it when this remote gate is false/unavailable.
+  "4166894088": true,
+  // 强制启用 i18n，配合 locale_source 配置让 Web 端跟随系统语言。
+  enable_i18n: true,
   guardian_approval: true,
   // 开启官方右侧 artifact/file preview pane，renderer 才会渲染原生预览入口。
   "3903742690": true,
   artifacts: true,
+};
+
+/** 非 boolean 类型的 statsig dynamic/config 默认值，在 statsig initialize 时注入。 */
+const STATSIG_DEFAULT_CONFIG_VALUES = {
+  locale_source: "SYSTEM",
 };
 const APP_SERVER_UNSUPPORTED_FEATURE_ENABLEMENTS = new Set([
   "auth_elicitation",
@@ -108,6 +117,15 @@ function patchStatsigDefaultFeatures(bodyText) {
         enabled
       ) || changed;
   }
+  for (const [configKey, configValue] of Object.entries(STATSIG_DEFAULT_CONFIG_VALUES)) {
+    changed =
+      setStatsigDynamicConfigValue(
+        parsed.dynamic_configs,
+        STATSIG_DEFAULT_FEATURES_CONFIG,
+        configKey,
+        configValue
+      ) || changed;
+  }
   return changed ? JSON.stringify(parsed) : null;
 }
 
@@ -118,6 +136,12 @@ function patchStatsigDefaultFeatureSnapshot(value) {
   for (const [featureName, enabled] of Object.entries(STATSIG_DEFAULT_FEATURE_OVERRIDES)) {
     if (next[featureName] !== enabled) {
       next[featureName] = enabled;
+      changed = true;
+    }
+  }
+  for (const [configKey, configValue] of Object.entries(STATSIG_DEFAULT_CONFIG_VALUES)) {
+    if (next[configKey] !== configValue) {
+      next[configKey] = configValue;
       changed = true;
     }
   }
@@ -199,6 +223,7 @@ function patchConfigRequirementsResult(result) {
 module.exports = {
   APP_SERVER_UNSUPPORTED_FEATURE_ENABLEMENTS,
   DEFAULT_ALLOWED_APPROVALS_REVIEWERS,
+  STATSIG_DEFAULT_CONFIG_VALUES,
   STATSIG_DEFAULT_FEATURE_OVERRIDES,
   STATSIG_DEFAULT_FEATURES_CONFIG,
   filterUnsupportedFeatureEnablements,

@@ -82,6 +82,13 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
+/** Windows Store 安装目录下的资源 exe 在普通进程里可能无法直接执行。 */
+function canUseBundledCodexBinary(binaryPath) {
+  if (!binaryPath) return false;
+  if (process.platform !== "win32") return true;
+  return !path.normalize(binaryPath).toLowerCase().includes("\\windowsapps\\");
+}
+
 /** 从 CODEX_APP_SERVER_CMD 里推导 --listen endpoint，避免重复配置 URL。 */
 function deriveListenEndpointFromCommand(cmd) {
   if (!cmd) return "";
@@ -171,7 +178,7 @@ function parsePositiveNumberEnv(name, fallback) {
 function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath } = {}) {
   const url = process.env.CODEX_APP_SERVER_URL || "";
   const defaultPort = String(process.env.CODEX_APP_SERVER_PORT || 3760);
-  const defaultCmd = defaultCodexBinaryPath
+  const defaultCmd = canUseBundledCodexBinary(defaultCodexBinaryPath)
     ? `${shellQuote(defaultCodexBinaryPath)} app-server --listen stdio://`
     : `codex app-server --listen ws://127.0.0.1:${defaultPort}`;
   const cmd = process.env.CODEX_APP_SERVER_CMD || (url ? "" : defaultCmd);

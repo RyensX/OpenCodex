@@ -53,6 +53,60 @@ function createFetchIpcHandlers(deps) {
     }, targetClientId));
   }
 
+  function localWhamFallback(pathname) {
+    switch (pathname) {
+      case "/wham/tasks/list":
+        return { items: [] };
+      case "/wham/usage":
+        return null;
+      case "/wham/environments":
+        return [];
+      default:
+        return undefined;
+    }
+  }
+
+  function statsigInitializeFallbackResponse(requestId) {
+    const bodyText =
+      patchStatsigDefaultFeatures(JSON.stringify({
+        has_updates: true,
+        time: Date.now(),
+        feature_gates: {},
+        dynamic_configs: {},
+        layer_configs: {},
+        param_stores: {},
+        exposures: {},
+        sdk_flags: {},
+      })) || "{}";
+    return {
+      requestId,
+      responseType: "success",
+      status: 200,
+      headers: { "content-type": "application/json; charset=utf-8" },
+      bodyText,
+      bodyJsonString: bodyText,
+    };
+  }
+
+  function telemetryNoopResponse(requestId) {
+    return {
+      requestId,
+      responseType: "success",
+      status: 204,
+      headers: { "content-type": "application/json; charset=utf-8" },
+      bodyText: "",
+      bodyJsonString: "null",
+    };
+  }
+
+  function isChatgptTelemetryUrl(urlObject) {
+    return (
+      urlObject &&
+      urlObject.hostname === "chatgpt.com" &&
+      urlObject.pathname.startsWith("/ces/")
+    );
+  }
+
   /** 告诉 web-shell 某个 fetch stream 已结束。 */
   function broadcastFetchStreamComplete(requestId, targetClientId = "") {
     if (typeof broadcast !== "function") return;
@@ -153,25 +207,39 @@ function createFetchIpcHandlers(deps) {
       if (pathname.startsWith("/wham/") || pathname.startsWith("/aip/") || pathname.startsWith("/files/")) {
         // 这些请求必须由 gateway 带 token 代理，远端浏览器不能直接访问底层后端。
         const backendPath = urlObject ? `${urlObject.pathname}${urlObject.search}` : url;
-        const proxied = await chatgptBackend.fetchChatgptBackendRaw(backendPath, {
-          method: String(message.method || "GET"),
-          headers: chatgptBackend.normalizeFetchHeaders(message.headers),
-          body:
-            body !== undefined && String(message.method || "GET").toUpperCase() !== "GET"
-              ? typeof body === "string"
-                ? body
-                : JSON.stringify(body)
-              : undefined,
-        });
-        broadcastFetchHttpResponse(requestId, {
-          requestId,
-          ...proxied,
-        }, targetClientId);
-        return true;
+        try {
+          const proxied = await chatgptBackend.fetchChatgptBackendRaw(backendPath, {
+            method: String(message.method || "GET"),
+            headers: chatgptBackend.normalizeFetchHeaders(message.headers),
+            body:
+              body !== undefined && String(message.method || "GET").toUpperCase() !== "GET"
+                ? typeof body === "string"
+                  ? body
+                  : JSON.stringify(body)
+                : undefined,
+          });
+          broadcastFetchHttpResponse(requestId, {
+            requestId,
+            ...proxied,
+          }, targetClientId);
+          return true;
+        } catch (error) {
+          const fallback = pathname.startsWith("/wham/") ? localWhamFallback(pathname) : undefined;
+          if (fallback !== undefined) {
+            logger && logger.warn(`[wham] backend proxy failed; local fallback for ${pathname}`, error);
+            broadcastFetchResponse(requestId, fallback, 200, targetClientId);
+            return true;
+          }
+          throw error;
+        }
       }
 
       if (url.startsWith("http://") || url.startsWith("https://")) {
         // 普通 http(s) fetch 由 gateway 代理，statsig initialize 会顺手 patch Web 必需 feature。
+        if (isChatgptTelemetryUrl(urlObject)) {
+          broadcastFetchHttpResponse(requestId, telemetryNoopResponse(requestId), targetClientId);
+          return true;
+        }
         if (urlObject && urlObject.hostname === "statsigapi.net" && urlObject.pathname === "/v1/sdk_exception") {
           logger && logger.warn("[renderer-sdk-exception]", chatgptBackend.summarizeSdkException(body));
         }
@@ -184,7 +252,17 @@ function createFetchIpcHandlers(deps) {
         if (body !== undefined && init.method !== "GET" && init.method !== "HEAD") {
           init.body = typeof body === "string" ? body : JSON.stringify(body);
         }
-        const response = await fetch(url, init);
+        let response;
+        try {
+          response = await fetch(url, init);
+        } catch (error) {
+          if (shouldPatchStatsigInitialize(urlObject)) {
+            logger && logger.warn("[statsig] initialize fetch failed; local fallback", error);
+            broadcastFetchHttpResponse(requestId, statsigInitializeFallbackResponse(requestId), targetClientId);
+            return true;
+          }
+          throw error;
+        }
         const contentType = response.headers.get("content-type") || "";
         let text = await response.text();
         const headerObject = Object.fromEntries(response.headers.entries());

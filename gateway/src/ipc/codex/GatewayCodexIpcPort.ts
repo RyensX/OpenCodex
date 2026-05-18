@@ -638,6 +638,10 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return {
           provider: workspaceRuntime.guessMailProvider(payload && typeof payload === "object" ? payload.domain : null),
         };
+      case "codex-agents-md": {
+        // 读取工作区内的 CLAUDE.md / AGENTS.md 等 AI 指导文件供 renderer 使用。
+        return localFiles.readAgentsMdForWorkspace(payload);
+      }
       case "account-info": {
         return chatgptBackend.accountInfoFromCodexAccount(payload);
       }
@@ -654,6 +658,8 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return path.join(os.homedir(), ".codex");
       case "home-directory":
         return { homeDirectory: os.homedir() };
+      case "custom-avatars":
+        return { avatarDirectory: null, avatars: [] };
       case "external-agent-imported-connectors":
         return { connectors: [] };
       case "locale-info":
@@ -690,6 +696,11 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return null;
       case "native-desktop-apps":
         return { apps: [] };
+      case "node-repl-active-execs-kill":
+        // Web 环境没有 Node REPL 进程，直接确认即可。
+        return true;
+      case "terminal-shell-options":
+        return { availableShells: process.platform === "win32" ? ["powershell", "commandPrompt"] : [] };
       case "settings:get":
         return desktopState.getSettingValue(payload, { readCodexConfig: appServerBridge.readCodexConfig });
       case "settings:set":

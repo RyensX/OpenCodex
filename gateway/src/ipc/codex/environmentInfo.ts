@@ -25,11 +25,14 @@ function buildOsInfo() {
   };
 }
 
-/** locale-info IPC 返回运行 gateway 机器的 locale/timeZone。 */
+/** locale-info IPC 返回官方 renderer 期望的 IDE/system locale 形态。 */
 function buildLocaleInfo() {
   const options = Intl.DateTimeFormat().resolvedOptions();
+  const locale = options.locale || "en-US";
   return {
-    locale: options.locale || "en-US",
+    locale,
+    ideLocale: locale,
+    systemLocale: locale,
     timeZone: options.timeZone || "UTC",
     platform: process.platform,
   };

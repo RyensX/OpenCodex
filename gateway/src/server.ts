@@ -409,6 +409,18 @@ function shouldPatchOfficialAsset(reqPath) {
   return /^\/official-patched\/assets\/[^/]+\.js$/.test(reqPath);
 }
 
+/** Settings 页面已打包，但官方 renderer 在 Statsig 不可用或初始化完成前会隐藏入口。 */
+function patchSettingsGateChunk(source) {
+  return source.replace(/([,;]\s*[A-Za-z_$][\w$]*\s*=)\s*[$A-Za-z_][\w$]*\(`4166894088`\)/g, "$1!0");
+}
+
+/** Settings 里能选语言不代表 i18n provider 会加载语言包；Web 端默认按系统语言启用。 */
+function patchI18nDefaultsChunk(source) {
+  return source
+    .replaceAll(".get(`enable_i18n`,!1)", ".get(`enable_i18n`,!0)")
+    .replaceAll(".get(`locale_source`,`IDE`)", ".get(`locale_source`,`SYSTEM`)");
+}
+
 /** 恢复历史 turn 时旧 renderer 转换漏了 firstTurnWorkItemStartedAtMs，导致折叠摘要退回“上 x 条消息”。 */
 function patchAppServerManagerSignalsChunk(source) {
   const alreadyPatched =
@@ -428,13 +440,18 @@ function patchAppServerManagerSignalsChunk(source) {
   );
 }
 
-/** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
+/** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。
+ *  Settings gate (4166894088) 和 i18n 默认值 (enable_i18n, locale_source) 采用双保险：
+ *  - Chunk patch：修改代码中的默认值，保证 statsig SDK 初始化前就能生效
+ *  - Statsig 注入：在 featurePatches 中注入响应数据，处理通过 statsig 读取的场景 */
 function patchOfficialAsset(reqPath, data) {
   if (!shouldPatchOfficialAsset(reqPath)) return data;
   const source = data.toString("utf-8");
+  const withSettingsGate = patchSettingsGateChunk(source);
+  const withI18nDefaults = patchI18nDefaultsChunk(withSettingsGate);
   const patched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
-    ? patchAppServerManagerSignalsChunk(source)
-    : source;
+    ? patchAppServerManagerSignalsChunk(withI18nDefaults)
+    : withI18nDefaults;
   return Buffer.from(patched, "utf-8");
 }
 

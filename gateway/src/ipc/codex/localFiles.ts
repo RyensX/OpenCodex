@@ -148,6 +148,30 @@ function createLocalFileIpcHandlers(deps) {
     }
   }
 
+  /** 在工作区目录中搜索 CLAUDE.md / AGENTS.md 等 AI 指导文件并返回内容。 */
+  function readAgentsMdForWorkspace(payload) {
+    const params = payload && typeof payload === "object" && payload.params ? payload.params : payload;
+    const knownNames = ["CLAUDE.md", "AGENTS.md", "GEMINI.md", ".claude.md", ".agents.md", ".gemini.md"];
+    const roots = params && typeof params === "object" && Array.isArray(params.workspaceRoots)
+      ? params.workspaceRoots
+      : parseWorkspaceRoots();
+    if (!Array.isArray(roots) || roots.length === 0) return { files: [] };
+    const files = [];
+    for (const root of roots) {
+      if (typeof root !== "string" || !root) continue;
+      for (const name of knownNames) {
+        const candidate = path.join(root, name);
+        if (!isWithinAllowedRoots(candidate)) continue;
+        try {
+          if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+            files.push({ name, path: candidate, content: fs.readFileSync(candidate, "utf-8") });
+          }
+        } catch {}
+      }
+    }
+    return { files };
+  }
+
   /** read-file-binary IPC 的本地实现，只允许 allowlist 内文件。 */
   function readFileBinary(payload) {
     const filePath = resolvePayloadFilePath(payload);
@@ -228,6 +252,7 @@ function createLocalFileIpcHandlers(deps) {
   return {
     openFileForPayload,
     pickFilesForWeb,
+    readAgentsMdForWorkspace,
     readFile,
     readFileBinary,
     readFileMetadata,

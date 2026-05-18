@@ -49,15 +49,16 @@ class AsarWebviewExtractor {
     let byteCount = 0;
 
     for (const rawEntry of entries) {
-      const entry = String(rawEntry).replace(/^\/+/, "");
+      const archiveEntry = this.stripArchiveRoot(rawEntry);
+      const entry = this.normalizeArchiveEntry(archiveEntry);
       if (!entry.startsWith("webview/")) continue;
       const rel = entry.slice("webview/".length);
       if (!rel) continue;
 
-      const stat = this.archive.statFile(asarPath, entry);
+      const stat = this.archive.statFile(asarPath, archiveEntry);
       if (stat && stat.files) continue;
 
-      const data = this.archive.extractFile(asarPath, entry);
+      const data = this.archive.extractFile(asarPath, archiveEntry);
       const dest = this.pathGuard.resolve(webviewDestDir, rel);
       this.fileSystem.writeFile(dest, data);
       fileCount += 1;
@@ -68,6 +69,14 @@ class AsarWebviewExtractor {
       throw new Error(`从 ${asarPath} 解压出的 Codex webview 缺少 index.html`);
     }
     return { fileCount, byteCount };
+  }
+
+  private normalizeArchiveEntry(rawEntry: unknown): string {
+    return String(rawEntry).replace(/\\/g, "/");
+  }
+
+  private stripArchiveRoot(rawEntry: unknown): string {
+    return String(rawEntry).replace(/^[\\/]+/, "");
   }
 }
 
