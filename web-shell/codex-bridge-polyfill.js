@@ -28,6 +28,8 @@
   const SIDEBAR_SCROLL_SELECTOR = "[data-app-action-sidebar-scroll]";
   const SIDEBAR_NON_THREAD_ROW_SELECTOR = "[data-app-action-sidebar-project-row],[data-app-action-sidebar-section]";
   const SIDEBAR_TOGGLE_VIEW_TRANSITION_NAME = "sidebar-trigger";
+  const SIDEBAR_NEW_CONVERSATION_ICON_PATH_PREFIX = "M2.6687 11.333";
+  const NEW_CONVERSATION_MESSAGE_TYPES = new Set(["new-chat", "new-quick-chat"]);
 
   function opencodexSettings() {
     try {
@@ -682,19 +684,53 @@
     }, MOBILE_SIDEBAR_AUTO_COLLAPSE_DELAY_MS);
   }
 
-  function handleMobileSidebarConversationClick(event) {
+  function isNewConversationMessage(payload) {
+    if (!payload || typeof payload !== "object") return false;
+    if (NEW_CONVERSATION_MESSAGE_TYPES.has(payload.type)) return true;
+    if (payload.type !== "navigate-to-route" || payload.path !== "/") return false;
+    const state = payload.state && typeof payload.state === "object" ? payload.state : null;
+    return !!state && Object.prototype.hasOwnProperty.call(state, "focusComposerNonce");
+  }
+
+  function collapseMobileSidebarAfterNewConversation(payload) {
+    if (!opencodexSettingEnabled("mobileSidebarAutoCollapse")) return;
+    if (!isLikelyMobileKeyboardDevice()) return;
+    if (!isNewConversationMessage(payload)) return;
+    collapseMobileSidebarAfterSelection();
+  }
+
+  function isSidebarNewConversationButton(button) {
+    if (!button || typeof button.matches !== "function" || !button.matches("button")) return false;
+    const panel = sidebarPanelElement();
+    if (!panel || !panel.contains(button)) return false;
+    if (!visibleElement(button) || button.disabled || button.getAttribute("aria-disabled") === "true") return false;
+    return Array.from(button.querySelectorAll("svg path")).some((path) =>
+      String(path.getAttribute("d") || "").startsWith(SIDEBAR_NEW_CONVERSATION_ICON_PATH_PREFIX)
+    );
+  }
+
+  function sidebarNewConversationButtonFromTarget(target) {
+    const element = target && target.nodeType === 1 ? target : target?.parentElement;
+    if (!element || typeof element.closest !== "function") return null;
+    const button = element.closest("button");
+    return isSidebarNewConversationButton(button) ? button : null;
+  }
+
+  function handleMobileSidebarAutoCollapseClick(event) {
     if (!opencodexSettingEnabled("mobileSidebarAutoCollapse")) return;
     if (!isLikelyMobileKeyboardDevice()) return;
     if (event.defaultPrevented || event.button > 0) return;
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    if (!sidebarConversationRowFromTarget(event.target)) return;
+    if (!sidebarConversationRowFromTarget(event.target) && !sidebarNewConversationButtonFromTarget(event.target)) {
+      return;
+    }
     collapseMobileSidebarAfterSelection();
   }
 
   function installMobileSidebarAutoCollapse() {
     if (!document || document.__codexMobileSidebarAutoCollapseInstalled) return;
     document.__codexMobileSidebarAutoCollapseInstalled = true;
-    document.addEventListener("click", handleMobileSidebarConversationClick, true);
+    document.addEventListener("click", handleMobileSidebarAutoCollapseClick, true);
   }
 
   installMobileSidebarAutoCollapse();
@@ -1685,6 +1721,7 @@
         if (handlePickFilesFetchMessage(payload)) {
           return true;
         }
+        collapseMobileSidebarAfterNewConversation(payload);
         if (
           payload &&
           typeof payload === "object" &&
