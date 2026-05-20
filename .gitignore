@@ -3,6 +3,7 @@ Codex.app/
 
 # Dependencies
 node_modules/
+.pnpm-store/
 
 # Build outputs
 out/
@@ -20,6 +21,7 @@ scripts/.versions.json
 # Logs
 *.log
 npm-debug.log*
+pnpm-debug.log*
 
 # OS files
 .DS_Store
@@ -40,7 +42,7 @@ Thumbs.db
 *.tmp
 *.temp
 
-# Native binaries (downloaded via npm in CI)
+# Native binaries (downloaded via package manager in CI)
 resources/bin/
 resources/codex
 resources/codex.exe

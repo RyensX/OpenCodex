@@ -8,8 +8,8 @@
   "scripts": {
     "web:dev": "node gateway/dist/server.js",
     "build:gateway": "tsc -p gateway/tsconfig.json",
-    "build:vendor": "npm --prefix vendor/electron-to-web run build",
-    "test:vendor": "npm --prefix vendor/electron-to-web run test"
+    "build:vendor": "pnpm --dir vendor/electron-to-web run build",
+    "test:vendor": "pnpm --dir vendor/electron-to-web run test"
   },
   "dependencies": {
     "@electron/asar": "^4.1.2",

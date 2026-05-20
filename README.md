@@ -82,7 +82,7 @@ flowchart TB
 ## 环境要求
 
 - Node.js 20 或更高版本
-- npm
+- pnpm
 - 本机已安装 Codex Desktop（推荐），或通过环境变量显式指定 Codex Desktop / official bundle 路径。
 - Mac/Windows系统，目前Mac完全支持，Windows未测试。
 
@@ -94,7 +94,7 @@ git clone --recursive xxx
 ```
 
 ```bash
-npm install
+pnpm install
 ```
 
 ## 如何使用
@@ -102,16 +102,16 @@ npm install
 先编译
 
 ```bash
-npm run build:vendor
+pnpm run build:vendor
 ```
 ```bash
-npm run build:gateway
+pnpm run build:gateway
 ```
 
 启动服务：
 
 ```bash
-HOST=0.0.0.0 PORT=3737 CODEX_WEB_PASSWORD=你的密码 npm run web:dev
+HOST=0.0.0.0 PORT=3737 CODEX_WEB_PASSWORD=你的密码 pnpm run web:dev
 ```
 
 健康检查：
@@ -153,14 +153,14 @@ curl http://127.0.0.1:3737/api/health
 | `web-shell/codex-bridge-polyfill.js` | 浏览器侧 Electron/Codex bridge polyfill。 |
 | `reports/unknown-ipc.jsonl` | 运行时记录的未知 IPC。 |
 
-## npm 脚本
+## pnpm 脚本
 
 | 脚本 | 说明 |
 | --- | --- |
-| `npm run build:gateway` | 编译 `gateway/src` 到 `gateway/dist`。 |
-| `npm run web:dev` | 启动已编译的 gateway。 |
-| `npm run build:vendor` | 编译 `vendor/electron-to-web`。 |
-| `npm run test:vendor` | 运行 `vendor/electron-to-web` 测试。 |
+| `pnpm run build:gateway` | 编译 `gateway/src` 到 `gateway/dist`。 |
+| `pnpm run web:dev` | 启动已编译的 gateway。 |
+| `pnpm run build:vendor` | 编译 `vendor/electron-to-web`。 |
+| `pnpm run test:vendor` | 运行 `vendor/electron-to-web` 测试。 |
 
 ## 排障
 
@@ -179,7 +179,7 @@ curl http://127.0.0.1:3737/api/health
 如果端口冲突，换端口启动：
 
 ```bash
-PORT=3738 npm run web:dev
+PORT=3738 pnpm run web:dev
 ```
 
 ### 找不到 Codex Desktop official bundle
@@ -187,13 +187,13 @@ PORT=3738 npm run web:dev
 显式指定本机 Codex Desktop 路径：
 
 ```bash
-CODEX_DESKTOP_APP_PATH="/Applications/Codex.app" npm run web:dev
+CODEX_DESKTOP_APP_PATH="/Applications/Codex.app" pnpm run web:dev
 ```
 
 也可以指定缓存目录：
 
 ```bash
-CODEX_WEB_OFFICIAL_BUNDLE_DIR="./cache/official-bundle" npm run web:dev
+CODEX_WEB_OFFICIAL_BUNDLE_DIR="./cache/official-bundle" pnpm run web:dev
 ```
 
 ### IPC 行为不完整

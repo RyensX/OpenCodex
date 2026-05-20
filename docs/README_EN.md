@@ -83,14 +83,14 @@ Core principles:
 ## Requirements
 
 - Node.js 20 or newer
-- npm
+- pnpm
 - Codex Desktop installed locally, recommended, or explicit environment variables pointing to the Codex Desktop app or official bundle.
 - macOS / Windows. macOS is fully supported; Windows has not been tested yet.
 
 Install dependencies:
 
 ```bash
-npm install
+pnpm install
 ```
 
 ## How To Use
@@ -98,16 +98,16 @@ npm install
 Build first:
 
 ```bash
-npm run build:vendor
+pnpm run build:vendor
 ```
 ```bash
-npm run build:gateway
+pnpm run build:gateway
 ```
 
 Start the service:
 
 ```bash
-HOST=0.0.0.0 PORT=3737 CODEX_WEB_PASSWORD=your-password npm run web:dev
+HOST=0.0.0.0 PORT=3737 CODEX_WEB_PASSWORD=your-password pnpm run web:dev
 ```
 
 Health check:
@@ -147,14 +147,14 @@ Use Tailscale, ZeroTier, a company VPN, or a similar private network solution fo
 | `web-shell/codex-bridge-polyfill.js` | Browser-side Electron/Codex bridge polyfill. |
 | `reports/unknown-ipc.jsonl` | Runtime log for unknown IPC calls. |
 
-## npm Scripts
+## pnpm Scripts
 
 | Script | Description |
 | --- | --- |
-| `npm run build:gateway` | Compile `gateway/src` into `gateway/dist`. |
-| `npm run web:dev` | Start the compiled gateway. |
-| `npm run build:vendor` | Build `vendor/electron-to-web`. |
-| `npm run test:vendor` | Run `vendor/electron-to-web` tests. |
+| `pnpm run build:gateway` | Compile `gateway/src` into `gateway/dist`. |
+| `pnpm run web:dev` | Start the compiled gateway. |
+| `pnpm run build:vendor` | Build `vendor/electron-to-web`. |
+| `pnpm run test:vendor` | Run `vendor/electron-to-web` tests. |
 
 ## Troubleshooting
 
@@ -173,7 +173,7 @@ curl http://127.0.0.1:3737/api/health
 If the port is already in use, start on another port:
 
 ```bash
-PORT=3738 npm run web:dev
+PORT=3738 pnpm run web:dev
 ```
 
 ### Codex Desktop official bundle is not found
@@ -181,13 +181,13 @@ PORT=3738 npm run web:dev
 Set the Codex Desktop path explicitly:
 
 ```bash
-CODEX_DESKTOP_APP_PATH="/Applications/Codex.app" npm run web:dev
+CODEX_DESKTOP_APP_PATH="/Applications/Codex.app" pnpm run web:dev
 ```
 
 You can also choose the bundle cache directory:
 
 ```bash
-CODEX_WEB_OFFICIAL_BUNDLE_DIR="./cache/official-bundle" npm run web:dev
+CODEX_WEB_OFFICIAL_BUNDLE_DIR="./cache/official-bundle" pnpm run web:dev
 ```
 
 ### IPC behavior is incomplete
