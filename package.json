@@ -3,7 +3,7 @@
   "productName": "OpenCodex",
   "main": "desktop/main.cjs",
   "author": "OpenAI",
-  "version": "26.422.71525",
+  "version": "1.0.0",
   "description": "Standalone OpenCodex package for the bundled desktop app, web gateway, and vendor code",
   "private": true,
   "scripts": {
