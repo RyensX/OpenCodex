@@ -106,7 +106,13 @@ pnpm run build:gateway
 
 Start the service:
 
-To enable an access password, create `config.yaml` in the current working directory first:
+**Setting an access password is strongly recommended**. You can copy the example config and edit the password:
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+You can also create `config.yaml` manually in the current working directory:
 
 ```yaml
 auth:

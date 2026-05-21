@@ -110,7 +110,13 @@ pnpm run build:gateway
 
 启动服务：
 
-如需启用访问密码，先在当前目录创建 `config.yaml`：
+**强烈建议设置访问密码**。可以直接复制示例配置并编辑其中的密码：
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+也可以手动在当前目录创建 `config.yaml`：
 
 ```yaml
 auth:
