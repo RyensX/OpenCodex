@@ -35,6 +35,7 @@ const { ensureOfficialBundle } = require("./official/LocalCodexBundleProvider");
 
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const WEB_SHELL_DIR = path.join(PROJECT_ROOT, "web-shell");
+const WEB_SHELL_ASSETS_PREFIX = "/assets/";
 const RUNTIME_DIR = process.env.CODEX_WEB_RUNTIME_DIR
   ? path.resolve(process.env.CODEX_WEB_RUNTIME_DIR)
   : PROJECT_ROOT;
@@ -468,7 +469,14 @@ function transformOfficialHtml(rawHtml) {
     /<meta([^>]*\bname=["']viewport["'][^>]*)>/i,
     '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />'
   );
-  html = html.replace(/(src|href)=["']\/(?!official\/)([^"'#?]+)["']/g, '$1="/official/$2"');
+  const iconLinks = [
+    '<link rel="icon" type="image/png" href="/assets/icon.png" />',
+    '<link rel="apple-touch-icon" href="/assets/icon.png" />',
+  ].join("\n    ");
+  if (!/<link[^>]+\brel=["'][^"']*icon/i.test(html)) {
+    html = html.replace(/<title>/i, `${iconLinks}\n    <title>`);
+  }
+  html = html.replace(/(src|href)=["']\/(?!(?:official|assets)\/)([^"'#?]+)["']/g, '$1="/official/$2"');
   html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
   const base = [
     '<base href="/official/">',
@@ -613,6 +621,12 @@ function patchOfficialAsset(reqPath, data) {
 function staticFile(reqPath) {
   if (reqPath === "/codex-bridge-polyfill.js") return path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js");
   if (reqPath === "/codex-tooltip-dismiss-guard.js") return path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js");
+  if (reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) {
+    const rel = reqPath.slice(WEB_SHELL_ASSETS_PREFIX.length);
+    if (rel && !rel.includes("..") && !path.isAbsolute(rel)) {
+      return path.join(WEB_SHELL_DIR, "assets", rel);
+    }
+  }
   if (reqPath.startsWith(PATCHED_OFFICIAL_PREFIX)) {
     const rel = reqPath.slice(PATCHED_OFFICIAL_PREFIX.length);
     return locateOfficialAsset(rel);
@@ -734,6 +748,7 @@ function cacheControlForRequestPath(reqPath) {
   if (shouldPatchOfficialAsset(reqPath)) return "no-store";
   if (reqPath.startsWith("/official-patched/assets/")) return "public, max-age=31536000, immutable";
   if (reqPath.startsWith("/official/assets/")) return "public, max-age=31536000, immutable";
+  if (reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) return "public, max-age=86400";
   if (reqPath.startsWith("/official/")) return "public, max-age=3600";
   return "no-store";
 }
