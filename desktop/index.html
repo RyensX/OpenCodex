@@ -4,160 +4,181 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpenCodex</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <section class="topbar">
-        <div>
-          <p class="eyebrow">OpenCodex 启动器</p>
+    <!-- 极简顶部导航栏 -->
+    <header class="app-header">
+      <div class="header-inner">
+        <div class="header-brand">
+          <img class="logo" src="../web-shell/assets/icon.png" alt="Logo" />
           <h1 id="serviceTitle">本机服务</h1>
         </div>
         <div class="status-pill" id="statusPill">启动中</div>
-      </section>
+      </div>
+    </header>
 
-      <section class="hero">
-        <div class="service">
-          <div class="service-main">
-            <div class="label">访问地址</div>
+    <main class="app-main">
+      <div class="container">
+
+        <!-- 错误提示 -->
+        <div class="notice" id="lastError" hidden></div>
+
+        <!-- 顶部核心大动作区域 -->
+        <section class="hero-section">
+          <div class="hero-content">
+            <div class="hero-label">访问地址</div>
             <div class="url-list" id="lanUrls" hidden></div>
           </div>
-          <div class="actions">
+          <div class="hero-actions">
             <button class="primary" id="openCodex">打开 Codex</button>
             <button id="copyUrl">复制地址</button>
             <button id="restart">重启服务</button>
           </div>
-        </div>
-        <div class="notice" id="lastError" hidden></div>
-      </section>
+        </section>
 
-      <section class="panel settings-panel">
-        <div class="panel-head">
-          <h2>设置</h2>
-        </div>
-        <div class="settings-grid">
-          <div class="setting-block">
-            <div class="label">启动地址</div>
-            <div class="segmented" id="hostModeGroup">
-              <label>
-                <input type="radio" name="hostMode" value="local" />
-                <span>本机</span>
-              </label>
-              <label>
-                <input type="radio" name="hostMode" value="lan" />
-                <span>局域网</span>
-              </label>
+        <!-- 核心设置列表 -->
+        <section class="setting-section">
+          <h2>设置 <span class="section-caption">服务访问</span></h2>
+          <div class="setting-list">
+            <div class="setting-item">
+              <div class="setting-info">
+                <div class="setting-label">启动地址</div>
+                <div class="setting-desc">选择服务运行的接口绑定</div>
+              </div>
+              <div class="setting-control">
+                <div class="segmented" id="hostModeGroup">
+                  <label>
+                    <input type="radio" name="hostMode" value="local" />
+                    <span>本机</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="hostMode" value="lan" />
+                    <span>局域网</span>
+                  </label>
+                </div>
+              </div>
             </div>
-          </div>
-          <div class="setting-block">
-            <div class="label">端口</div>
-            <div class="port-row">
-              <input id="portInput" type="number" min="1" max="65535" step="1" inputmode="numeric" />
-              <button id="savePort">保存端口</button>
-            </div>
-          </div>
-          <div class="setting-block">
-            <div class="label">访问密码</div>
-            <div class="password-row">
-              <input id="passwordInput" type="password" autocomplete="new-password" placeholder="留空关闭密码" />
-              <button id="savePassword">保存密码</button>
-              <button id="clearPassword">清空</button>
-            </div>
-            <div class="setting-status" id="authStatus">未启用</div>
-          </div>
-        </div>
-      </section>
 
-      <section class="grid">
-        <article class="panel">
-          <div class="panel-head">
-            <h2>Codex</h2>
-          </div>
-          <dl class="kv">
-            <div>
-              <dt>版本</dt>
-              <dd id="codexVersion">未知</dd>
+            <div class="setting-item">
+              <div class="setting-info">
+                <div class="setting-label">端口</div>
+                <div class="setting-desc">服务监听的网络端口</div>
+              </div>
+              <div class="setting-control port-row">
+                <input id="portInput" type="number" min="1" max="65535" step="1" inputmode="numeric" />
+                <button id="savePort">保存</button>
+              </div>
             </div>
-            <div>
-              <dt>构建</dt>
-              <dd id="codexBuild">未知</dd>
-            </div>
-            <div>
-              <dt>缓存时间</dt>
-              <dd id="cacheUpdatedAt">未知</dd>
-            </div>
-            <div>
-              <dt>Codex 路径</dt>
-              <dd><button class="path" id="codexAppPath">未找到</button></dd>
-            </div>
-            <div>
-              <dt>app.asar</dt>
-              <dd><button class="path" id="sourceAsarPath">未找到</button></dd>
-            </div>
-            <div>
-              <dt>命令行</dt>
-              <dd><button class="path" id="codexBinaryPath">未找到</button></dd>
-            </div>
-          </dl>
-        </article>
 
-        <article class="panel">
-          <div class="panel-head">
-            <h2>网关</h2>
+            <div class="setting-item">
+              <div class="setting-info">
+                <div class="setting-label">访问密码</div>
+                <div class="setting-desc">
+                  设置访问权限 - 当前状态: <span class="setting-status" id="authStatus">未启用</span>
+                </div>
+              </div>
+              <div class="setting-control password-row">
+                <input id="passwordInput" type="password" autocomplete="new-password" placeholder="留空关闭密码" />
+                <button id="savePassword">保存</button>
+                <button id="clearPassword">清空</button>
+              </div>
+            </div>
           </div>
-          <dl class="kv">
-            <div>
-              <dt>进程</dt>
-              <dd id="gatewayPid">未运行</dd>
-            </div>
-            <div>
-              <dt>启动时间</dt>
-              <dd id="gatewayStartedAt">未知</dd>
-            </div>
-            <div>
-              <dt>监听</dt>
-              <dd id="gatewayListen">127.0.0.1:3737</dd>
-            </div>
-            <div>
-              <dt>应用服务</dt>
-              <dd id="appServerMode">未知</dd>
-            </div>
-            <div>
-              <dt>Node</dt>
-              <dd id="nodeVersion">未知</dd>
-            </div>
-            <div>
-              <dt>Electron</dt>
-              <dd id="electronVersion">未知</dd>
-            </div>
-          </dl>
-        </article>
+        </section>
 
-        <article class="panel wide">
-          <div class="panel-head">
+        <!-- Codex 运行时 -->
+        <section class="setting-section">
+          <h2>Codex <span class="section-caption">官方运行时</span></h2>
+          <div class="setting-list kv">
+            <div class="setting-item">
+              <div class="setting-label">版本</div>
+              <div class="setting-value" id="codexVersion">未知</div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-label">构建</div>
+              <div class="setting-value" id="codexBuild">未知</div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-label">缓存时间</div>
+              <div class="setting-value" id="cacheUpdatedAt">未知</div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-label">Codex 路径</div>
+              <div class="setting-control"><button class="path" id="codexAppPath">未找到</button></div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-label">app.asar</div>
+              <div class="setting-control"><button class="path" id="sourceAsarPath">未找到</button></div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-label">命令行</div>
+              <div class="setting-control"><button class="path" id="codexBinaryPath">未找到</button></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 网关状态 -->
+        <section class="setting-section">
+          <h2>网关 <span class="section-caption">本机进程</span></h2>
+          <div class="setting-list kv">
+            <div class="setting-item">
+              <div class="setting-label">进程</div>
+              <div class="setting-value" id="gatewayPid">未运行</div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-label">启动时间</div>
+              <div class="setting-value" id="gatewayStartedAt">未知</div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-label">监听</div>
+              <div class="setting-value" id="gatewayListen">127.0.0.1:3737</div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-label">应用服务</div>
+              <div class="setting-value" id="appServerMode">未知</div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-label">Node</div>
+              <div class="setting-value" id="nodeVersion">未知</div>
+            </div>
+            <div class="setting-item">
+              <div class="setting-label">Electron</div>
+              <div class="setting-value" id="electronVersion">未知</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 运行目录 -->
+        <section class="setting-section">
+          <div class="section-head">
             <h2>运行目录</h2>
-            <button id="openLogs">打开日志</button>
+            <button id="openLogs" class="secondary-btn">查看日志</button>
           </div>
-          <dl class="kv paths">
-            <div>
-              <dt>配置</dt>
-              <dd><button class="path" id="configPath">未创建</button></dd>
+          <div class="setting-list kv paths">
+            <div class="setting-item">
+              <div class="setting-label">配置</div>
+              <div class="setting-control"><button class="path" id="configPath">未创建</button></div>
             </div>
-            <div>
-              <dt>日志</dt>
-              <dd><button class="path" id="logPath">未创建</button></dd>
+            <div class="setting-item">
+              <div class="setting-label">日志</div>
+              <div class="setting-control"><button class="path" id="logPath">未创建</button></div>
             </div>
-            <div>
-              <dt>报告</dt>
-              <dd><button class="path" id="reportsDir">未创建</button></dd>
+            <div class="setting-item">
+              <div class="setting-label">报告</div>
+              <div class="setting-control"><button class="path" id="reportsDir">未创建</button></div>
             </div>
-            <div>
-              <dt>渲染器缓存</dt>
-              <dd><button class="path" id="officialBundleDir">未创建</button></dd>
+            <div class="setting-item">
+              <div class="setting-label">渲染器缓存</div>
+              <div class="setting-control"><button class="path" id="officialBundleDir">未创建</button></div>
             </div>
-          </dl>
-        </article>
-      </section>
+          </div>
+        </section>
+
+      </div>
     </main>
     <script src="./renderer.js"></script>
   </body>
