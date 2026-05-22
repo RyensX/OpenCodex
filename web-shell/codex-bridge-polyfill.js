@@ -11,6 +11,7 @@
   const OPENCODEX_LANGUAGES = [OPENCODEX_LOCALE, "zh-CN", "zh", "en-US", "en"];
   const AUTH_FORCE_LOGIN_STORAGE_KEY = "codex_web_force_login";
   const OPENCODEX_SETTINGS_STORAGE_KEY = "opencodex_web_settings_v1";
+  const OPENCODEX_MOBILE_COMPOSER_DEBUG_STORAGE_KEY = "opencodex_debug_mobile_composer";
   const GATEWAY_AUTH_LOGOUT_LABEL = "退出认证";
   const GATEWAY_AUTH_LOGOUT_BUSY_LABEL = "正在退出认证...";
   const OFFICIAL_LOGOUT_LABELS = [
@@ -65,6 +66,22 @@
 
   function opencodexSettingEnabled(key) {
     return opencodexSettings()[key] !== false;
+  }
+
+  function mobileComposerDebugEnabled() {
+    try {
+      const value = localStorage.getItem(OPENCODEX_MOBILE_COMPOSER_DEBUG_STORAGE_KEY);
+      return value != null && value !== "0" && value !== "false";
+    } catch {
+      return false;
+    }
+  }
+
+  function debugMobileComposer(message, details = {}) {
+    if (!mobileComposerDebugEnabled()) return;
+    try {
+      console.info(`[opencodex:mobile-composer] ${message}`, details);
+    } catch {}
   }
 
   function gatewayAuthHeaders(headers) {
@@ -128,26 +145,90 @@
   installLocaleOverride();
   installRandomUUIDPolyfill();
 
-  function installMobileViewportGuards() {
-    if (!document || document.__codexMobileViewportGuardsInstalled) return;
-    document.__codexMobileViewportGuardsInstalled = true;
+  function installMobileViewportAdapter() {
+    if (!document || document.__codexMobileViewportAdapterInstalled) return;
+    document.__codexMobileViewportAdapterInstalled = true;
 
     const style = document.createElement("style");
-    style.id = "codex-mobile-viewport-guards";
+    style.id = "codex-mobile-viewport-adapter";
     style.textContent = `
+      :root {
+        --codex-layout-viewport-left: 0px;
+        --codex-layout-viewport-top: 0px;
+        --codex-layout-viewport-width: 100vw;
+        --codex-layout-viewport-height: 100dvh;
+      }
+
       @media (max-width: 820px), (pointer: coarse) {
         html {
-          scroll-padding-top: calc(var(--codex-visual-viewport-offset-top, 0px) + env(safe-area-inset-top) + 12px);
-          scroll-padding-bottom: calc(var(--codex-keyboard-inset-bottom, 0px) + env(safe-area-inset-bottom) + 112px);
+          position: fixed !important;
+          inset: 0 !important;
+          width: 100% !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          height: 100% !important;
+          min-height: 100% !important;
+          max-height: 100% !important;
+          overflow: hidden !important;
           -webkit-text-size-adjust: 100%;
           text-size-adjust: 100%;
         }
 
         body {
-          width: 100%;
-          min-height: 100dvh;
-          touch-action: pan-x pan-y;
-          overscroll-behavior-y: contain;
+          position: fixed !important;
+          top: var(--codex-layout-viewport-top, 0px) !important;
+          left: var(--codex-layout-viewport-left, 0px) !important;
+          width: var(--codex-layout-viewport-width, 100vw) !important;
+          min-width: 0 !important;
+          max-width: var(--codex-layout-viewport-width, 100vw) !important;
+          height: var(--codex-layout-viewport-height, 100dvh) !important;
+          min-height: var(--codex-layout-viewport-height, 100dvh) !important;
+          max-height: var(--codex-layout-viewport-height, 100dvh) !important;
+          margin: 0 !important;
+          overflow: hidden !important;
+          overscroll-behavior: none;
+        }
+
+        #root {
+          width: 100% !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          height: 100% !important;
+          min-height: 100% !important;
+          max-height: 100% !important;
+          overflow: hidden !important;
+        }
+
+        @supports selector(:has(*)) {
+          html:has(.app-shell-left-panel) .app-header-tint,
+          html:has([data-app-shell-focus-area="right-panel"]) .app-header-tint {
+            min-width: 0 !important;
+            overflow: hidden !important;
+          }
+
+          html:has(.app-shell-left-panel) .app-header-tint [data-test-id="header-shell-slot"],
+          html:has([data-app-shell-focus-area="right-panel"]) .app-header-tint [data-test-id="header-shell-slot"] {
+            width: auto !important;
+            min-width: 0 !important;
+            max-width: min(34vw, 132px) !important;
+            flex: 0 1 auto !important;
+            overflow: hidden !important;
+          }
+
+          html:has(.app-shell-left-panel) .app-header-tint [data-test-id="app-shell-header-context-menu-surface"],
+          html:has([data-app-shell-focus-area="right-panel"]) .app-header-tint [data-test-id="app-shell-header-context-menu-surface"] {
+            min-width: 0 !important;
+            flex: 1 1 auto !important;
+            overflow-x: auto !important;
+            overflow-y: hidden !important;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+          }
+
+          html:has(.app-shell-left-panel) .app-header-tint [data-test-id="app-shell-header-context-menu-surface"]::-webkit-scrollbar,
+          html:has([data-app-shell-focus-area="right-panel"]) .app-header-tint [data-test-id="app-shell-header-context-menu-surface"]::-webkit-scrollbar {
+            display: none;
+          }
         }
 
         input,
@@ -155,198 +236,94 @@
         [contenteditable="true"],
         .ProseMirror {
           font-size: max(16px, 1em) !important;
-          scroll-margin-top: calc(var(--codex-visual-viewport-offset-top, 0px) + env(safe-area-inset-top) + 16px);
-          scroll-margin-bottom: calc(var(--codex-keyboard-inset-bottom, 0px) + env(safe-area-inset-bottom) + 112px);
         }
 
-        [data-codex-mobile-scroll-inset="true"] {
-          scroll-padding-top: calc(var(--codex-visual-viewport-offset-top, 0px) + env(safe-area-inset-top) + 12px) !important;
-          scroll-padding-bottom: calc(var(--codex-keyboard-inset-bottom, 0px) + env(safe-area-inset-bottom) + 112px) !important;
+        [data-radix-popper-content-wrapper],
+        [data-radix-popper-content-wrapper] > *,
+        [role="dialog"][data-state="open"] {
+          max-width: calc(var(--codex-layout-viewport-width, 100vw) - 16px) !important;
+          max-height: calc(var(--codex-layout-viewport-height, 100dvh) - 16px) !important;
         }
 
-        html:not(.codex-mobile-keyboard-open) [data-codex-mobile-scroll-inset="true"] {
-          scroll-padding-bottom: 12px !important;
+        [role="tooltip"] {
+          display: none !important;
         }
       }
     `;
     (document.head || document.documentElement).appendChild(style);
 
-    let maxObservedViewportHeight = 0;
-    let mobileScrollSnapshot = null;
-    let viewportUpdateScheduled = false;
+    let scheduled = false;
+    let lastViewportKey = "";
+    let lastViewportSizeKey = "";
+    let syntheticResizeTimer = null;
 
-    const viewportMetrics = () => {
-      const viewport = w.visualViewport;
-      const height = Math.max(0, Math.floor(viewport?.height || w.innerHeight || document.documentElement.clientHeight || 0));
-      const offsetTop = Math.max(0, Math.floor(viewport?.offsetTop || 0));
-      const layoutHeight = Math.max(0, Math.floor(w.innerHeight || document.documentElement.clientHeight || height));
-      maxObservedViewportHeight = Math.max(maxObservedViewportHeight, height);
-      const keyboardInset = Math.max(0, layoutHeight - height - offsetTop, maxObservedViewportHeight - height - offsetTop);
-      return { height, offsetTop, layoutHeight, keyboardInset };
-    };
-
-    const setViewportVars = (metrics = viewportMetrics()) => {
+    const viewportSize = () => {
       const root = document.documentElement;
-      if (metrics.height > 0) root.style.setProperty("--codex-visual-viewport-height", `${metrics.height}px`);
-      if (metrics.layoutHeight > 0) root.style.setProperty("--codex-layout-viewport-height", `${metrics.layoutHeight}px`);
-      root.style.setProperty("--codex-visual-viewport-offset-top", `${metrics.offsetTop}px`);
-      root.style.setProperty("--codex-keyboard-inset-bottom", `${metrics.keyboardInset}px`);
-    };
-
-    const scrollableAncestor = (element) => {
-      for (let node = element?.parentElement; node && node !== document.body; node = node.parentElement) {
-        const style = w.getComputedStyle ? w.getComputedStyle(node) : null;
-        const overflowY = String(style?.overflowY || "");
-        if (/(auto|scroll|overlay)/.test(overflowY) && node.scrollHeight > node.clientHeight + 1) return node;
-      }
-      return document.scrollingElement || document.documentElement;
-    };
-
-    const clearMobileScrollInset = () => {
-      document.querySelectorAll("[data-codex-mobile-scroll-inset='true']").forEach((element) => {
-        element.removeAttribute("data-codex-mobile-scroll-inset");
-      });
-    };
-
-    const rememberMobileScrollPosition = (element) => {
-      if (!isLikelyMobileKeyboardDevice() || !isComposerEditableElement(element)) return;
-      const scroller = scrollableAncestor(element);
-      mobileScrollSnapshot = {
-        createdAt: Date.now(),
-        scroller,
-        scrollerTop: scroller ? scroller.scrollTop : 0,
-        windowX: w.scrollX || 0,
-        windowY: w.scrollY || 0,
-      };
-      if (scroller) scroller.setAttribute("data-codex-mobile-scroll-inset", "true");
-    };
-
-    const restoreMobileScrollPosition = () => {
-      if (!mobileScrollSnapshot) return;
-      const snapshot = mobileScrollSnapshot;
-      mobileScrollSnapshot = null;
-      clearMobileScrollInset();
-      const restore = () => {
-        try {
-          if (snapshot.scroller?.isConnected) snapshot.scroller.scrollTop = snapshot.scrollerTop;
-          w.scrollTo(snapshot.windowX, snapshot.windowY);
-        } catch {}
-      };
-      if (typeof w.requestAnimationFrame === "function") {
-        w.requestAnimationFrame(() => w.setTimeout(restore, 0));
-      } else {
-        w.setTimeout(restore, 0);
-      }
-    };
-
-    const activeComposerElement = () => {
-      const active = document.activeElement;
-      return isComposerEditableElement(active) ? active : null;
-    };
-
-    const isKeyboardLikelyOpen = (metrics) => {
-      if (!isLikelyMobileKeyboardDevice()) return false;
-      if (!activeComposerElement()) return false;
-      return metrics.keyboardInset > 80 || (maxObservedViewportHeight > 0 && metrics.height < maxObservedViewportHeight * 0.78);
-    };
-
-    const keepActiveInputVisible = (metrics) => {
-      const active = activeComposerElement();
-      if (!active) return;
       const viewport = w.visualViewport;
-      const visibleTop = Math.max(0, viewport?.offsetTop || metrics.offsetTop || 0);
-      const visibleBottom = visibleTop + Math.max(0, viewport?.height || metrics.height || w.innerHeight || 0);
-      if (visibleBottom <= visibleTop) return;
+      const left = Math.max(0, Math.floor(viewport?.offsetLeft || 0));
+      const top = Math.max(0, Math.floor(viewport?.offsetTop || 0));
+      const width = Math.max(
+        1,
+        Math.floor(viewport?.width || root.clientWidth || w.innerWidth || 0)
+      );
+      const height = Math.max(
+        1,
+        Math.floor(viewport?.height || root.clientHeight || w.innerHeight || 0)
+      );
+      return { left, top, width, height };
+    };
 
-      const scroller = scrollableAncestor(active);
-      if (scroller) scroller.setAttribute("data-codex-mobile-scroll-inset", "true");
+    const dispatchSyntheticResize = () => {
+      if (syntheticResizeTimer) w.clearTimeout(syntheticResizeTimer);
+      syntheticResizeTimer = w.setTimeout(() => {
+        syntheticResizeTimer = null;
+        try {
+          w.dispatchEvent(new Event("resize"));
+        } catch {}
+      }, 0);
+    };
 
-      const rect = active.getBoundingClientRect();
-      const bottomLimit = visibleBottom - Math.min(112, Math.max(36, metrics.keyboardInset + 24));
-      const topLimit = visibleTop + 12;
-      let delta = 0;
-      if (rect.bottom > bottomLimit) {
-        delta = rect.bottom - bottomLimit;
-      } else if (rect.top < topLimit) {
-        delta = rect.top - topLimit;
+    const updateViewportVars = () => {
+      scheduled = false;
+      if (!isLikelyMobileKeyboardDevice()) return;
+      const { left, top, width, height } = viewportSize();
+      const key = `${left},${top}:${width}x${height}`;
+      if (key === lastViewportKey) return;
+      lastViewportKey = key;
+      const root = document.documentElement;
+      root.style.setProperty("--codex-layout-viewport-left", `${left}px`);
+      root.style.setProperty("--codex-layout-viewport-top", `${top}px`);
+      root.style.setProperty("--codex-layout-viewport-width", `${width}px`);
+      root.style.setProperty("--codex-layout-viewport-height", `${height}px`);
+      root.classList.add("codex-mobile-viewport-adapter");
+      const sizeKey = `${width}x${height}`;
+      if (sizeKey !== lastViewportSizeKey) {
+        lastViewportSizeKey = sizeKey;
+        dispatchSyntheticResize();
       }
-      if (Math.abs(delta) < 1) return;
-
-      if (scroller && scroller !== document.documentElement && scroller !== document.body) {
-        scroller.scrollTop += delta;
-        return;
-      }
-      try {
-        w.scrollBy(0, delta);
-      } catch {}
     };
 
     const scheduleViewportUpdate = () => {
-      if (viewportUpdateScheduled) return;
-      viewportUpdateScheduled = true;
-      const run = () => {
-        viewportUpdateScheduled = false;
-        const metrics = viewportMetrics();
-        setViewportVars(metrics);
-        const keyboardOpen = isKeyboardLikelyOpen(metrics);
-        document.documentElement.classList.toggle("codex-mobile-keyboard-open", keyboardOpen);
-        if (keyboardOpen) {
-          keepActiveInputVisible(metrics);
-        } else if (!activeComposerElement()) {
-          restoreMobileScrollPosition();
-        }
-      };
+      if (scheduled) return;
+      scheduled = true;
       if (typeof w.requestAnimationFrame === "function") {
-        w.requestAnimationFrame(run);
+        w.requestAnimationFrame(updateViewportVars);
       } else {
-        w.setTimeout(run, 0);
+        w.setTimeout(updateViewportVars, 0);
       }
-      w.setTimeout(run, 80);
-      w.setTimeout(run, 240);
     };
 
-    const handleFocusIn = (event) => {
-      if (isComposerEditableElement(event.target)) rememberMobileScrollPosition(event.target);
-      scheduleViewportUpdate();
-    };
-
-    const handleFocusOut = () => {
-      w.setTimeout(() => {
-        if (!activeComposerElement()) {
-          document.documentElement.classList.remove("codex-mobile-keyboard-open");
-          restoreMobileScrollPosition();
-        }
-      }, 180);
-    };
-
-    const preventZoomGesture = (event) => {
-      if (!isLikelyMobileKeyboardDevice()) return;
-      if (event.touches && event.touches.length < 2) return;
-      event.preventDefault();
-    };
-
-    setViewportVars();
+    scheduleViewportUpdate();
     w.addEventListener("resize", scheduleViewportUpdate, { passive: true });
-    w.addEventListener(
-      "orientationchange",
-      () => {
-        maxObservedViewportHeight = 0;
-        restoreMobileScrollPosition();
-        scheduleViewportUpdate();
-      },
-      { passive: true }
-    );
+    w.addEventListener("orientationchange", scheduleViewportUpdate, { passive: true });
+    w.addEventListener("pageshow", scheduleViewportUpdate, { passive: true });
     w.visualViewport?.addEventListener("resize", scheduleViewportUpdate, { passive: true });
     w.visualViewport?.addEventListener("scroll", scheduleViewportUpdate, { passive: true });
-    document.addEventListener("focusin", handleFocusIn, true);
-    document.addEventListener("focusout", handleFocusOut, true);
-    document.addEventListener("input", scheduleViewportUpdate, true);
-    document.addEventListener("touchmove", preventZoomGesture, { passive: false });
-    document.addEventListener("gesturestart", preventZoomGesture, { passive: false });
-    document.addEventListener("gesturechange", preventZoomGesture, { passive: false });
+    document.addEventListener("focusin", scheduleViewportUpdate, true);
+    document.addEventListener("focusout", scheduleViewportUpdate, true);
   }
 
-  installMobileViewportGuards();
+  installMobileViewportAdapter();
 
   /**
    * Electron 的 <webview> 在浏览器里不存在。
@@ -492,8 +469,9 @@
   const listeners = new Map();
   const authStatusCallbacks = new Set();
   const terminalMessageQueues = new Map();
-  const MOBILE_COMPOSER_POST_SEND_FOCUS_BLOCK_MS = 4000;
+  const MOBILE_COMPOSER_POST_SEND_FOCUS_BLOCK_MS = 6500;
   const MOBILE_COMPOSER_MANUAL_FOCUS_MS = 900;
+  const MOBILE_COMPOSER_BLUR_DELAYS_MS = [0, 50, 160, 360, 700];
   const MOBILE_SIDEBAR_AUTO_COLLAPSE_DELAY_MS = 80;
   const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
   const STATSIG_I18N_LAYER_CONFIG = "72216192";
@@ -551,6 +529,68 @@
     );
   }
 
+  function activeComposerEditableElement() {
+    const active = document.activeElement;
+    return isComposerEditableElement(active) ? active : null;
+  }
+
+  function elementDebugSummary(element) {
+    if (!element || element.nodeType !== 1) return null;
+    const rect =
+      typeof element.getBoundingClientRect === "function"
+        ? element.getBoundingClientRect()
+        : null;
+    return {
+      tag: String(element.tagName || "").toLowerCase(),
+      id: element.id || "",
+      className: String(element.className || ""),
+      role: element.getAttribute?.("role") || "",
+      ariaLabel: element.getAttribute?.("aria-label") || "",
+      ariaHasPopup: element.getAttribute?.("aria-haspopup") || "",
+      ariaExpanded: element.getAttribute?.("aria-expanded") || "",
+      dataState: element.getAttribute?.("data-state") || "",
+      text: String(element.textContent || "").trim().slice(0, 80),
+      rect: rect
+        ? {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          }
+        : null,
+    };
+  }
+
+  function blurActiveMobileComposer() {
+    if (!opencodexSettingEnabled("mobileKeyboardOptimization")) return;
+    if (!isLikelyMobileKeyboardDevice()) return;
+    const blur = () => {
+      const active = activeComposerEditableElement();
+      if (!active || typeof active.blur !== "function") return;
+      try {
+        active.blur();
+      } catch {}
+    };
+    for (const delay of MOBILE_COMPOSER_BLUR_DELAYS_MS) {
+      if (delay === 0 && typeof w.requestAnimationFrame === "function") {
+        w.requestAnimationFrame(blur);
+      } else {
+        w.setTimeout(blur, delay);
+      }
+    }
+  }
+
+  function markMobileComposerSubmitIntent() {
+    if (!opencodexSettingEnabled("mobileKeyboardOptimization")) return;
+    if (!isLikelyMobileKeyboardDevice()) return;
+    mobileComposerFocusBlockedUntilMs = Date.now() + MOBILE_COMPOSER_POST_SEND_FOCUS_BLOCK_MS;
+    debugMobileComposer("submit intent detected; blurring composer", {
+      blockedUntilMs: mobileComposerFocusBlockedUntilMs,
+      active: elementDebugSummary(activeComposerEditableElement()),
+    });
+    blurActiveMobileComposer();
+  }
+
   /** 用户主动点输入区时，发送后的 focus guard 必须放行。 */
   function rememberManualComposerFocusIntent(event) {
     const target = event && event.target;
@@ -565,6 +605,13 @@
     if (channel === "turn:start" || channel === "start-conversation") return true;
     if (channel !== "codex_desktop:message-from-view") return false;
     if (!payload || typeof payload !== "object") return false;
+    if (
+      payload.type === "thread-queued-followups-changed" &&
+      Array.isArray(payload.messages) &&
+      payload.messages.length > 0
+    ) {
+      return true;
+    }
     const request = payload.request && typeof payload.request === "object" ? payload.request : null;
     return !!request && request.method === "turn/start";
   }
@@ -573,7 +620,7 @@
   function markMobileComposerPromptSent(channel, payload) {
     if (!opencodexSettingEnabled("mobileKeyboardOptimization")) return;
     if (!isLikelyMobileKeyboardDevice() || !isPromptSendInvoke(channel, payload)) return;
-    mobileComposerFocusBlockedUntilMs = Date.now() + MOBILE_COMPOSER_POST_SEND_FOCUS_BLOCK_MS;
+    markMobileComposerSubmitIntent();
   }
 
   /** 只拦发送后的程序化 composer focus，不拦用户手动点击输入区。 */
@@ -927,18 +974,23 @@
     } catch {}
   }
 
+  function toggleLeftSidebar() {
+    const toggleButton = findSidebarToggleButton();
+    if (toggleButton && typeof toggleButton.click === "function") {
+      toggleButton.click();
+      return true;
+    }
+    postSidebarToggleMessage();
+    return true;
+  }
+
   function collapseMobileSidebarAfterSelection() {
     if (mobileSidebarCollapseTimer) w.clearTimeout(mobileSidebarCollapseTimer);
     mobileSidebarCollapseTimer = w.setTimeout(() => {
       mobileSidebarCollapseTimer = null;
       const panel = sidebarPanelElement();
       if (!panel || !visibleElement(panel)) return;
-      const toggleButton = findSidebarToggleButton();
-      if (toggleButton && typeof toggleButton.click === "function") {
-        toggleButton.click();
-        return;
-      }
-      postSidebarToggleMessage();
+      toggleLeftSidebar();
     }, MOBILE_SIDEBAR_AUTO_COLLAPSE_DELAY_MS);
   }
 
@@ -988,7 +1040,7 @@
   function installMobileSidebarAutoCollapse() {
     if (!document || document.__codexMobileSidebarAutoCollapseInstalled) return;
     document.__codexMobileSidebarAutoCollapseInstalled = true;
-    document.addEventListener("click", handleMobileSidebarAutoCollapseClick, true);
+    document.addEventListener("click", handleMobileSidebarAutoCollapseClick);
   }
 
   installMobileSidebarAutoCollapse();

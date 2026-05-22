@@ -69,6 +69,7 @@ const LOCAL_FILE_TOKEN_TTL_MS = Math.max(1_000, Number(process.env.CODEX_WEB_LOC
 const PATCHED_OFFICIAL_PREFIX = "/official-patched/";
 let officialBundle = null;
 let hasWarnedHistoryPatchMiss = false;
+let hasWarnedAppShellViewportPatchMiss = false;
 // AsyncLocalStorage 用来把当前请求的 clientId/remoteAddress 传入更深层的 IPC handler。
 const requestContext = new AsyncLocalStorage();
 // 这些 channel 必须优先定向回触发请求的浏览器，避免局域网多设备访问时互相收到审批/fetch 响应。
@@ -596,7 +597,7 @@ function patchAppServerManagerSignalsChunk(source) {
     /turnStartedAtMs:([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.startedAt\),firstTurnWorkItemStartedAtMs:\1\(\2\.firstTurnWorkItemStartedAt\?\?\2\.startedAt\),finalAssistantStartedAtMs:\1\(\2\.completedAt\)/;
   if (alreadyPatched.test(source)) return source;
   const historyTurnShape =
-    /(turnStartedAtMs:([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.startedAt\),)(finalAssistantStartedAtMs:\2\(\3\.completedAt\),status:\3\.status)/;
+    /(turnStartedAtMs:([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.startedAt\),)((?:durationMs:\3\.durationMs,)?)(finalAssistantStartedAtMs:\2\(\3\.completedAt\),status:\3\.status)/;
   if (!historyTurnShape.test(source)) {
     if (!hasWarnedHistoryPatchMiss) {
       hasWarnedHistoryPatchMiss = true;
@@ -604,18 +605,49 @@ function patchAppServerManagerSignalsChunk(source) {
     }
     return source;
   }
-  return source.replace(historyTurnShape, (_match, prefix, secondsToMs, turnVar, suffix) =>
-    `${prefix}firstTurnWorkItemStartedAtMs:${secondsToMs}(${turnVar}.firstTurnWorkItemStartedAt??${turnVar}.startedAt),${suffix}`
+  return source.replace(historyTurnShape, (_match, prefix, secondsToMs, turnVar, optionalDuration, suffix) =>
+    `${prefix}firstTurnWorkItemStartedAtMs:${secondsToMs}(${turnVar}.firstTurnWorkItemStartedAt??${turnVar}.startedAt),${optionalDuration}${suffix}`
   );
+}
+
+/**
+ * 官方 app-shell 是 Electron 桌面 renderer，根布局内联使用 100vw/100vh。
+ * 移动端浏览器软键盘、iOS 顶部状态栏避让只改变 visualViewport，
+ * 不稳定改变 layout viewport；如果继续用 100vh，composer、popover、dialog
+ * 都会按桌面视口布局到可视区域外。
+ *
+ * 这里只把 app-shell 的根 viewport 来源换成 web-shell 维护的 CSS 变量。
+ * 不碰 thread-scroll-container：官方线程滚动是 flex-col-reverse + 负 scrollTop 模型。
+ */
+function patchAppShellViewportChunk(source) {
+  const original =
+    "width:`calc(100vw / var(--codex-window-zoom))`,height:`calc(100vh / var(--codex-window-zoom))`";
+  const replacement =
+    "width:`calc(var(--codex-layout-viewport-width, 100vw) / var(--codex-window-zoom))`,height:`calc(var(--codex-layout-viewport-height, 100dvh) / var(--codex-window-zoom))`";
+  if (source.includes(replacement)) return source;
+  if (!source.includes(original)) {
+    if (!hasWarnedAppShellViewportPatchMiss) {
+      hasWarnedAppShellViewportPatchMiss = true;
+      console.warn("[gateway] app-shell mobile viewport patch skipped: current bundle shape did not match");
+    }
+    return source;
+  }
+  return source.replace(original, replacement);
 }
 
 /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
 function patchOfficialAsset(reqPath, data) {
   if (!shouldPatchOfficialAsset(reqPath)) return data;
   const source = data.toString("utf-8");
-  const patched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
-    ? patchAppServerManagerSignalsChunk(source)
-    : source;
+  let patched = source;
+  if (/\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)) {
+    patched = patchAppServerManagerSignalsChunk(patched);
+  }
+  // Keep the app-shell viewport aligned to visualViewport on mobile; this is
+  // required for composer placement when iOS changes the visible viewport.
+  if (source.includes("width:`calc(100vw / var(--codex-window-zoom))`")) {
+    patched = patchAppShellViewportChunk(patched);
+  }
   return Buffer.from(patched, "utf-8");
 }
 

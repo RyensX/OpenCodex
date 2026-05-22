@@ -238,6 +238,11 @@ function createViewMessageHandlers(deps) {
         await appServerBridge.respondToAppServerRequest(payload);
         return true;
       }
+      if (payload.type === "thread-queued-followups-changed") {
+        // Renderer-local queue state notification. Desktop persists/observes this on the Electron side;
+        // the web gateway only needs to ACK it so the renderer does not surface a warning toast.
+        return true;
+      }
       if (String(payload.type || "").startsWith("terminal-")) {
         const handled = terminalIpc.handleTerminalMessage(payload, context);
         if (!handled) {
