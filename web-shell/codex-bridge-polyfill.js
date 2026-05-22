@@ -136,19 +136,18 @@
     style.id = "codex-mobile-viewport-guards";
     style.textContent = `
       @media (max-width: 820px), (pointer: coarse) {
-        html,
-        body,
-        #root {
-          height: var(--codex-visual-viewport-height, 100dvh) !important;
-          min-height: var(--codex-visual-viewport-height, 100dvh) !important;
-          max-height: var(--codex-visual-viewport-height, 100dvh) !important;
-          overflow: hidden;
+        html {
+          scroll-padding-top: calc(var(--codex-visual-viewport-offset-top, 0px) + env(safe-area-inset-top) + 12px);
+          scroll-padding-bottom: calc(var(--codex-keyboard-inset-bottom, 0px) + env(safe-area-inset-bottom) + 112px);
+          -webkit-text-size-adjust: 100%;
+          text-size-adjust: 100%;
         }
 
         body {
           width: 100%;
+          min-height: 100dvh;
           touch-action: pan-x pan-y;
-          overscroll-behavior: none;
+          overscroll-behavior-y: contain;
         }
 
         input,
@@ -156,45 +155,115 @@
         [contenteditable="true"],
         .ProseMirror {
           font-size: max(16px, 1em) !important;
-          scroll-margin-bottom: calc(var(--codex-keyboard-inset-bottom, 0px) + 96px);
+          scroll-margin-top: calc(var(--codex-visual-viewport-offset-top, 0px) + env(safe-area-inset-top) + 16px);
+          scroll-margin-bottom: calc(var(--codex-keyboard-inset-bottom, 0px) + env(safe-area-inset-bottom) + 112px);
+        }
+
+        [data-codex-mobile-scroll-inset="true"] {
+          scroll-padding-top: calc(var(--codex-visual-viewport-offset-top, 0px) + env(safe-area-inset-top) + 12px) !important;
+          scroll-padding-bottom: calc(var(--codex-keyboard-inset-bottom, 0px) + env(safe-area-inset-bottom) + 112px) !important;
+        }
+
+        html:not(.codex-mobile-keyboard-open) [data-codex-mobile-scroll-inset="true"] {
+          scroll-padding-bottom: 12px !important;
         }
       }
     `;
     (document.head || document.documentElement).appendChild(style);
 
-    const setViewportVars = () => {
+    let maxObservedViewportHeight = 0;
+    let mobileScrollSnapshot = null;
+    let viewportUpdateScheduled = false;
+
+    const viewportMetrics = () => {
       const viewport = w.visualViewport;
       const height = Math.max(0, Math.floor(viewport?.height || w.innerHeight || document.documentElement.clientHeight || 0));
       const offsetTop = Math.max(0, Math.floor(viewport?.offsetTop || 0));
       const layoutHeight = Math.max(0, Math.floor(w.innerHeight || document.documentElement.clientHeight || height));
-      const keyboardInset = Math.max(0, layoutHeight - height - offsetTop);
+      maxObservedViewportHeight = Math.max(maxObservedViewportHeight, height);
+      const keyboardInset = Math.max(0, layoutHeight - height - offsetTop, maxObservedViewportHeight - height - offsetTop);
+      return { height, offsetTop, layoutHeight, keyboardInset };
+    };
+
+    const setViewportVars = (metrics = viewportMetrics()) => {
       const root = document.documentElement;
-      if (height > 0) root.style.setProperty("--codex-visual-viewport-height", `${height}px`);
-      root.style.setProperty("--codex-visual-viewport-offset-top", `${offsetTop}px`);
-      root.style.setProperty("--codex-keyboard-inset-bottom", `${keyboardInset}px`);
+      if (metrics.height > 0) root.style.setProperty("--codex-visual-viewport-height", `${metrics.height}px`);
+      if (metrics.layoutHeight > 0) root.style.setProperty("--codex-layout-viewport-height", `${metrics.layoutHeight}px`);
+      root.style.setProperty("--codex-visual-viewport-offset-top", `${metrics.offsetTop}px`);
+      root.style.setProperty("--codex-keyboard-inset-bottom", `${metrics.keyboardInset}px`);
     };
 
     const scrollableAncestor = (element) => {
       for (let node = element?.parentElement; node && node !== document.body; node = node.parentElement) {
         const style = w.getComputedStyle ? w.getComputedStyle(node) : null;
         const overflowY = String(style?.overflowY || "");
-        if (/(auto|scroll)/.test(overflowY) && node.scrollHeight > node.clientHeight) return node;
+        if (/(auto|scroll|overlay)/.test(overflowY) && node.scrollHeight > node.clientHeight + 1) return node;
       }
-      return null;
+      return document.scrollingElement || document.documentElement;
     };
 
-    const keepActiveInputVisible = () => {
-      if (!isLikelyMobileKeyboardDevice()) return;
+    const clearMobileScrollInset = () => {
+      document.querySelectorAll("[data-codex-mobile-scroll-inset='true']").forEach((element) => {
+        element.removeAttribute("data-codex-mobile-scroll-inset");
+      });
+    };
+
+    const rememberMobileScrollPosition = (element) => {
+      if (!isLikelyMobileKeyboardDevice() || !isComposerEditableElement(element)) return;
+      const scroller = scrollableAncestor(element);
+      mobileScrollSnapshot = {
+        createdAt: Date.now(),
+        scroller,
+        scrollerTop: scroller ? scroller.scrollTop : 0,
+        windowX: w.scrollX || 0,
+        windowY: w.scrollY || 0,
+      };
+      if (scroller) scroller.setAttribute("data-codex-mobile-scroll-inset", "true");
+    };
+
+    const restoreMobileScrollPosition = () => {
+      if (!mobileScrollSnapshot) return;
+      const snapshot = mobileScrollSnapshot;
+      mobileScrollSnapshot = null;
+      clearMobileScrollInset();
+      const restore = () => {
+        try {
+          if (snapshot.scroller?.isConnected) snapshot.scroller.scrollTop = snapshot.scrollerTop;
+          w.scrollTo(snapshot.windowX, snapshot.windowY);
+        } catch {}
+      };
+      if (typeof w.requestAnimationFrame === "function") {
+        w.requestAnimationFrame(() => w.setTimeout(restore, 0));
+      } else {
+        w.setTimeout(restore, 0);
+      }
+    };
+
+    const activeComposerElement = () => {
       const active = document.activeElement;
-      if (!isComposerEditableElement(active)) return;
+      return isComposerEditableElement(active) ? active : null;
+    };
+
+    const isKeyboardLikelyOpen = (metrics) => {
+      if (!isLikelyMobileKeyboardDevice()) return false;
+      if (!activeComposerElement()) return false;
+      return metrics.keyboardInset > 80 || (maxObservedViewportHeight > 0 && metrics.height < maxObservedViewportHeight * 0.78);
+    };
+
+    const keepActiveInputVisible = (metrics) => {
+      const active = activeComposerElement();
+      if (!active) return;
       const viewport = w.visualViewport;
-      const visibleTop = Math.max(0, viewport?.offsetTop || 0);
-      const visibleBottom = visibleTop + Math.max(0, viewport?.height || w.innerHeight || 0);
+      const visibleTop = Math.max(0, viewport?.offsetTop || metrics.offsetTop || 0);
+      const visibleBottom = visibleTop + Math.max(0, viewport?.height || metrics.height || w.innerHeight || 0);
       if (visibleBottom <= visibleTop) return;
 
+      const scroller = scrollableAncestor(active);
+      if (scroller) scroller.setAttribute("data-codex-mobile-scroll-inset", "true");
+
       const rect = active.getBoundingClientRect();
-      const bottomLimit = visibleBottom - 18;
-      const topLimit = visibleTop + 8;
+      const bottomLimit = visibleBottom - Math.min(112, Math.max(36, metrics.keyboardInset + 24));
+      const topLimit = visibleTop + 12;
       let delta = 0;
       if (rect.bottom > bottomLimit) {
         delta = rect.bottom - bottomLimit;
@@ -203,8 +272,7 @@
       }
       if (Math.abs(delta) < 1) return;
 
-      const scroller = scrollableAncestor(active);
-      if (scroller) {
+      if (scroller && scroller !== document.documentElement && scroller !== document.body) {
         scroller.scrollTop += delta;
         return;
       }
@@ -214,10 +282,19 @@
     };
 
     const scheduleViewportUpdate = () => {
-      setViewportVars();
+      if (viewportUpdateScheduled) return;
+      viewportUpdateScheduled = true;
       const run = () => {
-        setViewportVars();
-        keepActiveInputVisible();
+        viewportUpdateScheduled = false;
+        const metrics = viewportMetrics();
+        setViewportVars(metrics);
+        const keyboardOpen = isKeyboardLikelyOpen(metrics);
+        document.documentElement.classList.toggle("codex-mobile-keyboard-open", keyboardOpen);
+        if (keyboardOpen) {
+          keepActiveInputVisible(metrics);
+        } else if (!activeComposerElement()) {
+          restoreMobileScrollPosition();
+        }
       };
       if (typeof w.requestAnimationFrame === "function") {
         w.requestAnimationFrame(run);
@@ -227,6 +304,21 @@
       w.setTimeout(run, 80);
       w.setTimeout(run, 240);
     };
+
+    const handleFocusIn = (event) => {
+      if (isComposerEditableElement(event.target)) rememberMobileScrollPosition(event.target);
+      scheduleViewportUpdate();
+    };
+
+    const handleFocusOut = () => {
+      w.setTimeout(() => {
+        if (!activeComposerElement()) {
+          document.documentElement.classList.remove("codex-mobile-keyboard-open");
+          restoreMobileScrollPosition();
+        }
+      }, 180);
+    };
+
     const preventZoomGesture = (event) => {
       if (!isLikelyMobileKeyboardDevice()) return;
       if (event.touches && event.touches.length < 2) return;
@@ -235,10 +327,19 @@
 
     setViewportVars();
     w.addEventListener("resize", scheduleViewportUpdate, { passive: true });
-    w.addEventListener("orientationchange", scheduleViewportUpdate, { passive: true });
+    w.addEventListener(
+      "orientationchange",
+      () => {
+        maxObservedViewportHeight = 0;
+        restoreMobileScrollPosition();
+        scheduleViewportUpdate();
+      },
+      { passive: true }
+    );
     w.visualViewport?.addEventListener("resize", scheduleViewportUpdate, { passive: true });
     w.visualViewport?.addEventListener("scroll", scheduleViewportUpdate, { passive: true });
-    document.addEventListener("focusin", scheduleViewportUpdate, true);
+    document.addEventListener("focusin", handleFocusIn, true);
+    document.addEventListener("focusout", handleFocusOut, true);
     document.addEventListener("input", scheduleViewportUpdate, true);
     document.addEventListener("touchmove", preventZoomGesture, { passive: false });
     document.addEventListener("gesturestart", preventZoomGesture, { passive: false });
