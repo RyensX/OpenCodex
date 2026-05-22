@@ -3,6 +3,9 @@ export {};
 
 const util = require("util");
 
+const MCP_RESPONSE_CACHE_TTL_MS = 2 * 60 * 1000;
+const MAX_RECENT_MCP_RESPONSES = 500;
+
 function createViewMessageHandlers(deps) {
   const DEBUG_LOGS = deps.debugLogs;
   const DESKTOP_VIEW_NOOP_MESSAGE_TYPES = deps.desktopViewNoopMessageTypes;
@@ -24,6 +27,49 @@ function createViewMessageHandlers(deps) {
   const runDetached = deps.runDetached;
   const patchCodexConfigResult = deps.patchCodexConfigResult;
   const patchConfigRequirementsResult = deps.patchConfigRequirementsResult;
+  const inflightMcpRequests = new Map();
+  const recentMcpResponses = new Map();
+
+  function mcpRequestKey(clientId, requestId) {
+    if (!requestId) return "";
+    return `${clientId || "global"}:${requestId}`;
+  }
+
+  function pruneRecentMcpResponses() {
+    const now = Date.now();
+    for (const [key, entry] of recentMcpResponses.entries()) {
+      if (!entry || entry.expiresAtMs <= now) recentMcpResponses.delete(key);
+    }
+    if (recentMcpResponses.size <= MAX_RECENT_MCP_RESPONSES) return;
+    const overflow = recentMcpResponses.size - MAX_RECENT_MCP_RESPONSES;
+    let removed = 0;
+    for (const key of recentMcpResponses.keys()) {
+      recentMcpResponses.delete(key);
+      removed += 1;
+      if (removed >= overflow) break;
+    }
+  }
+
+  function replayRecentMcpResponse(key) {
+    if (!key) return false;
+    pruneRecentMcpResponses();
+    const cached = recentMcpResponses.get(key);
+    if (!cached) return false;
+    if (typeof broadcast === "function") {
+      broadcast(cached.message);
+      return true;
+    }
+    return false;
+  }
+
+  function rememberRecentMcpResponse(key, message) {
+    if (!key) return;
+    pruneRecentMcpResponses();
+    recentMcpResponses.set(key, {
+      message,
+      expiresAtMs: Date.now() + MCP_RESPONSE_CACHE_TTL_MS,
+    });
+  }
 
   async function handleViewMessage(payload, context = {}) {
     if (payload && typeof payload === "object") {
@@ -205,13 +251,26 @@ function createViewMessageHandlers(deps) {
         payload.request
       ) {
         const targetClientId = targetClientIdForContext(context);
+        const requestId = String(payload.request.id || "");
+        const method =
+          payload.type === "thread-prewarm-start"
+            ? "thread/start"
+            : String(payload.request.method || "");
+        const requestKey = mcpRequestKey(targetClientId, requestId);
+        if (requestKey && replayRecentMcpResponse(requestKey)) {
+          if (DEBUG_LOGS) {
+            console.log(`[gateway] replayed mcp response id=${requestId} method=${method}`);
+          }
+          return true;
+        }
+        if (requestKey && inflightMcpRequests.has(requestKey)) {
+          if (DEBUG_LOGS) {
+            console.log(`[gateway] joined inflight mcp request id=${requestId} method=${method}`);
+          }
+          return true;
+        }
         // mcp-request 要立即 ACK 给 renderer，真正 app-server 调用完成后再广播 mcp-response。
-        return runDetached("mcp-request", async () => {
-          const requestId = String(payload.request.id || "");
-          const method =
-            payload.type === "thread-prewarm-start"
-              ? "thread/start"
-              : String(payload.request.method || "");
+        const run = (async () => {
           const requestPayload =
             payload.request.params === undefined ? null : payload.request.params;
           let result = null;
@@ -222,7 +281,9 @@ function createViewMessageHandlers(deps) {
             } else if (method === "list-models-for-host") {
               result = await appServerBridge.listModelsForHost(requestPayload);
             } else {
-              result = await appServerBridge.callAppServer(method, requestPayload);
+              result = await appServerBridge.callAppServer(method, requestPayload, {
+                clientId: targetClientId,
+              });
               if (method === "thread/start") {
                 // renderer 自己走 AppServerManager.startConversation/prewarm 时会从这里创建真实 thread。
                 workspaceRuntime.recordThreadStartMetadata(result, requestPayload);
@@ -245,7 +306,7 @@ function createViewMessageHandlers(deps) {
                 )}`
               );
             }
-            broadcast(withTargetClient({
+            const responseMessage = withTargetClient({
               channel: "mcp-response",
               payload: {
                 hostId: payload.hostId ?? null,
@@ -254,9 +315,20 @@ function createViewMessageHandlers(deps) {
                   ...(mcpError ? { error: { message: mcpError.message } } : { result }),
                 },
               },
-            }, targetClientId));
+            }, targetClientId);
+            rememberRecentMcpResponse(requestKey, responseMessage);
+            broadcast(responseMessage);
           }
-        });
+        })();
+        if (requestKey) {
+          inflightMcpRequests.set(requestKey, run);
+          run.finally(() => {
+            if (inflightMcpRequests.get(requestKey) === run) {
+              inflightMcpRequests.delete(requestKey);
+            }
+          });
+        }
+        return runDetached("mcp-request", () => run);
       }
       if (payload.type === "fetch") {
         return runDetached("fetch", async () => {
