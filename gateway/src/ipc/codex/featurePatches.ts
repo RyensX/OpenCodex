@@ -2,6 +2,11 @@
 export {};
 
 const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
+const STATSIG_I18N_LAYER_CONFIG = "72216192";
+const STATSIG_I18N_LAYER_VALUES = {
+  enable_i18n: true,
+  locale_source: "IDE",
+};
 
 const STATSIG_DEFAULT_FEATURE_OVERRIDES = {
   guardian_approval: true,
@@ -14,6 +19,44 @@ const APP_SERVER_UNSUPPORTED_FEATURE_ENABLEMENTS = new Set([
   "enable_mcp_apps",
 ]);
 const DEFAULT_ALLOWED_APPROVALS_REVIEWERS = ["user", "auto_review", "guardian_subagent"];
+
+/** 生成离线 Statsig initialize 响应；SDK 需要 has_updates/time 等外层字段才会完成初始化。 */
+function buildStatsigDefaultInitializeResponse() {
+  const feature_gates = {};
+  const dynamic_configs = {};
+  for (const [featureName, enabled] of Object.entries(STATSIG_DEFAULT_FEATURE_OVERRIDES)) {
+    feature_gates[featureName] = {
+      name: featureName,
+      value: enabled,
+      rule_id: "gateway_override",
+      secondary_exposures: [],
+    };
+  }
+  dynamic_configs[STATSIG_DEFAULT_FEATURES_CONFIG] = {
+    name: STATSIG_DEFAULT_FEATURES_CONFIG,
+    value: { ...STATSIG_DEFAULT_FEATURE_OVERRIDES },
+    rule_id: "gateway_override",
+    secondary_exposures: [],
+  };
+  return {
+    has_updates: true,
+    time: Date.now(),
+    hash_used: "djb2",
+    feature_gates,
+    dynamic_configs,
+    layer_configs: {
+      [STATSIG_I18N_LAYER_CONFIG]: {
+        name: STATSIG_I18N_LAYER_CONFIG,
+        value: { ...STATSIG_I18N_LAYER_VALUES },
+        rule_id: "gateway_override",
+        secondary_exposures: [],
+      },
+    },
+    param_stores: {},
+    exposures: {},
+    sdk_flags: {},
+  };
+}
 
 /** 判断值是否为普通对象；很多 IPC payload 都需要先做这个防御性判断。 */
 function isPlainObject(value) {
@@ -45,6 +88,27 @@ function setStatsigDynamicConfigValue(container, configName, key, value) {
   const nextValue = {
     ...existingValue,
     [key]: value,
+  };
+  const next = {
+    name: configName,
+    rule_id: existing.rule_id || "gateway_override",
+    secondary_exposures: Array.isArray(existing.secondary_exposures) ? existing.secondary_exposures : [],
+    ...existing,
+    value: nextValue,
+  };
+  if (JSON.stringify(existing) === JSON.stringify(next)) return false;
+  container[configName] = next;
+  return true;
+}
+
+/** 在 Statsig layer config 里写入实验参数；官方 i18n 当前从 layer 72216192 读取。 */
+function setStatsigLayerConfigValues(container, configName, values) {
+  if (!isPlainObject(container)) return false;
+  const existing = isPlainObject(container[configName]) ? container[configName] : {};
+  const existingValue = isPlainObject(existing.value) ? existing.value : {};
+  const nextValue = {
+    ...existingValue,
+    ...values,
   };
   const next = {
     name: configName,
@@ -98,6 +162,10 @@ function patchStatsigDefaultFeatures(bodyText) {
     parsed.dynamic_configs = {};
     changed = true;
   }
+  if (!isPlainObject(parsed.layer_configs)) {
+    parsed.layer_configs = {};
+    changed = true;
+  }
   for (const [featureName, enabled] of Object.entries(STATSIG_DEFAULT_FEATURE_OVERRIDES)) {
     changed = setStatsigGateEnabled(parsed.feature_gates, featureName) || changed;
     changed =
@@ -107,6 +175,16 @@ function patchStatsigDefaultFeatures(bodyText) {
         featureName,
         enabled
       ) || changed;
+  }
+  for (const key of ["layer_configs", "layerConfigs", "layers"]) {
+    if (isPlainObject(parsed[key])) {
+      changed =
+        setStatsigLayerConfigValues(
+          parsed[key],
+          STATSIG_I18N_LAYER_CONFIG,
+          STATSIG_I18N_LAYER_VALUES
+        ) || changed;
+    }
   }
   return changed ? JSON.stringify(parsed) : null;
 }
@@ -201,6 +279,8 @@ module.exports = {
   DEFAULT_ALLOWED_APPROVALS_REVIEWERS,
   STATSIG_DEFAULT_FEATURE_OVERRIDES,
   STATSIG_DEFAULT_FEATURES_CONFIG,
+  STATSIG_I18N_LAYER_CONFIG,
+  STATSIG_I18N_LAYER_VALUES,
   filterUnsupportedFeatureEnablements,
   isPlainObject,
   patchCodexConfigFeatureFlags,
@@ -209,4 +289,5 @@ module.exports = {
   patchConfigRequirementsResult,
   patchStatsigDefaultFeatureSnapshot,
   patchStatsigDefaultFeatures,
+  buildStatsigDefaultInitializeResponse,
 };

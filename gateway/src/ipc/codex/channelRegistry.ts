@@ -328,6 +328,27 @@ const BRIDGE_MAP_ENTRIES = [
     notes: "codexConfig 读 app-server，Electron UI 设置读本机 Desktop globalState。",
   },
   {
+    renderer: "get-settings",
+    gateway: "get-settings",
+    appServer: "config/read (for codexConfig)",
+    status: "bridge",
+    notes: "兼容 official renderer 通过 vscode://codex/get-settings 读取设置的入口。",
+  },
+  {
+    renderer: "get-setting",
+    gateway: "get-setting",
+    appServer: "config/read (for codexConfig)",
+    status: "bridge",
+    notes: "兼容 official renderer 通过 vscode://codex/get-setting 读取单个设置的入口。",
+  },
+  {
+    renderer: "set-setting",
+    gateway: "set-setting",
+    appServer: "config/batchWrite (for codexConfig)",
+    status: "bridge",
+    notes: "兼容 official renderer 通过 vscode://codex/set-setting 写入单个设置的入口。",
+  },
+  {
     renderer: "settings:set",
     gateway: "settings:set",
     appServer: "config/batchWrite (for codexConfig)",

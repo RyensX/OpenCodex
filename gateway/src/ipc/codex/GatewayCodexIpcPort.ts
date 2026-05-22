@@ -16,6 +16,7 @@ const {
   patchConfigRequirementsResult,
   patchStatsigDefaultFeatureSnapshot,
   patchStatsigDefaultFeatures,
+  buildStatsigDefaultInitializeResponse,
 } = require("./featurePatches");
 const { createAutomationIpcHandlers } = require("./automations");
 const { createTerminalIpcHandlers } = require("./terminal");
@@ -35,7 +36,7 @@ const { createLocalFileIpcHandlers } = require("./localFiles");
 const { nativeDesktopAppByBundleId, nativeDesktopAppIcon } = require("./nativeApps");
 const { createRecommendedSkillsIpcHandlers } = require("./recommendedSkills");
 const { normalizeMcpCodexConfig } = require("./mcpConfig");
-const { buildLocaleInfo, buildOsInfo, chroniclePermissionsStatus } = require("./environmentInfo");
+const { DEFAULT_LOCALE, buildLocaleInfo, buildOsInfo, chroniclePermissionsStatus } = require("./environmentInfo");
 const { createCodexDiagnostics } = require("./diagnostics");
 
 const PROJECT_ROOT = path.resolve(__dirname, "../../../..");
@@ -115,6 +116,7 @@ const DESKTOP_VIEW_NOOP_MESSAGE_TYPES = new Set([
   "app-shell-shortcut-state-changed",
   "avatar-overlay-open-state-request",
   "browser-sidebar-owner-sync",
+  "browser-sidebar-tweaks-enabled-changed",
   "browser-use-turn-route-capture",
   "browser-use-turn-route-release",
   "browser-use-non-local-sites-allowed-changed",
@@ -164,6 +166,7 @@ function buildGatewayConfig() {
     gatewayBaseUrl,
     workspaceRoots,
     homeDir: os.homedir(),
+    locale: DEFAULT_LOCALE,
     appServer: process.env.CODEX_APP_SERVER_URL ? "remote" : "local",
     sharedObjectSnapshot: desktopState.sharedObjectSnapshotObject(),
   };
@@ -209,6 +212,36 @@ function recordReviewPaneSnapshotMetrics(payload) {
   };
   REVIEW_PANE_SNAPSHOT_METRICS.set(hostId, metrics);
   return { ok: true, hostId, ...metrics };
+}
+
+function buildPrimaryRuntimeDependencies() {
+  const nodePath = process.execPath;
+  const nodeCommand =
+    process.env.ELECTRON_RUN_AS_NODE === "1"
+      ? nodePath
+      : `ELECTRON_RUN_AS_NODE=1 ${JSON.stringify(nodePath)}`;
+  return {
+    installed: true,
+    bundleVersion: "opencodex-local",
+    instructions: [
+      "本地 OpenCodex 运行时可用于工作区依赖任务。",
+      `Node.js 路径：${nodePath}`,
+      `如果要把 Electron 运行时作为 Node.js 启动，请设置 ELECTRON_RUN_AS_NODE=1。例如：${nodeCommand} --version`,
+      "当前构建未配置内置 Python/文档运行时；需要时请使用系统或项目提供的 Python。",
+    ].join("\n"),
+    paths: {
+      node: nodePath,
+      python: null,
+      workspace: PROJECT_ROOT,
+    },
+  };
+}
+
+function diagnosePrimaryRuntimeDependencies() {
+  return {
+    ...buildPrimaryRuntimeDependencies(),
+    problems: [],
+  };
 }
 
 const diagnostics = createCodexDiagnostics({
@@ -382,6 +415,7 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
     invokeCodexChannel: (channel, payload, requestContext) => handle(channel, payload, requestContext),
     shouldPatchStatsigInitialize,
     patchStatsigDefaultFeatures,
+    buildStatsigDefaultInitializeResponse,
     statsigDefaultFeatureOverrides: STATSIG_DEFAULT_FEATURE_OVERRIDES,
   });
 
@@ -668,6 +702,16 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return { connectors: [] };
       case "locale-info":
         return buildLocaleInfo();
+      case "load-primary-runtime-dependencies":
+        return buildPrimaryRuntimeDependencies();
+      case "diagnose-primary-runtime-dependencies":
+        return diagnosePrimaryRuntimeDependencies();
+      case "primary-runtime-update-run-now":
+      case "reset-primary-runtime-dependencies":
+        return { ...diagnosePrimaryRuntimeDependencies(), status: "ready" };
+      case "cancel-primary-runtime-install":
+      case "cancel-primary-runtime-dependencies":
+        return { canceled: false };
       case "projects:list":
         return workspaceIpc.listProjects();
       case "projects:browse":
@@ -700,8 +744,17 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return null;
       case "native-desktop-apps":
         return { apps: [] };
+      case "get-settings":
+        return {
+          values: await desktopState.getSettingValue(null, { readCodexConfig: appServerBridge.readCodexConfig }),
+        };
+      case "get-setting":
+        return {
+          value: await desktopState.getSettingValue(payload, { readCodexConfig: appServerBridge.readCodexConfig }),
+        };
       case "settings:get":
         return desktopState.getSettingValue(payload, { readCodexConfig: appServerBridge.readCodexConfig });
+      case "set-setting":
       case "settings:set":
         return desktopState.setSettingValue(payload, { callAppServer: appServerBridge.callAppServer });
       case "list-archived-threads":

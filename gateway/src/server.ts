@@ -460,6 +460,10 @@ function readBody(req) {
 /** 给官方 renderer HTML 注入 web-shell polyfill 和运行时配置。 */
 function transformOfficialHtml(rawHtml) {
   let html = rawHtml;
+  html = html.replace(/<html([^>]*)\blang=["'][^"']*["']([^>]*)>/i, "<html$1lang=\"zh-CN\"$2>");
+  if (!/<html[^>]*\blang=/i.test(html)) {
+    html = html.replace(/<html([^>]*)>/i, "<html$1 lang=\"zh-CN\">");
+  }
   html = html.replace(/(src|href)=["']\/(?!official\/)([^"'#?]+)["']/g, '$1="/official/$2"');
   html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
   const base = [
@@ -1148,6 +1152,7 @@ async function createGateway() {
     gatewayWsUrl: location.origin.replace(/^http/, "ws") + "/ws",
     workspaceRoots: ${JSON.stringify(gatewayConfig.workspaceRoots)},
     homeDir: ${JSON.stringify(gatewayConfig.homeDir)},
+    locale: ${JSON.stringify(gatewayConfig.locale || "zh-CN")},
     appServer: ${JSON.stringify(appServer.getMode())},
     modelList: ${JSON.stringify(cachedModelListForWebConfig(appServer))},
     sharedObjectSnapshot: ${JSON.stringify(gatewayConfig.sharedObjectSnapshot || {})}

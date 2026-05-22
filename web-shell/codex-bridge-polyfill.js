@@ -7,6 +7,8 @@
       gatewayBaseUrl: location.origin,
       gatewayWsUrl: location.origin.replace(/^http/, "ws") + "/ws",
     });
+  const OPENCODEX_LOCALE = cfg.locale || "zh-CN";
+  const OPENCODEX_LANGUAGES = [OPENCODEX_LOCALE, "zh-CN", "zh", "en-US", "en"];
   const AUTH_FORCE_LOGIN_STORAGE_KEY = "codex_web_force_login";
   const OPENCODEX_SETTINGS_STORAGE_KEY = "opencodex_web_settings_v1";
   const GATEWAY_AUTH_LOGOUT_LABEL = "退出认证";
@@ -30,6 +32,24 @@
   const SIDEBAR_TOGGLE_VIEW_TRANSITION_NAME = "sidebar-trigger";
   const SIDEBAR_NEW_CONVERSATION_ICON_PATH_PREFIX = "M2.6687 11.333";
   const NEW_CONVERSATION_MESSAGE_TYPES = new Set(["new-chat", "new-quick-chat"]);
+
+  function installLocaleOverride() {
+    try {
+      document.documentElement.lang = OPENCODEX_LOCALE;
+    } catch {}
+    try {
+      Object.defineProperty(navigator, "language", {
+        configurable: true,
+        get: () => OPENCODEX_LOCALE,
+      });
+    } catch {}
+    try {
+      Object.defineProperty(navigator, "languages", {
+        configurable: true,
+        get: () => OPENCODEX_LANGUAGES,
+      });
+    } catch {}
+  }
 
   function opencodexSettings() {
     try {
@@ -105,6 +125,7 @@
     }
   }
 
+  installLocaleOverride();
   installRandomUUIDPolyfill();
 
   /**
@@ -255,6 +276,11 @@
   const MOBILE_COMPOSER_MANUAL_FOCUS_MS = 900;
   const MOBILE_SIDEBAR_AUTO_COLLAPSE_DELAY_MS = 80;
   const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
+  const STATSIG_I18N_LAYER_CONFIG = "72216192";
+  const STATSIG_I18N_LAYER_VALUES = {
+    enable_i18n: true,
+    locale_source: "IDE",
+  };
   const STATSIG_DEFAULT_FEATURE_OVERRIDES = {
     guardian_approval: true,
     "3903742690": true,
@@ -1363,7 +1389,7 @@
     const method = String(payload.method || "GET").toUpperCase();
     const url = String(payload.url || "");
     if (method === "GET") return true;
-    return /^vscode:\/\/codex\/(paths-exist|git-origins|ide-context|get-global-state|set-global-state|get-configuration|set-configuration|set-remote-control-connections-enabled)$/i.test(url);
+    return /^vscode:\/\/codex\/(paths-exist|git-origins|ide-context|get-global-state|set-global-state|get-configuration|set-configuration|get-settings|get-setting|set-setting|set-remote-control-connections-enabled)$/i.test(url);
   }
 
   /** 只对首屏/切换会话所需的安全 IPC 做短重试，避免第一次点击被 transient fetch 失败卡死。 */
@@ -1788,6 +1814,64 @@
   };
   w.codexWindowType = w.codexWindowType || "electron";
 
+  /** 浏览器直连 Statsig/遥测在受限网络下会刷 console error；Web 侧用本地默认值兜底。 */
+  function buildStatsigInitializeResponse() {
+    const feature_gates = {};
+    const dynamic_configs = {
+      [STATSIG_DEFAULT_FEATURES_CONFIG]: {
+        name: STATSIG_DEFAULT_FEATURES_CONFIG,
+        value: { ...STATSIG_DEFAULT_FEATURE_OVERRIDES },
+        rule_id: "gateway_override",
+        secondary_exposures: [],
+      },
+    };
+    for (const [name, value] of Object.entries(STATSIG_DEFAULT_FEATURE_OVERRIDES)) {
+      feature_gates[name] = {
+        name,
+        value,
+        rule_id: "gateway_override",
+        secondary_exposures: [],
+      };
+    }
+    return {
+      has_updates: true,
+      time: Date.now(),
+      hash_used: "djb2",
+      feature_gates,
+      dynamic_configs,
+      layer_configs: {
+        [STATSIG_I18N_LAYER_CONFIG]: {
+          name: STATSIG_I18N_LAYER_CONFIG,
+          value: { ...STATSIG_I18N_LAYER_VALUES },
+          rule_id: "gateway_override",
+          secondary_exposures: [],
+        },
+      },
+      param_stores: {},
+      exposures: {},
+      sdk_flags: {},
+    };
+  }
+
+  function isStatsigInitializeUrl(url) {
+    try {
+      const parsed = new URL(url, location.href);
+      return parsed.hostname === "ab.chatgpt.com" && parsed.pathname.replace(/\/+$/, "") === "/v1/initialize";
+    } catch {
+      return false;
+    }
+  }
+
+  function isTelemetryRegisterUrl(url) {
+    try {
+      const parsed = new URL(url, location.href);
+      const pathname = parsed.pathname.replace(/\/+$/, "");
+      return parsed.hostname === "chatgpt.com" && (pathname === "/ces/v1/rgstr" || pathname === "/ces/v1/log_event");
+    } catch {
+      return false;
+    }
+  }
+
   // sentry-ipc:// 是 Electron 私有协议，浏览器里用空响应兜底，避免 renderer 报错。
   if (typeof w.fetch === "function" && !w.__codexWebFetchPatched) {
     const originalFetch = w.fetch.bind(w);
@@ -1802,6 +1886,18 @@
         return new Response("{}", {
           status: 200,
           headers: { "content-type": "application/json" },
+        });
+      }
+      if (isStatsigInitializeUrl(url)) {
+        return new Response(JSON.stringify(buildStatsigInitializeResponse()), {
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
+      }
+      if (isTelemetryRegisterUrl(url)) {
+        return new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
         });
       }
       return originalFetch(input, init);

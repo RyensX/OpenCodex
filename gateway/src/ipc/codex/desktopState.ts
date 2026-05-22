@@ -511,6 +511,7 @@ function createDesktopState(deps) {
       ["artifactsPane", false],
       ["avatarOverlay", false],
       ["control", false],
+      ["localeOverride", process.env.CODEX_WEB_LOCALE || "zh-CN"],
     ]);
     if (known.has(normalized)) return known.get(normalized);
     if (normalized.includes("enabled")) return false;

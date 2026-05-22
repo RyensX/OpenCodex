@@ -187,6 +187,18 @@ function emptyChatgptBackendResponse(status = 204) {
   };
 }
 
+/** ChatGPT 任务列表只用于远端/云任务展示；网络不可用时给空列表，不阻塞本地 Codex UI。 */
+function emptyChatgptBackendJsonResponse(value, status = 200) {
+  const bodyJsonString = JSON.stringify(value);
+  return {
+    responseType: "success",
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+    bodyText: bodyJsonString,
+    bodyJsonString,
+  };
+}
+
 /** ChatGPT backend GET 缓存按账号/用户/组织隔离。 */
 function chatgptBackendCacheScope(auth) {
   const claims = auth && auth.claims && typeof auth.claims === "object" ? auth.claims : {};
@@ -256,6 +268,12 @@ async function fetchChatgptBackendRaw(callAppServer, backendPath, options = {}) 
   const promise = run().catch((error) => {
     if (method === "GET" && isChatgptBackendLogoPath(requestPath)) {
       return emptyChatgptBackendResponse();
+    }
+    if (method === "GET" && requestPath.startsWith("/wham/tasks/list")) {
+      return emptyChatgptBackendJsonResponse({ items: [], cursor: null });
+    }
+    if (method === "GET" && requestPath.startsWith("/wham/usage")) {
+      return emptyChatgptBackendJsonResponse(null);
     }
     throw error;
   }).then((value) => {

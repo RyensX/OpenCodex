@@ -12,6 +12,7 @@ function createFetchIpcHandlers(deps) {
   const invokeCodexChannel = deps.invokeCodexChannel;
   const shouldPatchStatsigInitialize = deps.shouldPatchStatsigInitialize;
   const patchStatsigDefaultFeatures = deps.patchStatsigDefaultFeatures;
+  const buildStatsigDefaultInitializeResponse = deps.buildStatsigDefaultInitializeResponse;
   const STATSIG_DEFAULT_FEATURE_OVERRIDES = deps.statsigDefaultFeatureOverrides;
 
   /** 发送 JSON fetch-response。 */
@@ -60,6 +61,13 @@ function createFetchIpcHandlers(deps) {
       channel: "fetch-stream-complete",
       payload: { requestId },
     }, targetClientId));
+  }
+
+  /** CES/Segment 遥测在 Web gateway 中不是业务依赖；受限网络下直接 ACK。 */
+  function isTelemetryRegisterUrl(urlObject) {
+    if (!urlObject || urlObject.hostname !== "chatgpt.com") return false;
+    const pathname = urlObject.pathname.replace(/\/+$/, "");
+    return pathname === "/ces/v1/rgstr" || pathname === "/ces/v1/log_event";
   }
 
   /** 处理 renderer 发起的 fetch/request，包括 vscode://codex、/wham、/aip 等内部代理。 */
@@ -172,6 +180,17 @@ function createFetchIpcHandlers(deps) {
 
       if (url.startsWith("http://") || url.startsWith("https://")) {
         // 普通 http(s) fetch 由 gateway 代理，statsig initialize 会顺手 patch Web 必需 feature。
+        if (isTelemetryRegisterUrl(urlObject)) {
+          broadcastFetchHttpResponse(requestId, {
+            requestId,
+            responseType: "success",
+            status: 200,
+            headers: { "content-type": "application/json; charset=utf-8" },
+            bodyText: "{}",
+            bodyJsonString: "{}",
+          }, targetClientId);
+          return true;
+        }
         if (urlObject && urlObject.hostname === "statsigapi.net" && urlObject.pathname === "/v1/sdk_exception") {
           logger && logger.warn("[renderer-sdk-exception]", chatgptBackend.summarizeSdkException(body));
         }
@@ -184,7 +203,23 @@ function createFetchIpcHandlers(deps) {
         if (body !== undefined && init.method !== "GET" && init.method !== "HEAD") {
           init.body = typeof body === "string" ? body : JSON.stringify(body);
         }
-        const response = await fetch(url, init);
+        const response = await fetch(url, init).catch((error) => {
+          if (!shouldPatchStatsigInitialize(urlObject)) throw error;
+          return null;
+        });
+        if (response == null) {
+          const text = JSON.stringify(buildStatsigDefaultInitializeResponse());
+          logger && logger.warn("[statsig] initialize unavailable; using gateway feature defaults");
+          broadcastFetchHttpResponse(requestId, {
+            requestId,
+            responseType: "success",
+            status: 200,
+            headers: { "content-type": "application/json; charset=utf-8" },
+            bodyText: text,
+            bodyJsonString: text,
+          }, targetClientId);
+          return true;
+        }
         const contentType = response.headers.get("content-type") || "";
         let text = await response.text();
         const headerObject = Object.fromEntries(response.headers.entries());

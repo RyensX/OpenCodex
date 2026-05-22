@@ -105,6 +105,11 @@ function createAppServerBridge(deps) {
       }
       return enrichAppServerResultForRenderer(appServerMethod, await appServer.request(appServerMethod, appServerPayload));
     } catch (error) {
+      const errorMessage =
+        error && typeof error === "object" && typeof error.message === "string" ? error.message : String(error || "");
+      if (appServerMethod === "thread/goal/get" && /goals feature is disabled/i.test(errorMessage)) {
+        return { goal: null };
+      }
       logger && logger.warn(`[app-server] ${appServerMethod} failed`, error);
       throw error;
     }
