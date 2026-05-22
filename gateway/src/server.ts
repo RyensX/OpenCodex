@@ -465,6 +465,10 @@ function transformOfficialHtml(rawHtml) {
   if (!/<html[^>]*\blang=/i.test(html)) {
     html = html.replace(/<html([^>]*)>/i, "<html$1 lang=\"zh-CN\">");
   }
+  html = html.replace(
+    /<meta([^>]*\bname=["']viewport["'][^>]*)>/i,
+    '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />'
+  );
   html = html.replace(/(src|href)=["']\/(?!official\/)([^"'#?]+)["']/g, '$1="/official/$2"');
   html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
   const base = [

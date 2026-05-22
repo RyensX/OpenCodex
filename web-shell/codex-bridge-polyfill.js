@@ -128,6 +128,125 @@
   installLocaleOverride();
   installRandomUUIDPolyfill();
 
+  function installMobileViewportGuards() {
+    if (!document || document.__codexMobileViewportGuardsInstalled) return;
+    document.__codexMobileViewportGuardsInstalled = true;
+
+    const style = document.createElement("style");
+    style.id = "codex-mobile-viewport-guards";
+    style.textContent = `
+      @media (max-width: 820px), (pointer: coarse) {
+        html,
+        body,
+        #root {
+          height: var(--codex-visual-viewport-height, 100dvh) !important;
+          min-height: var(--codex-visual-viewport-height, 100dvh) !important;
+          max-height: var(--codex-visual-viewport-height, 100dvh) !important;
+          overflow: hidden;
+        }
+
+        body {
+          width: 100%;
+          touch-action: pan-x pan-y;
+          overscroll-behavior: none;
+        }
+
+        input,
+        textarea,
+        [contenteditable="true"],
+        .ProseMirror {
+          font-size: max(16px, 1em) !important;
+          scroll-margin-bottom: calc(var(--codex-keyboard-inset-bottom, 0px) + 96px);
+        }
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+
+    const setViewportVars = () => {
+      const viewport = w.visualViewport;
+      const height = Math.max(0, Math.floor(viewport?.height || w.innerHeight || document.documentElement.clientHeight || 0));
+      const offsetTop = Math.max(0, Math.floor(viewport?.offsetTop || 0));
+      const layoutHeight = Math.max(0, Math.floor(w.innerHeight || document.documentElement.clientHeight || height));
+      const keyboardInset = Math.max(0, layoutHeight - height - offsetTop);
+      const root = document.documentElement;
+      if (height > 0) root.style.setProperty("--codex-visual-viewport-height", `${height}px`);
+      root.style.setProperty("--codex-visual-viewport-offset-top", `${offsetTop}px`);
+      root.style.setProperty("--codex-keyboard-inset-bottom", `${keyboardInset}px`);
+    };
+
+    const scrollableAncestor = (element) => {
+      for (let node = element?.parentElement; node && node !== document.body; node = node.parentElement) {
+        const style = w.getComputedStyle ? w.getComputedStyle(node) : null;
+        const overflowY = String(style?.overflowY || "");
+        if (/(auto|scroll)/.test(overflowY) && node.scrollHeight > node.clientHeight) return node;
+      }
+      return null;
+    };
+
+    const keepActiveInputVisible = () => {
+      if (!isLikelyMobileKeyboardDevice()) return;
+      const active = document.activeElement;
+      if (!isComposerEditableElement(active)) return;
+      const viewport = w.visualViewport;
+      const visibleTop = Math.max(0, viewport?.offsetTop || 0);
+      const visibleBottom = visibleTop + Math.max(0, viewport?.height || w.innerHeight || 0);
+      if (visibleBottom <= visibleTop) return;
+
+      const rect = active.getBoundingClientRect();
+      const bottomLimit = visibleBottom - 18;
+      const topLimit = visibleTop + 8;
+      let delta = 0;
+      if (rect.bottom > bottomLimit) {
+        delta = rect.bottom - bottomLimit;
+      } else if (rect.top < topLimit) {
+        delta = rect.top - topLimit;
+      }
+      if (Math.abs(delta) < 1) return;
+
+      const scroller = scrollableAncestor(active);
+      if (scroller) {
+        scroller.scrollTop += delta;
+        return;
+      }
+      try {
+        w.scrollBy(0, delta);
+      } catch {}
+    };
+
+    const scheduleViewportUpdate = () => {
+      setViewportVars();
+      const run = () => {
+        setViewportVars();
+        keepActiveInputVisible();
+      };
+      if (typeof w.requestAnimationFrame === "function") {
+        w.requestAnimationFrame(run);
+      } else {
+        w.setTimeout(run, 0);
+      }
+      w.setTimeout(run, 80);
+      w.setTimeout(run, 240);
+    };
+    const preventZoomGesture = (event) => {
+      if (!isLikelyMobileKeyboardDevice()) return;
+      if (event.touches && event.touches.length < 2) return;
+      event.preventDefault();
+    };
+
+    setViewportVars();
+    w.addEventListener("resize", scheduleViewportUpdate, { passive: true });
+    w.addEventListener("orientationchange", scheduleViewportUpdate, { passive: true });
+    w.visualViewport?.addEventListener("resize", scheduleViewportUpdate, { passive: true });
+    w.visualViewport?.addEventListener("scroll", scheduleViewportUpdate, { passive: true });
+    document.addEventListener("focusin", scheduleViewportUpdate, true);
+    document.addEventListener("input", scheduleViewportUpdate, true);
+    document.addEventListener("touchmove", preventZoomGesture, { passive: false });
+    document.addEventListener("gesturestart", preventZoomGesture, { passive: false });
+    document.addEventListener("gesturechange", preventZoomGesture, { passive: false });
+  }
+
+  installMobileViewportGuards();
+
   /**
    * Electron 的 <webview> 在浏览器里不存在。
    *
