@@ -562,6 +562,7 @@ function createWebShellIndexResponse() {
 }
 
 function isPublicOfficialAsset(reqPath) {
+  if (reqPath === "/favicon.ico" || reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) return true;
   if (/^\/official-patched\/assets\/[^/]+$/.test(reqPath)) return true;
   return /^\/official\/assets\/[^/]+\.(?:css|woff2?|ttf|otf)$/.test(reqPath);
 }
@@ -620,6 +621,7 @@ function patchOfficialAsset(reqPath, data) {
 
 /** 将 URL path 映射到 web-shell 或官方 asset 的真实文件。 */
 function staticFile(reqPath) {
+  if (reqPath === "/favicon.ico") return path.join(WEB_SHELL_DIR, "assets", "icon.png");
   if (reqPath === "/codex-bridge-polyfill.js") return path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js");
   if (reqPath === "/codex-tooltip-dismiss-guard.js") return path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js");
   if (reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) {
