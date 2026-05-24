@@ -58,6 +58,18 @@ class OfficialBundleFileSystem {
     return fs.readFileSync(filePath, "utf-8");
   }
 
+  /** 只读取日志前缀，避免为兜底路径探测把大型日志整文件读进内存。 */
+  readTextPrefix(filePath: string, maxBytes: number): string {
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(Math.max(0, maxBytes));
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+      return buffer.subarray(0, bytesRead).toString("utf-8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
   readDir(dirPath: string, options?: any): any[] {
     return fs.readdirSync(dirPath, options);
   }

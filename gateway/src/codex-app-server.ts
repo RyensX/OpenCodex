@@ -79,6 +79,8 @@ function createJsonRpcClient(sendFn) {
 }
 
 function shellQuote(value) {
+  // Windows 这里会走 cmd.exe /d /s /c，单引号不会保护带空格的 Program Files 路径。
+  if (process.platform === "win32") return `"${String(value).replace(/"/g, '""')}"`;
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 

@@ -3,6 +3,7 @@ export {};
 
 const path = require("path");
 const os = require("os");
+const { execFileSync } = require("child_process");
 const { ASAR_FILE_NAME } = require("./constants");
 const { OfficialBundleFileSystem } = require("./OfficialBundleFileSystem");
 
@@ -47,6 +48,7 @@ class CodexAsarCandidateProvider {
     }
     if (this.platform === "win32") {
       return this.uniqueNonEmpty([
+        ...this.windowsAppxInstallCandidates(),
         this.env.LOCALAPPDATA && path.join(this.env.LOCALAPPDATA, "Programs", "Codex"),
         this.env.LOCALAPPDATA && path.join(this.env.LOCALAPPDATA, "Programs", "Codex", "resources"),
         this.env.PROGRAMFILES && path.join(this.env.PROGRAMFILES, "Codex"),
@@ -63,6 +65,176 @@ class CodexAsarCandidateProvider {
     ];
   }
 
+  private windowsAppxInstallCandidates(): string[] {
+    // Windows Store/MSIX 版 Codex 会装到 WindowsApps，app.asar 在 app/resources 下。
+    const installRoots = this.uniqueNonEmpty([
+      ...this.windowsAppxInstallLocationsFromCodexLogs(),
+      ...this.windowsAppxInstallLocationsFromPowerShell(),
+      ...this.windowsAppxInstallLocationsFromWindowsAppsDir(),
+    ]);
+    return installRoots.flatMap((installRoot) => [
+      path.join(installRoot, "app", "resources"),
+      path.join(installRoot, "app"),
+      path.join(installRoot, "resources"),
+      installRoot,
+    ]);
+  }
+
+  private windowsAppxInstallLocationsFromCodexLogs(): string[] {
+    // 某些权限上下文下 Get-AppxPackage 和 WindowsApps 枚举都拿不到路径；Codex 自己的日志会记录真实 executablePath。
+    const logFiles = this.windowsCodexLogDirs()
+      .flatMap((logDir) => this.findLogFilesBelow(logDir, 4))
+      .sort((left, right) => this.fileMtimeMs(right) - this.fileMtimeMs(left))
+      .slice(0, 30);
+    const installRoots = [];
+    for (const logFile of logFiles) {
+      let text = "";
+      try {
+        text =
+          typeof this.fileSystem.readTextPrefix === "function"
+            ? this.fileSystem.readTextPrefix(logFile, 256 * 1024)
+            : this.fileSystem.readText(logFile).slice(0, 256 * 1024);
+      } catch {
+        continue;
+      }
+      installRoots.push(...this.parseWindowsAppxInstallLocations(text));
+    }
+    return this.sortWindowsAppxInstallLocations(this.uniqueNonEmpty(installRoots));
+  }
+
+  private windowsCodexLogDirs(): string[] {
+    return this.windowsCodexPackageDataRoots().flatMap((packageRoot) => [
+      path.join(packageRoot, "LocalCache", "Local", "Codex", "Logs"),
+      path.join(packageRoot, "LocalCache", "Roaming", "Codex", "Logs"),
+    ]);
+  }
+
+  private windowsCodexPackageDataRoots(): string[] {
+    return this.uniqueNonEmpty([
+      this.env.LOCALAPPDATA && path.join(this.env.LOCALAPPDATA, "Packages", "OpenAI.Codex_2p2nqsd0c76g0"),
+      path.join(this.homeDir, "AppData", "Local", "Packages", "OpenAI.Codex_2p2nqsd0c76g0"),
+    ]);
+  }
+
+  private findLogFilesBelow(rootDir: string, maxDepth: number): string[] {
+    const result = [];
+    const queue = [{ dir: rootDir, depth: 0 }];
+    while (queue.length > 0) {
+      const item = queue.shift();
+      if (!item || item.depth > maxDepth) continue;
+      let entries = [];
+      try {
+        entries = this.fileSystem.readDir(item.dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const fullPath = path.join(item.dir, entry.name);
+        if (entry.isFile() && entry.name.toLowerCase().endsWith(".log")) {
+          result.push(fullPath);
+        } else if (entry.isDirectory() && item.depth < maxDepth) {
+          queue.push({ dir: fullPath, depth: item.depth + 1 });
+        }
+      }
+    }
+    return result;
+  }
+
+  private parseWindowsAppxInstallLocations(text: string): string[] {
+    // 日志里常见 JSON 转义的反斜杠，先还原再提取 MSIX 安装根。
+    const normalized = String(text || "").replace(/\\\\/g, "\\");
+    const pattern =
+      /([A-Z]:\\(?:[^\\\r\n"]+\\)*WindowsApps\\OpenAI\.Codex_[^\\\r\n"]+)\\app\\resources\\(?:app\.asar|codex\.exe)/gi;
+    const result = [];
+    for (const match of normalized.matchAll(pattern)) {
+      result.push(match[1]);
+    }
+    return result;
+  }
+
+  private windowsAppxInstallLocationsFromPowerShell(): string[] {
+    // 优先问系统包管理器；失败时静默降级，避免影响 macOS/Linux 或非 Store 安装。
+    const command =
+      "$ErrorActionPreference = 'SilentlyContinue'; " +
+      "Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | ForEach-Object { $_.InstallLocation }";
+    for (const executable of ["powershell.exe", "pwsh.exe"]) {
+      try {
+        const output = execFileSync(executable, ["-NoProfile", "-NonInteractive", "-Command", command], {
+          encoding: "utf-8",
+          maxBuffer: 1024 * 1024,
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 5000,
+          windowsHide: true,
+        });
+        const locations = this.lines(output);
+        if (locations.length > 0) return locations;
+      } catch {}
+    }
+    return [];
+  }
+
+  private windowsAppxInstallLocationsFromWindowsAppsDir(): string[] {
+    // PowerShell 不可用时尝试直接枚举 WindowsApps；无权限访问时继续走其它候选。
+    const roots = this.uniqueNonEmpty([
+      this.env.PROGRAMFILES && path.join(this.env.PROGRAMFILES, "WindowsApps"),
+      this.env.ProgramW6432 && path.join(this.env.ProgramW6432, "WindowsApps"),
+    ]);
+    const packageDirs = [];
+    for (const root of roots) {
+      let entries = [];
+      try {
+        entries = this.fileSystem.readDir(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (!/^OpenAI\.Codex_/i.test(entry.name)) continue;
+        packageDirs.push(path.join(root, entry.name));
+      }
+    }
+    return this.sortWindowsAppxInstallLocations(packageDirs);
+  }
+
+  private sortWindowsAppxInstallLocations(locations: string[]): string[] {
+    return locations.slice().sort((left, right) => {
+      const versionCompare = this.compareVersionParts(
+        this.windowsAppxVersionParts(path.basename(right)),
+        this.windowsAppxVersionParts(path.basename(left))
+      );
+      return versionCompare || right.localeCompare(left);
+    });
+  }
+
+  private fileMtimeMs(filePath: string): number {
+    try {
+      return Number(this.fileSystem.stat(filePath).mtimeMs) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private windowsAppxVersionParts(packageDirName: string): number[] {
+    const match = packageDirName.match(/^OpenAI\.Codex_([^_]+)/i);
+    return match ? match[1].split(".").map((part) => Number(part) || 0) : [];
+  }
+
+  private compareVersionParts(left: number[], right: number[]): number {
+    const length = Math.max(left.length, right.length);
+    for (let index = 0; index < length; index += 1) {
+      const diff = (left[index] || 0) - (right[index] || 0);
+      if (diff) return diff;
+    }
+    return 0;
+  }
+
+  private lines(output: string): string[] {
+    return output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
   private uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
     return Array.from(new Set(values.filter((value) => typeof value === "string" && value.trim()).map(String)));
   }
@@ -73,12 +245,18 @@ class CodexBinaryLocator {
   constructor({
     fileSystem,
     platform = process.platform,
+    env = process.env,
+    homeDir = os.homedir(),
   }: {
     fileSystem: OfficialBundleFileSystem;
     platform?: string;
+    env?: Record<string, string | undefined>;
+    homeDir?: string;
   }) {
     this.fileSystem = fileSystem;
     this.platform = platform;
+    this.env = env;
+    this.homeDir = homeDir;
   }
 
   find({
@@ -100,6 +278,10 @@ class CodexBinaryLocator {
   }): string[] {
     if (this.platform === "win32") {
       return [
+        this.env.CODEX_APP_SERVER_BINARY_PATH,
+        this.env.CODEX_CLI_PATH,
+        // app-server 优先使用用户目录里的 CLI 运行时；Store 包 resources 下的 codex.exe 在独立启动时可能直接退出。
+        ...this.windowsCliCandidates(),
         path.join(resourcesDir, "codex.exe"),
         path.join(resourcesDir, "Codex.exe"),
         path.join(resourcesDir, "codex.cmd"),
@@ -112,6 +294,45 @@ class CodexBinaryLocator {
       path.join(installRoot, "Contents", "Resources", "codex"),
       path.join(installRoot, "codex"),
     ];
+  }
+
+  private windowsCliCandidates(): string[] {
+    const binRoots = this.uniqueNonEmpty([
+      this.env.LOCALAPPDATA && path.join(this.env.LOCALAPPDATA, "OpenAI", "Codex", "bin"),
+      path.join(this.homeDir, "AppData", "Local", "OpenAI", "Codex", "bin"),
+    ]);
+    const candidates = [];
+    for (const binRoot of binRoots) {
+      candidates.push(path.join(binRoot, "codex.exe"));
+      candidates.push(...this.versionedWindowsCliCandidates(binRoot));
+    }
+    return this.uniqueNonEmpty(candidates);
+  }
+
+  private versionedWindowsCliCandidates(binRoot: string): string[] {
+    let entries = [];
+    try {
+      entries = this.fileSystem.readDir(binRoot, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(binRoot, entry.name, "codex.exe"))
+      .filter((candidate) => this.fileSystem.isFile(candidate))
+      .sort((left, right) => this.fileMtimeMs(right) - this.fileMtimeMs(left));
+  }
+
+  private fileMtimeMs(filePath: string): number {
+    try {
+      return Number(this.fileSystem.stat(filePath).mtimeMs) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+    return Array.from(new Set(values.filter((value) => typeof value === "string" && value.trim()).map(String)));
   }
 }
 
