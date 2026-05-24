@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Code Comment Requirements
+
+- 每次写代码时，都必须根据实际逻辑添加适当的中文注释，以提高代码可读性，帮助阅读者快速理清实现思路。
+
 ## Commit Requirements
 
 Follow the existing commit style in this repository.
