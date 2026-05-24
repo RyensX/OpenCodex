@@ -3,6 +3,8 @@ export {};
 
 const path = require("path");
 const os = require("os");
+const fs = require("fs");
+const { spawnSync } = require("child_process");
 const {
   BRIDGE_MAP_ENTRIES,
   CODEX_ADDITIONAL_CHANNELS,
@@ -214,42 +216,224 @@ function recordReviewPaneSnapshotMetrics(payload) {
   return { ok: true, hostId, ...metrics };
 }
 
+function isExecutableFile(filePath) {
+  try {
+    return !!filePath && fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim()))];
+}
+
+function executablePathCandidates(commandName) {
+  const entries = String(process.env.Path || process.env.PATH || "")
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const extensions =
+    process.platform === "win32"
+      ? uniqueStrings(["", ...String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";")])
+      : [""];
+  const names = process.platform === "win32" && !path.extname(commandName)
+    ? extensions.map((ext) => `${commandName}${ext.toLowerCase()}`)
+    : [commandName];
+  return entries.flatMap((entry) => names.map((name) => path.join(entry, name)));
+}
+
+function executableVersion(filePath, args = ["--version"]) {
+  if (!isExecutableFile(filePath)) return null;
+  try {
+    const result = spawnSync(filePath, args, {
+      encoding: "utf8",
+      timeout: 1500,
+      windowsHide: true,
+    });
+    if (result.error || result.status !== 0) return null;
+    return String(result.stdout || result.stderr || "").trim() || "available";
+  } catch {
+    return null;
+  }
+}
+
+function runtimeExecutableCandidates(root, relativePaths) {
+  if (!root) return [];
+  return relativePaths.map((relativePath) => path.join(root, relativePath));
+}
+
+function primaryRuntimeRoots() {
+  return uniqueStrings([
+    process.env.CODEX_WEB_PRIMARY_RUNTIME_DIR,
+    process.env.CODEX_PRIMARY_RUNTIME_DIR,
+    path.join(RUNTIME_DIR, "codex-primary-runtime"),
+    path.join(RUNTIME_DIR, "cache", "codex-primary-runtime"),
+    path.join(CODEX_HOME, "runtimes", "codex-primary-runtime"),
+    path.join(os.homedir(), ".cache", "codex-runtimes", "codex-primary-runtime"),
+  ]);
+}
+
+function readPrimaryRuntimeBundleVersion(runtimeRoot) {
+  const manifestPaths = [
+    path.join(runtimeRoot, "manifest.json"),
+    path.join(runtimeRoot, "codex-primary-runtime.json"),
+  ];
+  for (const manifestPath of manifestPaths) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      if (typeof parsed.bundleVersion === "string" && parsed.bundleVersion.trim()) return parsed.bundleVersion.trim();
+      if (typeof parsed.version === "string" && parsed.version.trim()) return parsed.version.trim();
+    } catch {}
+  }
+  return path.basename(runtimeRoot) || "codex-primary-runtime";
+}
+
+function findRuntimeExecutable({ envKeys, runtimeRelativePaths, pathCommands, versionArgs }) {
+  // 配置项优先，方便打包环境显式指定真实的 Node/Python 可执行文件。
+  for (const envKey of envKeys) {
+    const filePath = process.env[envKey];
+    const version = executableVersion(filePath, versionArgs);
+    if (version) return { path: path.resolve(filePath), source: "configured", version };
+  }
+
+  for (const runtimeRoot of primaryRuntimeRoots()) {
+    for (const filePath of runtimeExecutableCandidates(runtimeRoot, runtimeRelativePaths)) {
+      const version = executableVersion(filePath, versionArgs);
+      if (version) {
+        return {
+          path: path.resolve(filePath),
+          runtimeRoot,
+          source: "primary-runtime",
+          version,
+        };
+      }
+    }
+  }
+
+  for (const command of pathCommands) {
+    for (const filePath of executablePathCandidates(command)) {
+      const version = executableVersion(filePath, versionArgs);
+      if (version) return { path: path.resolve(filePath), source: "system", version };
+    }
+  }
+
+  return null;
+}
+
+function findNodeRuntime() {
+  const currentExecName = path.basename(process.execPath).toLowerCase();
+  const currentProcessCandidate =
+    currentExecName === "node" || currentExecName === "node.exe"
+      ? { path: process.execPath, source: "process", version: `v${process.versions.node}` }
+      : null;
+  return (
+    findRuntimeExecutable({
+      envKeys: ["CODEX_WEB_NODE_PATH", "CODEX_NODE_PATH"],
+      runtimeRelativePaths: [
+        "node",
+        "node.exe",
+        path.join("bin", "node"),
+        path.join("bin", "node.exe"),
+        path.join("node", "node.exe"),
+        path.join("node", "bin", "node"),
+      ],
+      pathCommands: ["node"],
+      versionArgs: ["--version"],
+    }) || currentProcessCandidate
+  );
+}
+
+function findPythonRuntime() {
+  return findRuntimeExecutable({
+    envKeys: ["CODEX_WEB_PYTHON_PATH", "CODEX_PYTHON_PATH", "PYTHON"],
+    runtimeRelativePaths: [
+      "python",
+      "python.exe",
+      "python3",
+      "python3.exe",
+      path.join("bin", "python"),
+      path.join("bin", "python3"),
+      path.join("python", "python.exe"),
+      path.join("python", "bin", "python"),
+    ],
+    pathCommands: process.platform === "win32" ? ["python", "python3"] : ["python3", "python"],
+    versionArgs: ["--version"],
+  });
+}
+
+function primaryRuntimeProblems({ node, python }) {
+  const problems = [];
+  if (!node) {
+    problems.push({
+      kind: "missing-node",
+      summary: "未找到可直接执行的 Node.js runtime。",
+      details: "请安装官方 primary runtime，或通过 CODEX_WEB_NODE_PATH/CODEX_NODE_PATH 指向真实 node 可执行文件。",
+    });
+  }
+  if (!python) {
+    problems.push({
+      kind: "missing-python",
+      summary: "未找到可直接执行的 Python runtime。",
+      details: "请安装官方 primary runtime，或通过 CODEX_WEB_PYTHON_PATH/CODEX_PYTHON_PATH 指向真实 python 可执行文件。",
+    });
+  }
+  return problems;
+}
+
+function primaryRuntimeInstructions({ node, python, installed, source }) {
+  const lines = [];
+  if (installed) {
+    lines.push(
+      source === "primary-runtime"
+        ? "已检测到官方 primary runtime，可用于工作区依赖任务。"
+        : "未检测到官方 primary runtime，当前使用系统工具作为 OpenCodex 运行时适配。"
+    );
+  } else {
+    lines.push("未检测到完整的 OpenCodex 工作区运行时。");
+  }
+  lines.push(node ? `Node.js 路径：${node.path} (${node.version})` : "Node.js 路径：未找到");
+  lines.push(python ? `Python 路径：${python.path} (${python.version})` : "Python 路径：未找到");
+  if (!installed) {
+    lines.push("请安装官方 primary runtime，或设置 CODEX_WEB_NODE_PATH / CODEX_WEB_PYTHON_PATH 指向本机可用工具。");
+  }
+  return lines.join("\n");
+}
+
 function buildPrimaryRuntimeDependencies() {
-  const nodePath = process.execPath;
-  const nodeCommand =
-    process.env.ELECTRON_RUN_AS_NODE === "1"
-      ? nodePath
-      : `ELECTRON_RUN_AS_NODE=1 ${JSON.stringify(nodePath)}`;
+  const node = findNodeRuntime();
+  const python = findPythonRuntime();
+  const problems = primaryRuntimeProblems({ node, python });
+  const installed = problems.length === 0;
+  const runtimeRoot = node && node.source === "primary-runtime" ? node.runtimeRoot : python && python.source === "primary-runtime" ? python.runtimeRoot : null;
+  const source = runtimeRoot ? "primary-runtime" : installed ? "system" : "none";
   return {
-    installed: true,
-    bundleVersion: "opencodex-local",
-    instructions: [
-      "本地 OpenCodex 运行时可用于工作区依赖任务。",
-      `Node.js 路径：${nodePath}`,
-      `如果要把 Electron 运行时作为 Node.js 启动，请设置 ELECTRON_RUN_AS_NODE=1。例如：${nodeCommand} --version`,
-      "当前构建未配置内置 Python/文档运行时；需要时请使用系统或项目提供的 Python。",
-    ].join("\n"),
+    installed,
+    bundleVersion: installed ? (runtimeRoot ? readPrimaryRuntimeBundleVersion(runtimeRoot) : "opencodex-system") : null,
+    instructions: primaryRuntimeInstructions({ node, python, installed, source }),
     paths: {
-      node: nodePath,
-      python: null,
+      node: node ? node.path : null,
+      python: python ? python.path : null,
       workspace: PROJECT_ROOT,
     },
+    problems,
+    source,
   };
 }
 
 function diagnosePrimaryRuntimeDependencies() {
-  return {
-    ...buildPrimaryRuntimeDependencies(),
-    problems: [],
-  };
+  return buildPrimaryRuntimeDependencies();
 }
 
 function buildPrimaryRuntimeInstallResult(status = "already-current") {
-  // 官方安装入口会读取 status/bundleVersion；Web gateway 的内置运行时始终视为已就绪。
+  const dependencies = buildPrimaryRuntimeDependencies();
+  const installed = !!dependencies.installed;
+  // 官方安装入口会读取 status/bundleVersion；未装完整 runtime 时返回 skipped，让调用方看到真实状态。
   return {
-    ...buildPrimaryRuntimeDependencies(),
-    phase: "ready",
-    status,
+    ...dependencies,
+    phase: installed ? "ready" : "error",
+    status: installed ? status : "skipped",
+    ...(installed ? {} : { reason: "runtime-config-missing" }),
   };
 }
 
