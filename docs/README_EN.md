@@ -85,9 +85,16 @@ Core principles:
 - Node.js 20 or newer
 - pnpm
 - Codex Desktop installed locally, recommended, or explicit environment variables pointing to the Codex Desktop app or official bundle.
-- macOS / Windows. macOS is fully supported; Windows has not been tested yet.
+- macOS / Windows. Launcher build commands are provided for both macOS and Windows.
+- Windows packaging requires Visual Studio 2022 C++ build tools and the Spectre-mitigated VC++ libraries for the target architecture. Otherwise, rebuilding the native `node-pty` module will fail.
 
 Install dependencies:
+
+Clone with submodules:
+
+```bash
+git clone --recursive xxx
+```
 
 ```bash
 pnpm install
@@ -95,13 +102,102 @@ pnpm install
 
 ## How To Use
 
+### Desktop One-Click Launcher Package
+
+A Launcher packaging entry point is currently available. On startup, it automatically starts the gateway and shows:
+
+- Local access address, gateway process, and listening port.
+- Current Codex version, build, Codex installation path, `app.asar` path, and CLI path.
+- Config file, logs, reports, and official renderer cache directories.
+- Current app-server connection status.
+- Access password settings. Authentication is disabled when the password is empty.
+- Startup address settings. Local mode listens on `127.0.0.1`; LAN mode listens on `0.0.0.0` and shows accessible LAN addresses.
+- Port settings. On first startup, the Launcher randomly chooses an available port and persists it. You can manually set the port later.
+
+After installing dependencies and building, you can debug the Launcher locally:
+
+```bash
+pnpm run desktop:dev
+```
+
+Build macOS installer artifacts:
+
+```bash
+pnpm run desktop:dist:mac
+```
+
+Build Windows installer artifacts:
+
+```bash
+pnpm run desktop:dist:win
+```
+
+Artifacts are written to `release/`. The Launcher listens on `127.0.0.1` by default, chooses a random available port on first startup, and stores runtime data in the system user data directory instead of the installation directory. After changing the listening address, port, or access password, the Launcher restarts the gateway so the configuration takes effect.
+
+> Codex Desktop still needs to be installed locally before packaging. The Launcher reuses the official renderer and app-server capabilities from the local Codex Desktop installation.
+
+#### Build A macOS Installer
+
+Build macOS artifacts from a clean repository:
+
+```bash
+git clone --recursive xxx
+cd OpenCodex
+pnpm install
+pnpm run build
+pnpm run desktop:dist:mac
+```
+
+`desktop:dist:mac` first compiles `vendor/electron-to-web` and `gateway`, then uses `electron-builder` to generate `.dmg` and `.zip` artifacts. Outputs are written to `release/`:
+
+```text
+release/OpenCodex-<version>-arm64.dmg
+release/OpenCodex-<version>-arm64-mac.zip
+```
+
+If you only need to verify the current local architecture, specify the architecture directly. For example, on Apple Silicon:
+
+```bash
+pnpm run build
+pnpm exec electron-builder --mac dmg zip --arm64
+```
+
+Debug an unpacked `.app`:
+
+```bash
+pnpm run build
+pnpm exec electron-builder --mac --dir --arm64
+```
+
+The generated `.app` creates a user data directory on startup and stores Launcher settings, access password configuration, gateway logs, and the official renderer cache there.
+
+#### Build A Windows Installer
+
+Build Windows artifacts from a clean repository:
+
+```powershell
+git clone --recursive xxx
+cd OpenCodex
+pnpm install
+pnpm run build
+pnpm run desktop:dist:win
+```
+
+`desktop:dist:win` first compiles `vendor/electron-to-web` and `gateway`, then uses `electron-builder` to generate an x64 NSIS installer and `.zip`. Outputs are written to `release/`.
+
+Debug an unpacked Windows application directory:
+
+```powershell
+pnpm run build
+pnpm run desktop:pack:win
+```
+
+### Command-Line Startup
+
 Build first:
 
 ```bash
-pnpm run build:vendor
-```
-```bash
-pnpm run build:gateway
+pnpm build
 ```
 
 Start the service:
@@ -146,8 +242,11 @@ Use Tailscale, ZeroTier, a company VPN, or a similar private network solution fo
 | `CODEX_WEB_DEBUG` | empty | Set to `1` or `true` for verbose debug logs. |
 | `CODEX_WEB_SLOW_LOG_MS` | `750` | IPC slow-call logging threshold. |
 | `CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS` | `300000` | Lifetime for local file preview URL tokens. |
-| `CODEX_DESKTOP_APP_PATH` | auto scan | Explicit path to the Codex Desktop app or its `app.asar`. |
-| `CODEX_WEB_OFFICIAL_BUNDLE_DIR` | `cache/official-bundle` | Cache directory for extracted official webview assets. |
+| `CODEX_DESKTOP_APP_PATH` | auto scan | Explicit path to the Codex Desktop installation or its `app.asar`. |
+| `CODEX_WEB_RUNTIME_DIR` | project directory | Gateway runtime directory. The Launcher sets this to the user data directory. |
+| `CODEX_WEB_CONFIG_PATH` | `config.yaml` | Access password configuration file path. |
+| `CODEX_WEB_REPORTS_DIR` | `reports` | Diagnostic reports directory. |
+| `CODEX_WEB_OFFICIAL_BUNDLE_DIR` | `cache/codex-official-bundle` | Cache directory for extracted official webview assets. |
 | `CODEX_WEB_IPC_IMPL` | `electron-to-web` | Set to `direct` to use the direct IPC fallback implementation. |
 
 ## Files / Directories
@@ -170,6 +269,11 @@ Use Tailscale, ZeroTier, a company VPN, or a similar private network solution fo
 | `pnpm run web:dev` | Start the compiled gateway. |
 | `pnpm run build:vendor` | Build `vendor/electron-to-web`. |
 | `pnpm run test:vendor` | Run `vendor/electron-to-web` tests. |
+| `pnpm run desktop:dev` | Compile and start the Launcher for debugging. |
+| `pnpm run desktop:pack:mac` | Generate an unpacked macOS `.app`. |
+| `pnpm run desktop:dist:mac` | Generate macOS `.dmg` and `.zip` artifacts. |
+| `pnpm run desktop:pack:win` | Generate an unpacked Windows application directory. |
+| `pnpm run desktop:dist:win` | Generate a Windows NSIS installer and `.zip` artifact. |
 
 ## Troubleshooting
 
@@ -212,3 +316,7 @@ Inspect unknown IPC logs and report them to the developer:
 ```bash
 tail -f reports/unknown-ipc.jsonl
 ```
+
+### Links
+
+[LinuxDo](https://linux.do/)

@@ -190,22 +190,6 @@ pnpm run build
 pnpm run desktop:pack:win
 ```
 
-### GitHub Actions 自动发布
-
-仓库内置 `.github/workflows/release-desktop.yml`，推送 `release` 或 `release/*` 分支时会自动构建并发布桌面产物：
-
-- Windows 在 `windows-2022` runner 上运行 `pnpm run desktop:dist:win`。
-- macOS 在 `macos-15-intel` runner 上运行 `pnpm run desktop:dist:mac`。
-- 两个平台的产物会合并上传到同一个 GitHub Release。
-
-Release tag 规则：
-
-- 手动触发 workflow 时，如果填写 `tag`，优先使用该值。
-- 推送 `release/v1.0.0` 或 `release/1.0.0` 时，发布到 `v1.0.0`。
-- 推送 `release` 分支时，发布到 `package.json` 中版本号对应的 `v<version>`。
-
-如果发布步骤提示权限不足，需要在仓库 Settings -> Actions -> General 中允许 `GITHUB_TOKEN` 具备 read and write permissions。
-
 ### 命令行启动
 
 先编译
