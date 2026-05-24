@@ -199,11 +199,144 @@
           overflow: hidden !important;
         }
 
+        #codex-mobile-sidebar-button,
+        #codex-mobile-panel-controls,
+        #codex-mobile-sidebar-backdrop {
+          display: block !important;
+        }
+
+        #codex-mobile-sidebar-button {
+          position: fixed !important;
+          top: max(10px, env(safe-area-inset-top)) !important;
+          left: 50% !important;
+          transform: translateX(-50%) !important;
+          z-index: 2147483001 !important;
+          min-width: 72px !important;
+          height: 40px !important;
+          padding: 0 14px !important;
+          border: 1px solid rgb(226 232 240 / 0.92) !important;
+          border-radius: 999px !important;
+          background: rgb(255 255 255 / 0.92) !important;
+          color: rgb(31 41 55) !important;
+          box-shadow: 0 10px 28px rgb(15 23 42 / 0.12) !important;
+          -webkit-backdrop-filter: blur(14px) !important;
+          backdrop-filter: blur(14px) !important;
+          font: 600 14px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+          letter-spacing: 0 !important;
+          touch-action: manipulation !important;
+        }
+
+        #codex-mobile-panel-controls {
+          position: fixed !important;
+          top: max(10px, env(safe-area-inset-top)) !important;
+          right: max(10px, env(safe-area-inset-right)) !important;
+          z-index: 2147483001 !important;
+          display: flex !important;
+          align-items: center !important;
+          gap: 6px !important;
+        }
+
+        #codex-mobile-panel-controls button {
+          width: 38px !important;
+          height: 38px !important;
+          padding: 0 !important;
+          border: 1px solid rgb(226 232 240 / 0.92) !important;
+          border-radius: 999px !important;
+          background: rgb(255 255 255 / 0.92) !important;
+          color: rgb(31 41 55) !important;
+          box-shadow: 0 10px 28px rgb(15 23 42 / 0.12) !important;
+          -webkit-backdrop-filter: blur(14px) !important;
+          backdrop-filter: blur(14px) !important;
+          font: 700 13px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+          letter-spacing: 0 !important;
+          touch-action: manipulation !important;
+        }
+
+        html.codex-mobile-sidebar-open #codex-mobile-sidebar-button {
+          background: rgb(17 24 39 / 0.92) !important;
+          border-color: rgb(17 24 39 / 0.1) !important;
+          color: white !important;
+        }
+
+        #codex-mobile-sidebar-backdrop {
+          position: fixed !important;
+          inset: 0 !important;
+          z-index: 2147482999 !important;
+          background: rgb(15 23 42 / 0.28) !important;
+          opacity: 0 !important;
+          pointer-events: none !important;
+          transition: opacity 160ms ease !important;
+        }
+
+        html.codex-mobile-sidebar-open #codex-mobile-sidebar-backdrop {
+          opacity: 1 !important;
+          pointer-events: auto !important;
+        }
+
+        .app-shell-left-panel,
+        .codex-mobile-sidebar-panel {
+          position: fixed !important;
+          top: 0 !important;
+          bottom: 0 !important;
+          left: 0 !important;
+          width: min(86vw, 340px) !important;
+          min-width: 0 !important;
+          max-width: min(86vw, 340px) !important;
+          height: var(--codex-layout-viewport-height, 100dvh) !important;
+          max-height: var(--codex-layout-viewport-height, 100dvh) !important;
+          padding-top: max(58px, calc(env(safe-area-inset-top) + 50px)) !important;
+          z-index: 2147483000 !important;
+          background: rgb(255 255 255 / 0.98) !important;
+          box-shadow: 18px 0 42px rgb(15 23 42 / 0.16) !important;
+          transform: translate3d(-104%, 0, 0) !important;
+          transition: transform 180ms ease !important;
+          overflow: hidden !important;
+          pointer-events: none !important;
+          -webkit-backdrop-filter: blur(18px) !important;
+          backdrop-filter: blur(18px) !important;
+        }
+
+        html.codex-mobile-sidebar-open .app-shell-left-panel,
+        html.codex-mobile-sidebar-open .codex-mobile-sidebar-panel {
+          transform: translate3d(0, 0, 0) !important;
+          pointer-events: auto !important;
+        }
+
+        .app-shell-left-panel nav,
+        .app-shell-left-panel [data-app-action-sidebar-scroll],
+        .codex-mobile-sidebar-panel nav,
+        .codex-mobile-sidebar-panel [data-app-action-sidebar-scroll] {
+          max-width: 100% !important;
+          height: 100% !important;
+          overflow-x: hidden !important;
+          overflow-y: auto !important;
+          -webkit-overflow-scrolling: touch !important;
+        }
+
+        body > div:not(#codex-mobile-sidebar-backdrop):not(#codex-mobile-sidebar-button):not(#codex-mobile-panel-controls),
+        #root > * {
+          max-width: 100vw !important;
+        }
+
+        [data-app-shell-focus-area],
+        [data-app-shell-focus-area="right-panel"],
+        main {
+          left: 0 !important;
+          margin-left: 0 !important;
+          min-width: 0 !important;
+          width: 100vw !important;
+          max-width: 100vw !important;
+        }
+
+        html.codex-mobile-sidebar-open {
+          touch-action: none;
+        }
+
         @supports selector(:has(*)) {
           html:has(.app-shell-left-panel) .app-header-tint,
           html:has([data-app-shell-focus-area="right-panel"]) .app-header-tint {
             min-width: 0 !important;
-            overflow: hidden !important;
+            overflow: visible !important;
           }
 
           html:has(.app-shell-left-panel) .app-header-tint [data-test-id="header-shell-slot"],
@@ -212,7 +345,7 @@
             min-width: 0 !important;
             max-width: min(34vw, 132px) !important;
             flex: 0 1 auto !important;
-            overflow: hidden !important;
+            overflow: visible !important;
           }
 
           html:has(.app-shell-left-panel) .app-header-tint [data-test-id="app-shell-header-context-menu-surface"],
@@ -247,6 +380,35 @@
 
         [role="tooltip"] {
           display: none !important;
+        }
+
+        [role="menubar"],
+        [aria-label="Application menu"],
+        [data-testid*="menu-bar"],
+        [data-test-id*="menu-bar"],
+        .codex-mobile-hidden-desktop-chrome {
+          display: none !important;
+          pointer-events: none !important;
+        }
+
+        header,
+        [data-test-id="app-shell-header"],
+        [data-testid="app-shell-header"] {
+          min-width: 0 !important;
+          max-width: 100vw !important;
+          overflow: visible !important;
+        }
+
+        main,
+        [data-app-shell-focus-area],
+        [data-testid*="composer"],
+        [data-test-id*="composer"] {
+          max-width: 100vw !important;
+        }
+
+        form:has(.ProseMirror),
+        div:has(> .ProseMirror) {
+          max-width: calc(100vw - 18px) !important;
         }
       }
     `;
@@ -650,6 +812,346 @@
 
   installMobileComposerFocusGuard();
 
+  const DESKTOP_MENU_LABELS = new Set([
+    "文件",
+    "编辑",
+    "查看",
+    "窗口",
+    "帮助",
+    "File",
+    "Edit",
+    "View",
+    "Window",
+    "Help",
+  ]);
+
+  function mobileChromeElementVisible(element) {
+    if (!element || typeof element.getBoundingClientRect !== "function") return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const style = w.getComputedStyle ? w.getComputedStyle(element) : null;
+    return !style || (style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) !== 0);
+  }
+
+  function desktopMenuLabel(element) {
+    if (!element) return "";
+    return String(
+      element.getAttribute?.("aria-label") ||
+        element.getAttribute?.("title") ||
+        element.innerText ||
+        element.textContent ||
+        ""
+    )
+      .replace(/\s+/g, "")
+      .trim();
+  }
+
+  function desktopMenuScore(container) {
+    if (!container || typeof container.querySelectorAll !== "function") return 0;
+    const labels = new Set();
+    const candidates = container.querySelectorAll(
+      'button,[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[aria-haspopup="menu"]'
+    );
+    for (const candidate of candidates) {
+      const label = desktopMenuLabel(candidate);
+      if (DESKTOP_MENU_LABELS.has(label) && mobileChromeElementVisible(candidate)) labels.add(label);
+      if (labels.size >= 3) return labels.size;
+    }
+    return labels.size;
+  }
+
+  function desktopMenuChromeContainer(element) {
+    let best = null;
+    for (let node = element; node && node !== document.body; node = node.parentElement) {
+      if (node.classList?.contains("codex-mobile-hidden-desktop-chrome")) return null;
+      if (!mobileChromeElementVisible(node)) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.top > 150 || rect.height > 132 || rect.width < 160) continue;
+      if (desktopMenuScore(node) >= 3) best = node;
+    }
+    return best;
+  }
+
+  function hideMobileDesktopChrome(root = document) {
+    if (!isLikelyMobileKeyboardDevice()) return;
+    const scope = root && root.nodeType === 1 ? root : document;
+    if (scope.nodeType === 1 && DESKTOP_MENU_LABELS.has(desktopMenuLabel(scope))) {
+      const container = desktopMenuChromeContainer(scope);
+      if (container) {
+        container.classList.add("codex-mobile-hidden-desktop-chrome");
+        container.setAttribute("aria-hidden", "true");
+      }
+    }
+    const candidates =
+      typeof scope.querySelectorAll === "function"
+        ? scope.querySelectorAll(
+            'button,[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[aria-haspopup="menu"]'
+          )
+        : [];
+    for (const candidate of candidates) {
+      if (!DESKTOP_MENU_LABELS.has(desktopMenuLabel(candidate))) continue;
+      const container = desktopMenuChromeContainer(candidate);
+      if (!container) continue;
+      container.classList.add("codex-mobile-hidden-desktop-chrome");
+      container.setAttribute("aria-hidden", "true");
+    }
+  }
+
+  function installMobileDesktopChromeHider() {
+    if (!document || document.__codexMobileDesktopChromeHiderInstalled) return;
+    document.__codexMobileDesktopChromeHiderInstalled = true;
+    const scan = () => {
+      try {
+        hideMobileDesktopChrome(document);
+      } catch {}
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", scan, { once: true });
+    } else {
+      scan();
+    }
+    w.addEventListener("resize", scan, { passive: true });
+    w.addEventListener("orientationchange", scan, { passive: true });
+    const observer = new MutationObserver((mutations) => {
+      if (!isLikelyMobileKeyboardDevice()) return;
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes || []) {
+          hideMobileDesktopChrome(node);
+        }
+      }
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  installMobileDesktopChromeHider();
+
+  function setMobileSidebarOpen(open) {
+    ensureMobileSidebarPanel();
+    document.documentElement.classList.toggle("codex-mobile-sidebar-open", !!open);
+    const button = document.getElementById("codex-mobile-sidebar-button");
+    if (button) {
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+      button.textContent = open ? "关闭" : "会话";
+    }
+  }
+
+  function toggleMobileSidebar() {
+    const panel = ensureMobileSidebarPanel();
+    if (!panel) {
+      toggleLeftSidebar();
+      w.setTimeout(() => {
+        ensureMobileSidebarPanel();
+        setMobileSidebarOpen(true);
+      }, 160);
+      return;
+    }
+    setMobileSidebarOpen(!document.documentElement.classList.contains("codex-mobile-sidebar-open"));
+  }
+
+  function buttonLabel(button) {
+    return String(
+      button?.getAttribute?.("aria-label") ||
+        button?.getAttribute?.("title") ||
+        button?.innerText ||
+        button?.textContent ||
+        ""
+    )
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
+
+  function isMobileOverlayButton(button) {
+    return !!button?.closest?.("#codex-mobile-sidebar-button,#codex-mobile-sidebar-backdrop,#codex-mobile-panel-controls");
+  }
+
+  function clickButton(button) {
+    if (!button || typeof button.click !== "function") return false;
+    try {
+      button.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function officialPanelButtonByLabel(kind) {
+    const labelTerms =
+      kind === "side"
+        ? ["side panel", "right panel", "toggle side", "toggle right", "侧边", "右侧", "侧栏"]
+        : ["bottom panel", "toggle bottom", "terminal panel", "底部", "底栏", "终端"];
+    return Array.from(document.querySelectorAll("button")).find((button) => {
+      if (isMobileOverlayButton(button)) return false;
+      const label = buttonLabel(button);
+      return label && labelTerms.some((term) => label.includes(term));
+    });
+  }
+
+  function officialPanelButtonsByPosition() {
+    const viewportWidth = w.innerWidth || document.documentElement.clientWidth || 0;
+    return Array.from(document.querySelectorAll("button"))
+      .filter((button) => {
+        if (isMobileOverlayButton(button) || button.disabled || button.getAttribute("aria-disabled") === "true") return false;
+        if (button.closest(".codex-mobile-sidebar-panel,.app-shell-left-panel")) return false;
+        const label = buttonLabel(button);
+        if (label === "会话" || label === "地址" || label === "关闭") return false;
+        const rect = typeof button.getBoundingClientRect === "function" ? button.getBoundingClientRect() : null;
+        if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+        if (rect.top > 120 || rect.bottom < 0) return false;
+        return rect.left > viewportWidth * 0.45 || rect.right > viewportWidth * 0.55;
+      })
+      .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+  }
+
+  function toggleOfficialPanel(kind) {
+    const labeled = officialPanelButtonByLabel(kind);
+    if (clickButton(labeled)) return true;
+    const positioned = officialPanelButtonsByPosition();
+    if (positioned.length === 0) return false;
+    const target =
+      kind === "side"
+        ? positioned[positioned.length - 1]
+        : positioned[Math.max(0, positioned.length - 2)];
+    return clickButton(target);
+  }
+
+  function sidebarCandidateText(element) {
+    return String(
+      element?.getAttribute?.("aria-label") ||
+        element?.getAttribute?.("title") ||
+        element?.innerText ||
+        element?.textContent ||
+        ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function hasSidebarContent(element) {
+    if (!element || element.nodeType !== 1 || typeof element.querySelector !== "function") return false;
+    if (element.id === "codex-mobile-sidebar-button" || element.id === "codex-mobile-sidebar-backdrop") return false;
+    const rect = typeof element.getBoundingClientRect === "function" ? element.getBoundingClientRect() : null;
+    if (rect && (rect.width < 120 || rect.width > Math.min(w.innerWidth * 0.92, 380))) return false;
+    if (element.querySelector(SIDEBAR_THREAD_ROW_SELECTOR)) return true;
+    if (element.querySelector("[data-thread-title]")) return true;
+    if (element.querySelector(SIDEBAR_SCROLL_SELECTOR)) return true;
+    const text = sidebarCandidateText(element);
+    const labels = ["New chat", "Search", "Chats", "Projects", "Skills", "新建", "搜索", "会话", "项目"];
+    return labels.filter((label) => text.includes(label)).length >= 2;
+  }
+
+  function sidebarContainerFromNode(node) {
+    if (!node || node.nodeType !== 1) return null;
+    for (let current = node; current && current !== document.body; current = current.parentElement) {
+      if (current.id === "root" || current === document.documentElement) break;
+      if (!hasSidebarContent(current)) continue;
+      const tag = String(current.tagName || "").toLowerCase();
+      const className = String(current.className || "");
+      const testId = String(current.getAttribute?.("data-testid") || current.getAttribute?.("data-test-id") || "");
+      if (
+        tag === "aside" ||
+        tag === "nav" ||
+        current.classList?.contains("app-shell-left-panel") ||
+        /sidebar|left-panel|side-panel/i.test(`${className} ${testId}`) ||
+        current.getAttribute?.("data-app-shell-focus-area") === "left-panel"
+      ) {
+        return current;
+      }
+    }
+    return null;
+  }
+
+  function markMobileSidebarPanel(panel) {
+    if (!panel || panel.nodeType !== 1) return null;
+    panel.classList.add("codex-mobile-sidebar-panel");
+    panel.setAttribute("data-codex-mobile-sidebar-panel", "true");
+    return panel;
+  }
+
+  function ensureMobileSidebarPanel() {
+    const existing = document.querySelector(".codex-mobile-sidebar-panel,.app-shell-left-panel");
+    if (existing) return markMobileSidebarPanel(existing);
+    const directSelectors = [
+      "[data-app-shell-focus-area='left-panel']",
+      "[data-testid*='sidebar']",
+      "[data-test-id*='sidebar']",
+      "[class*='sidebar']",
+      "aside",
+      SIDEBAR_SCROLL_SELECTOR,
+      "nav",
+    ];
+    for (const selector of directSelectors) {
+      for (const candidate of Array.from(document.querySelectorAll(selector))) {
+        const panel = sidebarContainerFromNode(candidate);
+        if (panel) return markMobileSidebarPanel(panel);
+      }
+    }
+    return null;
+  }
+
+  function ensureMobileSidebarControls() {
+    if (!isLikelyMobileKeyboardDevice()) return;
+    ensureMobileSidebarPanel();
+    if (!document.getElementById("codex-mobile-sidebar-backdrop")) {
+      const backdrop = document.createElement("button");
+      backdrop.id = "codex-mobile-sidebar-backdrop";
+      backdrop.type = "button";
+      backdrop.tabIndex = -1;
+      backdrop.setAttribute("aria-label", "关闭会话栏");
+      backdrop.addEventListener("click", () => setMobileSidebarOpen(false));
+      document.body.appendChild(backdrop);
+    }
+    if (!document.getElementById("codex-mobile-sidebar-button")) {
+      const button = document.createElement("button");
+      button.id = "codex-mobile-sidebar-button";
+      button.type = "button";
+      button.textContent = "会话";
+      button.setAttribute("aria-label", "打开会话栏");
+      button.setAttribute("aria-expanded", "false");
+      button.addEventListener("click", toggleMobileSidebar);
+      document.body.appendChild(button);
+    }
+    if (!document.getElementById("codex-mobile-panel-controls")) {
+      const controls = document.createElement("div");
+      controls.id = "codex-mobile-panel-controls";
+      const side = document.createElement("button");
+      side.type = "button";
+      side.textContent = "侧";
+      side.setAttribute("aria-label", "切换右侧面板");
+      side.addEventListener("click", () => toggleOfficialPanel("side"));
+      const bottom = document.createElement("button");
+      bottom.type = "button";
+      bottom.textContent = "底";
+      bottom.setAttribute("aria-label", "切换底部面板");
+      bottom.addEventListener("click", () => toggleOfficialPanel("bottom"));
+      controls.appendChild(side);
+      controls.appendChild(bottom);
+      document.body.appendChild(controls);
+    }
+  }
+
+  function installMobileSidebarDrawer() {
+    if (!document || document.__codexMobileSidebarDrawerInstalled) return;
+    document.__codexMobileSidebarDrawerInstalled = true;
+    const start = () => {
+      ensureMobileSidebarControls();
+      const observer = new MutationObserver(() => ensureMobileSidebarControls());
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", start, { once: true });
+    } else {
+      start();
+    }
+    w.addEventListener("resize", ensureMobileSidebarControls, { passive: true });
+    w.addEventListener("orientationchange", () => setMobileSidebarOpen(false), { passive: true });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") setMobileSidebarOpen(false);
+    });
+  }
+
+  installMobileSidebarDrawer();
+
   function visibleElement(element) {
     if (!element || typeof element.getBoundingClientRect !== "function") return false;
     const rect = element.getBoundingClientRect();
@@ -659,7 +1161,11 @@
   }
 
   function sidebarPanelElement() {
-    return document.querySelector(".app-shell-left-panel");
+    return (
+      document.querySelector(".codex-mobile-sidebar-panel") ||
+      document.querySelector(".app-shell-left-panel") ||
+      ensureMobileSidebarPanel()
+    );
   }
 
   function sidebarNavigationElement() {
@@ -988,9 +1494,9 @@
     if (mobileSidebarCollapseTimer) w.clearTimeout(mobileSidebarCollapseTimer);
     mobileSidebarCollapseTimer = w.setTimeout(() => {
       mobileSidebarCollapseTimer = null;
+      setMobileSidebarOpen(false);
       const panel = sidebarPanelElement();
       if (!panel || !visibleElement(panel)) return;
-      toggleLeftSidebar();
     }, MOBILE_SIDEBAR_AUTO_COLLAPSE_DELAY_MS);
   }
 

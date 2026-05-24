@@ -875,6 +875,8 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return appServerBridge.callAppServer("git/status", payload);
       case "gh-cli-status":
         return gitIpc.ghCliStatus();
+      case "gh-pr-status":
+        return gitIpc.ghPrStatusForPayload(payload || {});
       case "stable-metadata":
         return gitIpc.gitStableMetadataForPayload(payload || {});
       case "apply-patch":

@@ -4,17 +4,24 @@ Codex.app/
 # Dependencies
 node_modules/
 .pnpm-store/
+.android-build-tools/
+.codex-bin/
+.runtime-test/
 
 # Build outputs
 out/
 dist/
 cache/
 release/
+android-shell/.gradle/
+android-shell/app/build/
 
 # Upstream ASAR extracts and build-time copies (all generated)
 src/
 !gateway/src/
 !gateway/src/**
+!android-shell/app/src/
+!android-shell/app/src/**
 
 # Version check state (local only)
 scripts/.versions.json

@@ -15,7 +15,9 @@
     "test:vendor": "pnpm --dir vendor/electron-to-web run test",
     "desktop:dev": "pnpm run build && pnpm exec electron .",
     "desktop:pack:mac": "pnpm run build && pnpm exec electron-builder --mac --dir",
-    "desktop:dist:mac": "pnpm run build && pnpm exec electron-builder --mac dmg zip"
+    "desktop:dist:mac": "pnpm run build && pnpm exec electron-builder --mac dmg zip",
+    "desktop:pack:win": "pnpm run build && pnpm exec electron-builder --win --dir --x64 --config.npmRebuild=false --config.win.signAndEditExecutable=false",
+    "desktop:dist:win": "pnpm run build && pnpm exec electron-builder --win nsis portable --x64 --config.npmRebuild=false --config.win.signAndEditExecutable=false"
   },
   "dependencies": {
     "@electron/asar": "^4.1.2",
@@ -23,6 +25,7 @@
     "better-sqlite3": "^12.8.0",
     "brace-expansion": "^5.0.6",
     "express": "^5.2.1",
+    "json-rpc-2.0": "^1.7.1",
     "node-pty": "^1.1.0",
     "smol-toml": "^1.5.2",
     "tslib": "^2.8.1",
@@ -49,8 +52,15 @@
       "node_modules/**/*",
       "web-shell/**/*",
       "vendor/electron-to-web/dist/**/*",
-      "vendor/electron-to-web/node_modules/**/*",
-      "vendor/electron-to-web/package.json"
+      "vendor/electron-to-web/package.json",
+      {
+        "from": "vendor/electron-to-web/node_modules/.pnpm/json-rpc-2.0@1.7.1/node_modules/json-rpc-2.0",
+        "to": "node_modules/json-rpc-2.0",
+        "filter": [
+          "**/*"
+        ]
+      },
+      "!vendor/electron-to-web/node_modules/**/*"
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
@@ -70,6 +80,27 @@
           ]
         }
       ]
+    },
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     }
   }
 }

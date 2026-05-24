@@ -6,6 +6,7 @@ const {
   enrichThreadForReviewDiff,
   enrichTurnListForReviewDiff,
 } = require("./reviewDiffSnapshots");
+const path = require("path");
 
 function createAppServerBridge(deps) {
   const appServer = deps.appServer;
@@ -81,10 +82,36 @@ function createAppServerBridge(deps) {
     return result;
   }
 
+  function normalizeWindowsThreadFilePath(value) {
+    if (process.platform !== "win32" || typeof value !== "string" || !value.trim()) return value;
+    const trimmed = value.trim();
+    if (trimmed.startsWith("\\\\?\\")) return trimmed;
+    if (!/^[A-Za-z]:[\\/]/.test(trimmed)) return value;
+    return path.toNamespacedPath(path.resolve(trimmed));
+  }
+
+  function normalizeThreadResumePayload(value, key = "") {
+    if (Array.isArray(value)) return value.map((entry) => normalizeThreadResumePayload(entry, key));
+    if (!value || typeof value !== "object") {
+      return /(?:^|\.)(path|sessionPath|threadPath)$/i.test(key) ? normalizeWindowsThreadFilePath(value) : value;
+    }
+    let changed = false;
+    const next = {};
+    for (const [entryKey, entryValue] of Object.entries(value)) {
+      const normalized = normalizeThreadResumePayload(entryValue, key ? `${key}.${entryKey}` : entryKey);
+      next[entryKey] = normalized;
+      if (normalized !== entryValue) changed = true;
+    }
+    return changed ? next : value;
+  }
+
   /** 转发业务请求到 app-server，并统一记录失败日志。 */
   async function callAppServer(method, payload, options = {}) {
     const appServerMethod = APP_SERVER_METHOD_ALIASES.get(method) || method;
     let appServerPayload = payload;
+    if (appServerMethod === "thread/resume" || appServerMethod === "thread/read") {
+      appServerPayload = normalizeThreadResumePayload(payload);
+    }
     if (appServerMethod === "experimentalFeature/enablement/set") {
       const filtered = filterUnsupportedFeatureEnablements(payload);
       appServerPayload = filtered.payload;

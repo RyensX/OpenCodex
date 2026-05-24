@@ -3,6 +3,7 @@ export {};
 
 const path = require("path");
 const os = require("os");
+const { execFileSync } = require("child_process");
 const { ASAR_FILE_NAME } = require("./constants");
 const { OfficialBundleFileSystem } = require("./OfficialBundleFileSystem");
 
@@ -51,6 +52,7 @@ class CodexAsarCandidateProvider {
         this.env.LOCALAPPDATA && path.join(this.env.LOCALAPPDATA, "Programs", "Codex", "resources"),
         this.env.PROGRAMFILES && path.join(this.env.PROGRAMFILES, "Codex"),
         this.env["PROGRAMFILES(X86)"] && path.join(this.env["PROGRAMFILES(X86)"], "Codex"),
+        ...this.windowsAppsCandidates(),
       ]);
     }
     return [
@@ -66,6 +68,52 @@ class CodexAsarCandidateProvider {
   private uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
     return Array.from(new Set(values.filter((value) => typeof value === "string" && value.trim()).map(String)));
   }
+
+  private windowsAppsCandidates(): string[] {
+    const appxInstallLocation = this.codexAppxInstallLocation();
+    if (appxInstallLocation) {
+      const appDir = path.join(appxInstallLocation, "app");
+      return [appDir, path.join(appDir, "resources")];
+    }
+
+    const windowsAppsDir = this.env.PROGRAMFILES && path.join(this.env.PROGRAMFILES, "WindowsApps");
+    if (!windowsAppsDir || !this.fileSystem.isDirectory(windowsAppsDir)) return [];
+    try {
+      return this.fileSystem
+        .readDir(windowsAppsDir, { withFileTypes: true })
+        .filter((entry) => entry && entry.isDirectory && entry.isDirectory() && entry.name.startsWith("OpenAI.Codex_"))
+        .sort((a, b) => String(b.name).localeCompare(String(a.name)))
+        .flatMap((entry) => {
+          const appDir = path.join(windowsAppsDir, entry.name, "app");
+          return [appDir, path.join(appDir, "resources")];
+        });
+    } catch {
+      return [];
+    }
+  }
+
+  private codexAppxInstallLocation(): string {
+    try {
+      const output = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          "Get-AppxPackage -Name OpenAI.Codex | Select-Object -ExpandProperty InstallLocation",
+        ],
+        {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 3000,
+        }
+      );
+      return String(output || "").split(/\r?\n/).find((line) => line.trim())?.trim() || "";
+    } catch {
+      return "";
+    }
+  }
 }
 
 /** 只在 CLI 常见位置查找可执行文件，避免把安装根目录的 Electron 桌面入口当作 app-server 命令。 */
@@ -73,12 +121,15 @@ class CodexBinaryLocator {
   constructor({
     fileSystem,
     platform = process.platform,
+    env = process.env,
   }: {
     fileSystem: OfficialBundleFileSystem;
     platform?: string;
+    env?: Record<string, string | undefined>;
   }) {
     this.fileSystem = fileSystem;
     this.platform = platform;
+    this.env = env;
   }
 
   find({
@@ -100,6 +151,7 @@ class CodexBinaryLocator {
   }): string[] {
     if (this.platform === "win32") {
       return [
+        ...this.localOpenAICodexCliCandidates(),
         path.join(resourcesDir, "codex.exe"),
         path.join(resourcesDir, "Codex.exe"),
         path.join(resourcesDir, "codex.cmd"),
@@ -112,6 +164,19 @@ class CodexBinaryLocator {
       path.join(installRoot, "Contents", "Resources", "codex"),
       path.join(installRoot, "codex"),
     ];
+  }
+
+  private localOpenAICodexCliCandidates(): string[] {
+    const binDir = this.env.LOCALAPPDATA && path.join(this.env.LOCALAPPDATA, "OpenAI", "Codex", "bin");
+    if (!binDir || !this.fileSystem.isDirectory(binDir)) return [];
+    const nestedCandidates = [];
+    try {
+      for (const entry of this.fileSystem.readDir(binDir, { withFileTypes: true })) {
+        if (!entry || !entry.isDirectory || !entry.isDirectory()) continue;
+        nestedCandidates.push(path.join(binDir, entry.name, "codex.exe"));
+      }
+    } catch {}
+    return [...nestedCandidates.sort().reverse(), path.join(binDir, "codex.exe")];
   }
 }
 

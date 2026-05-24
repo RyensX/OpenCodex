@@ -618,6 +618,7 @@ const CODEX_ADDITIONAL_CHANNELS = [
   "git-checkout-branch",
   "git-create-branch",
   "gh-cli-status",
+  "gh-pr-status",
   "ide-context",
   "install-recommended-skill",
   "list-experimental-features",

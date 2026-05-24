@@ -1282,7 +1282,7 @@ function createGitIpcHandlers(deps) {
   }
 
   /** 执行本机命令并只返回结果，stdout/stderr 不落日志，避免泄露用户环境细节。 */
-  function runQuietCommand(command, args, timeoutMs) {
+  function runQuietCommand(command, args, timeoutMs, options = {}) {
     try {
       return {
         ok: true,
@@ -1290,10 +1290,50 @@ function createGitIpcHandlers(deps) {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
           timeout: timeoutMs,
+          cwd: options.cwd,
+          maxBuffer: options.maxBuffer || 1024 * 1024,
         }),
       };
     } catch {
       return { ok: false, stdout: "" };
+    }
+  }
+
+  function emptyGhPrStatus(extra = {}) {
+    return {
+      status: "success",
+      activityItems: [],
+      boardItem: null,
+      body: "",
+      canMerge: false,
+      checks: [],
+      ciStatus: "none",
+      commentAttachments: [],
+      hasOpenPr: false,
+      isDraft: false,
+      number: null,
+      repo: null,
+      reviewers: {
+        approved: [],
+        commentCounts: [],
+        commented: [],
+        changesRequested: [],
+        requested: [],
+        unresolvedCommentCount: 0,
+      },
+      reviewStatus: "none",
+      title: null,
+      url: null,
+      ...extra,
+    };
+  }
+
+  function parseJsonObject(text) {
+    try {
+      const parsed = JSON.parse(String(text || ""));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
     }
   }
 
@@ -1310,6 +1350,64 @@ function createGitIpcHandlers(deps) {
       isAuthenticated: authResult.ok,
       version,
     };
+  }
+
+  /** gh-pr-status IPC：best-effort 查询当前分支对应的 GitHub PR；失败时返回稳定的“无 PR”结构。 */
+  function ghPrStatusForPayload(payload) {
+    const params = payloadParams(payload);
+    const target = resolveGitTargetPath(params);
+    const gitRoot = target ? findGitRoot(target) : null;
+    const headBranch =
+      params && typeof params === "object" && typeof params.headBranch === "string"
+        ? params.headBranch.trim()
+        : "";
+    const fallback = emptyGhPrStatus();
+    if (!gitRoot || !headBranch) return fallback;
+
+    const status = ghCliStatus();
+    if (!status.isInstalled || !status.isAuthenticated) return fallback;
+
+    const result = runQuietCommand(
+      "gh",
+      [
+        "pr",
+        "view",
+        headBranch,
+        "--json",
+        "number,url,title,body,isDraft,mergeable,reviewDecision,repository,state",
+      ],
+      5000,
+      { cwd: gitRoot }
+    );
+    if (!result.ok) return fallback;
+
+    const pr = parseJsonObject(result.stdout);
+    if (!pr || typeof pr.number !== "number") return fallback;
+
+    const reviewDecision = String(pr.reviewDecision || "").toUpperCase();
+    const reviewStatus =
+      reviewDecision === "APPROVED"
+        ? "approved"
+        : reviewDecision === "CHANGES_REQUESTED"
+          ? "changes_requested"
+          : "none";
+    const mergeable = String(pr.mergeable || "").toUpperCase();
+    const repo =
+      pr.repository && typeof pr.repository === "object"
+        ? pr.repository.nameWithOwner || pr.repository.name || null
+        : null;
+
+    return emptyGhPrStatus({
+      body: typeof pr.body === "string" ? pr.body : "",
+      canMerge: mergeable === "MERGEABLE",
+      hasOpenPr: String(pr.state || "").toUpperCase() !== "CLOSED",
+      isDraft: !!pr.isDraft,
+      number: pr.number,
+      repo,
+      reviewStatus,
+      title: typeof pr.title === "string" ? pr.title : null,
+      url: typeof pr.url === "string" ? pr.url : null,
+    });
   }
 
 
@@ -1386,6 +1484,7 @@ function createGitIpcHandlers(deps) {
     createGitBranchForPayload,
     currentBranchForPayload,
     ghCliStatus,
+    ghPrStatusForPayload,
     gitStableMetadataForPayload,
     gitStatusForPayload,
     handleGitWorkerMethod,

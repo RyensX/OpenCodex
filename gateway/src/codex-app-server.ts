@@ -79,6 +79,9 @@ function createJsonRpcClient(sendFn) {
 }
 
 function shellQuote(value) {
+  if (process.platform === "win32") {
+    return `"${String(value).replace(/"/g, '\\"')}"`;
+  }
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
