@@ -164,11 +164,14 @@ async function handleClientLog(req, res) {
 
   // 浏览器端会批量上报诊断事件，减少日志本身对真实 IPC 请求的干扰；旧单事件格式继续兼容。
   const entries = Array.isArray(parsed.events) ? parsed.events.slice(0, 200) : [parsed];
-  for (const entry of entries) {
-    const event = entry && typeof entry.event === "string" ? entry.event.slice(0, 120) : "unknown";
-    const data = safeClientLogData(entry && entry.data);
-    if (!data.clientId && typeof parsed.clientId === "string") data.clientId = shortId(parsed.clientId);
-    diagnosticLog("client-diagnostic", event, data);
+  if (DEBUG_LOGS) {
+    // client-diagnostic 是浏览器侧辅助埋点，正常渲染会大量触发；默认只接收不落盘，排查前端链路时再打开。
+    for (const entry of entries) {
+      const event = entry && typeof entry.event === "string" ? entry.event.slice(0, 120) : "unknown";
+      const data = safeClientLogData(entry && entry.data);
+      if (!data.clientId && typeof parsed.clientId === "string") data.clientId = shortId(parsed.clientId);
+      diagnosticLog("client-diagnostic", event, data);
+    }
   }
   return sendJson(res, 200, { ok: true }, { "cache-control": "no-store" });
 }
@@ -367,7 +370,8 @@ async function handleIpcInvoke(req, res, localFiles) {
     remoteAddress,
   };
   const suppressRoutineLog = shouldSuppressRoutineIpcLog(payload);
-  if (!suppressRoutineLog) diagnosticLog("gateway-ipc", "invoke_start", diagnosticBase);
+  // 成功 IPC start/end 会跟随前端渲染频率放大；默认保留慢调用和失败日志，DEBUG 时再展开完整链路。
+  if (DEBUG_LOGS && !suppressRoutineLog) diagnosticLog("gateway-ipc", "invoke_start", diagnosticBase);
   try {
     // AsyncLocalStorage 让后续官方 webContents.send 能知道这次 HTTP IPC 属于哪个浏览器 client。
     const value = await requestContext.run({ clientId, remoteAddress }, () =>
@@ -384,8 +388,7 @@ async function handleIpcInvoke(req, res, localFiles) {
       })
     );
     const elapsedMs = Date.now() - startedAtMs;
-    // 这里始终记录完成日志，便于和浏览器端 invoke_start 对齐计算完整链路耗时。
-    if (!suppressRoutineLog) diagnosticLog("gateway-ipc", "invoke_end", { ...diagnosticBase, elapsedMs, ok: true });
+    if (DEBUG_LOGS && !suppressRoutineLog) diagnosticLog("gateway-ipc", "invoke_end", { ...diagnosticBase, elapsedMs, ok: true });
     if (DEBUG_LOGS || elapsedMs >= IPC_SLOW_LOG_MS) {
       diagnosticLog("gateway-ipc", "invoke_slow", { ...diagnosticBase, elapsedMs, slowThresholdMs: IPC_SLOW_LOG_MS });
     }

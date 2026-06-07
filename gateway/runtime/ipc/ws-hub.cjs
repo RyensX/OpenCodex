@@ -3,6 +3,7 @@ try {
   ({ WebSocketServer } = require("ws"));
 } catch {}
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
+const { DEBUG_LOGS } = require("../core/config.cjs");
 
 // 下面这些阈值只服务于 OPENCODEX_DEBUG_WS=1 的链路排障；默认运行不会采样慢 WS 发送。
 const WS_LARGE_MESSAGE_BYTES = Number(process.env.OPENCODEX_WS_LARGE_LOG_BYTES || 256 * 1024);
@@ -294,7 +295,8 @@ function createWsHub(server, { createAppHostRelay, isAuthed }) {
     try {
       const { message, stringifyMs } = stringifyForWs(payload);
       const sent = sendPrepared(socket, payload, message, { ...options, route: options.route || "send", stringifyMs });
-      if (sent && !options.suppressDiagnostic) {
+      if (DEBUG_LOGS && sent && !options.suppressDiagnostic) {
+        // 单点发送是 WS 下行的正常成功路径，默认不打印，避免会话流式事件把日志撑满。
         diagnosticLog("ws-hub", "send", wsPayloadSummary(payload));
       }
       return sent;
@@ -357,7 +359,8 @@ function createWsHub(server, { createAppHostRelay, isAuthed }) {
       if (socket.readyState !== socket.OPEN) continue;
       if (sendPrepared(socket, payload, message, { ...options, route: "broadcast", stringifyMs })) sent += 1;
     }
-    if (!options.suppressDiagnostic) {
+    if (DEBUG_LOGS && !options.suppressDiagnostic) {
+      // 广播类消息在会话同步时非常高频，默认只转发不打印；需要排查 WS 路由时再打开 CODEX_WEB_DEBUG。
       diagnosticLog("ws-hub", "broadcast", {
         ...wsPayloadSummary(payload),
         clientCount: clients.size,
@@ -381,7 +384,8 @@ function createWsHub(server, { createAppHostRelay, isAuthed }) {
     try {
       const { message, stringifyMs } = stringifyForWs(payload);
       const sent = sendPrepared(socket, payload, message, { ...options, route: "send_to", stringifyMs });
-      if (sent && !options.suppressDiagnostic) {
+      if (DEBUG_LOGS && sent && !options.suppressDiagnostic) {
+        // 定向发送成功只说明路由命中，排查路由时有用，日常运行不需要持续记录。
         diagnosticLog("ws-hub", "send_to", {
           ...wsPayloadSummary(payload),
           clientId: shortId(clientId),
@@ -454,11 +458,13 @@ function createWsHub(server, { createAppHostRelay, isAuthed }) {
         onClose(reason) {
           if (relays.get(portId) === relay) relays.delete(portId);
           safeSend(ws, { type: "app-host-port-close", portId, reason }, { suppressDiagnostic: true });
-          diagnosticLog("ws-hub", "app_host_closed", {
-            clientId: shortId(clientId),
-            portId: shortId(portId),
-            reason,
-          });
+          if (DEBUG_LOGS) {
+            diagnosticLog("ws-hub", "app_host_closed", {
+              clientId: shortId(clientId),
+              portId: shortId(portId),
+              reason,
+            });
+          }
         },
         onError(error) {
           safeSend(
@@ -478,10 +484,13 @@ function createWsHub(server, { createAppHostRelay, isAuthed }) {
       });
       relays.set(portId, relay);
       safeSend(ws, { type: "app-host-port-connected", portId }, { suppressDiagnostic: true });
-      diagnosticLog("ws-hub", "app_host_connect", {
-        clientId: shortId(clientId),
-        portId: shortId(portId),
-      });
+      if (DEBUG_LOGS) {
+        // app-host 端口连接/关闭是前端组件生命周期的一部分，默认只保留失败日志。
+        diagnosticLog("ws-hub", "app_host_connect", {
+          clientId: shortId(clientId),
+          portId: shortId(portId),
+        });
+      }
     } catch (error) {
       diagnosticWarn("ws-hub", "app_host_connect_failed", {
         clientId: shortId(clientId),
@@ -561,10 +570,13 @@ function createWsHub(server, { createAppHostRelay, isAuthed }) {
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.__codexRemoteAddress = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "";
       clients.add(ws);
-      diagnosticLog("ws-hub", "connected", {
-        clientCount: clients.size,
-        remoteAddress: socketRemoteAddress(ws),
-      });
+      if (DEBUG_LOGS) {
+        // WS 握手/关闭属于页面生命周期噪声，默认不写入常规日志；认证失败和异常仍会保留。
+        diagnosticLog("ws-hub", "connected", {
+          clientCount: clients.size,
+          remoteAddress: socketRemoteAddress(ws),
+        });
+      }
       ws.on("message", (raw) => {
         try {
           const message = JSON.parse(String(raw));
@@ -578,16 +590,18 @@ function createWsHub(server, { createAppHostRelay, isAuthed }) {
             // 后来重复 hello 时直接覆盖映射，保证同一 clientId 指向最新连接。
             ws.__codexWebClientId = clientId;
             clientsById.set(clientId, ws);
-            diagnosticLog("ws-hub", "hello", {
-              clientId: shortId(clientId),
-              clientCount: clients.size,
-              mappedClientCount: clientsById.size,
-              remoteAddress: socketRemoteAddress(ws),
-            });
+            if (DEBUG_LOGS) {
+              diagnosticLog("ws-hub", "hello", {
+                clientId: shortId(clientId),
+                clientCount: clients.size,
+                mappedClientCount: clientsById.size,
+                remoteAddress: socketRemoteAddress(ws),
+              });
+            }
             try {
               // ack 明确告诉浏览器：clientId 已经进入路由表，可以开始发会产生异步回包的官方 IPC。
               ws.send(JSON.stringify({ type: "hello-ack", clientId }));
-              diagnosticLog("ws-hub", "hello_ack", { clientId: shortId(clientId) });
+              if (DEBUG_LOGS) diagnosticLog("ws-hub", "hello_ack", { clientId: shortId(clientId) });
             } catch (error) {
               diagnosticWarn("ws-hub", "hello_ack_failed", {
                 clientId: shortId(clientId),
@@ -607,11 +621,13 @@ function createWsHub(server, { createAppHostRelay, isAuthed }) {
         // close/error 都要从两个索引里删除，避免后续 sendTo 命中过期 socket。
         const closedClientId = ws.__codexWebClientId || "";
         removeClient(ws);
-        diagnosticLog("ws-hub", "closed", {
-          clientId: shortId(closedClientId),
-          clientCount: clients.size,
-          mappedClientCount: clientsById.size,
-        });
+        if (DEBUG_LOGS) {
+          diagnosticLog("ws-hub", "closed", {
+            clientId: shortId(closedClientId),
+            clientCount: clients.size,
+            mappedClientCount: clientsById.size,
+          });
+        }
       });
       ws.on("error", (error) => {
         // error 事件不一定随后触发 close，这里主动做一次相同清理。

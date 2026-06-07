@@ -8,6 +8,7 @@ const { AsyncLocalStorage } = require("async_hooks");
 const {
   AUTH_CONFIG_PATH,
   CODEX_HOME,
+  DEBUG_LOGS,
   HOST,
   MESSAGE_FOR_VIEW_CHANNEL,
   MESSAGE_FROM_VIEW_CHANNEL,
@@ -918,14 +919,16 @@ function routeOfficialWebContentsSend(channel, args) {
     diagnosticSummary: routeBase,
   };
   if (targetClientId && wsHub.sendTo(targetClientId, { channel, payload, args }, wsDiagnosticOptions)) {
-    if (!suppressRouteDiagnostic) {
+    if (DEBUG_LOGS && !suppressRouteDiagnostic) {
+      // 官方 IPC 定向成功投递会随每个请求回包出现，默认不落盘；DEBUG 时用于确认 requestId/clientId 路由。
       diagnosticLog("official-ipc-route", "send_to_client", { ...routeBase, route: "target" });
     }
     return true;
   }
   // 没有 requestId 或 clientId 的通知类消息广播给所有在线浏览器。
   const broadcastCount = wsHub.broadcast({ channel, payload, args }, wsDiagnosticOptions);
-  if (!suppressRouteDiagnostic) {
+  if (DEBUG_LOGS && !suppressRouteDiagnostic) {
+    // 成功广播只是常规路由摘要，数量会随会话状态同步放大；默认压下，DEBUG 时用于追路由。
     diagnosticLog("official-ipc-route", "broadcast", {
       ...routeBase,
       broadcastCount,
@@ -1204,10 +1207,13 @@ function createOfficialAppHostRelay(options = {}) {
 
   connectOfficialAppHostPort(port1, { clientId, portId, remoteAddress }).then(
     () => {
-      diagnosticLog("official-app-host", "connected", {
-        clientId: shortId(clientId),
-        portId: shortId(portId),
-      });
+      if (DEBUG_LOGS) {
+        // app-host 正常连接只是生命周期事件；失败仍保持常规日志，方便排查终端/侧栏能力不可用。
+        diagnosticLog("official-app-host", "connected", {
+          clientId: shortId(clientId),
+          portId: shortId(portId),
+        });
+      }
     },
     (error) => {
       diagnosticWarn("official-app-host", "connect_failed", {
