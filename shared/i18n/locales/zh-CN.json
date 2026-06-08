@@ -65,6 +65,16 @@
   "web.settings.close": "关闭设置",
   "web.settings.mobileKeyboard": "移动端软键盘优化",
   "web.settings.mobileSidebarCollapse": "移动端点击会话自动收起侧栏",
+  "web.settings.notifications": "浏览器通知",
+  "web.settings.notificationEnable": "启用",
+  "web.settings.notificationEnabled": "已启用",
+  "web.settings.notificationBlocked": "已被浏览器阻止",
+  "web.settings.notificationBlockedHelp": "浏览器未授予通知权限。部分浏览器会限制非 HTTPS 来源，建议使用 HTTPS 或 localhost 后重试。",
+  "web.settings.notificationPrompt": "未启用",
+  "web.settings.notificationRequesting": "正在请求授权...",
+  "web.settings.notificationTestTitle": "OpenCodex 通知已启用",
+  "web.settings.notificationTestBody": "后续官方通知将通过当前浏览器显示。",
+  "web.settings.notificationUnsupported": "当前浏览器不支持",
   "web.settings.about": "关于",
   "web.settings.star": "如果觉得有用，欢迎 Star 支持"
 }

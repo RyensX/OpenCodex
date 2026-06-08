@@ -81,7 +81,7 @@ function wsCompressionOptions() {
 
 // ws-hub 不理解官方 IPC 协议，只负责维护连接和按 clientId 投递 JSON 消息。
 /** 创建 WebSocket hub，负责浏览器连接管理和 gateway 事件分发。 */
-function createWsHub(server, { createAppHostRelay, isAuthed }) {
+function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAuthed }) {
   if (!WebSocketServer) {
     throw new Error("The ws package is required for gateway websocket support.");
   }
@@ -550,6 +550,10 @@ function createWsHub(server, { createAppHostRelay, isAuthed }) {
 
   function handleWsControlMessage(ws, req, message) {
     if (!message || typeof message !== "object") return false;
+    if (message.type === "opencodex:notification-event") {
+      // 通知 click/close 只从已认证 WS 回传；hub 不理解官方通知语义，直接交回 runtime 的 fake Notification。
+      return typeof handleNotificationEvent === "function" ? handleNotificationEvent(message, ws, req) : true;
+    }
     if (message.type === "app-host-connect") return handleAppHostConnect(ws, req, message);
     if (message.type === "app-host-port-message") return handleAppHostPortMessage(ws, message);
     return false;

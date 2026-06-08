@@ -412,6 +412,13 @@
             <label for="setting-mobile-sidebar-collapse" data-i18n="web.settings.mobileSidebarCollapse">移动端点击会话自动收起侧栏</label>
             <input id="setting-mobile-sidebar-collapse" class="switch" type="checkbox" role="switch" />
           </div>
+          <div class="settings-row">
+            <span class="settings-row-content">
+              <span class="settings-row-title" data-i18n="web.settings.notifications">浏览器通知</span>
+              <span id="setting-notification-status" class="settings-row-description"></span>
+            </span>
+            <input id="setting-notification-permission" class="switch" type="checkbox" role="switch" />
+          </div>
           <div class="settings-section-title" data-i18n="web.settings.about">关于</div>
           <a class="settings-row settings-link-row" href="https://github.com/RyensX/OpenCodex" target="_blank" rel="noreferrer">
             <span class="settings-row-content">
@@ -450,6 +457,8 @@
         const settingsSidebar = document.getElementById("settings-sidebar");
         const mobileKeyboardSwitch = document.getElementById("setting-mobile-keyboard");
         const mobileSidebarCollapseSwitch = document.getElementById("setting-mobile-sidebar-collapse");
+        const notificationPermissionButton = document.getElementById("setting-notification-permission");
+        const notificationStatus = document.getElementById("setting-notification-status");
         let settingsCloseTimer = 0;
 
         function t(key, values) {
@@ -496,6 +505,37 @@
           const settings = loadSettings();
           mobileKeyboardSwitch.checked = settings.mobileKeyboardOptimization !== false;
           mobileSidebarCollapseSwitch.checked = settings.mobileSidebarAutoCollapse !== false;
+          syncNotificationPermissionControls();
+        }
+
+        function notificationPermissionState() {
+          if (!("Notification" in window)) return "unsupported";
+          return window.Notification.permission || "default";
+        }
+
+        function syncNotificationPermissionControls(messageOverride) {
+          const state = notificationPermissionState();
+          const labels = {
+            granted: t("web.settings.notificationEnabled"),
+            denied: t("web.settings.notificationBlocked"),
+            default: t("web.settings.notificationPrompt"),
+            unsupported: t("web.settings.notificationUnsupported"),
+          };
+          notificationStatus.textContent = messageOverride || labels[state] || labels.default;
+          notificationPermissionButton.checked = state === "granted";
+          // default/denied 都允许用户点击；denied 时浏览器可能直接返回 denied，但入口不能被我们提前禁用。
+          notificationPermissionButton.disabled =
+            state === "granted" || state === "unsupported" || typeof window.Notification.requestPermission !== "function";
+        }
+
+        function showNotificationPermissionTest() {
+          if (!("Notification" in window) || window.Notification.permission !== "granted") return;
+          try {
+            // 授权成功后立即发一条浏览器通知，便于确认系统通知链路是否真的可用。
+            new window.Notification(t("web.settings.notificationTestTitle"), {
+              body: t("web.settings.notificationTestBody"),
+            });
+          } catch {}
         }
 
         function setSettingsOpen(open) {
@@ -781,6 +821,28 @@
         });
         mobileSidebarCollapseSwitch.addEventListener("change", () => {
           updateSetting("mobileSidebarAutoCollapse", mobileSidebarCollapseSwitch.checked);
+        });
+        notificationPermissionButton.addEventListener("change", async () => {
+          if (!("Notification" in window) || typeof window.Notification.requestPermission !== "function") {
+            syncNotificationPermissionControls();
+            return;
+          }
+          if (!notificationPermissionButton.checked) {
+            // 浏览器不允许网页主动撤销通知权限，关闭只能到浏览器站点设置里处理。
+            syncNotificationPermissionControls();
+            return;
+          }
+          notificationPermissionButton.disabled = true;
+          notificationStatus.textContent = t("web.settings.notificationRequesting");
+          let nextPermission = "";
+          try {
+            // 只有用户明确点击设置按钮时才请求权限，避免进入页面时打断登录或会话加载。
+            nextPermission = await window.Notification.requestPermission();
+          } catch {}
+          if (nextPermission === "granted" || window.Notification.permission === "granted") {
+            showNotificationPermissionTest();
+          }
+          syncNotificationPermissionControls(nextPermission === "denied" ? t("web.settings.notificationBlockedHelp") : "");
         });
         applyI18n();
         syncSettingsControls();

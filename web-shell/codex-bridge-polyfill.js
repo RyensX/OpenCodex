@@ -446,6 +446,7 @@
   const terminalMessageQueues = new Map();
   // 每个官方 connect-app-host MessagePort 对应一条 relay，key 是仅在当前页面内有效的 portId。
   const appHostPortRelays = new Map();
+  const activeBrowserNotifications = new Map();
   const MOBILE_COMPOSER_POST_SEND_FOCUS_BLOCK_MS = 4000;
   const MOBILE_COMPOSER_MANUAL_FOCUS_MS = 900;
   const MOBILE_SIDEBAR_AUTO_COLLAPSE_DELAY_MS = 80;
@@ -1928,6 +1929,81 @@
     }
   }
 
+  function sendGatewayControlPayload(payload, eventName) {
+    // OpenCodex 自有控制帧复用同一条已认证 WS；没有 ready 时直接放弃，避免通知事件反向阻塞官方 IPC。
+    if (!ws || ws.readyState !== w.WebSocket.OPEN || !wsReady) return false;
+    try {
+      ws.send(JSON.stringify({ clientId, ...payload }));
+      return true;
+    } catch (error) {
+      clientDiagnostic(eventName || "gateway-control-send-failed", {
+        error: error instanceof Error ? error.message : String(error),
+        errorName: error && error.name ? String(error.name) : "",
+        wsReady,
+        wsState: websocketStateName(ws),
+      });
+      return false;
+    }
+  }
+
+  function sendBrowserNotificationEvent(notificationId, event, extra) {
+    return sendGatewayControlPayload(
+      {
+        type: "opencodex:notification-event",
+        notificationId,
+        event,
+        ...(extra && typeof extra === "object" ? extra : {}),
+      },
+      "notification-event-send-failed"
+    );
+  }
+
+  function browserNotificationOptions(message) {
+    const options = {};
+    if (typeof message.body === "string" && message.body) options.body = message.body;
+    if (typeof message.icon === "string" && message.icon) options.icon = message.icon;
+    if (typeof message.tag === "string" && message.tag) options.tag = message.tag;
+    if (typeof message.silent === "boolean") options.silent = message.silent;
+    if (typeof message.renotify === "boolean") options.renotify = message.renotify;
+    if (typeof message.requireInteraction === "boolean") options.requireInteraction = message.requireInteraction;
+    if (Array.isArray(message.actions) && message.actions.length > 0) options.actions = message.actions;
+    return options;
+  }
+
+  function handleOpenCodexNotificationMessage(message) {
+    if (!message || typeof message !== "object") return false;
+    if (message.type === "opencodex:notification-close") {
+      const notificationId = typeof message.notificationId === "string" ? message.notificationId : "";
+      const notification = notificationId ? activeBrowserNotifications.get(notificationId) : null;
+      if (notification && typeof notification.close === "function") {
+        activeBrowserNotifications.delete(notificationId);
+        try {
+          notification.close();
+        } catch {}
+      }
+      return true;
+    }
+    if (message.type !== "opencodex:notification") return false;
+
+    const notificationId = typeof message.notificationId === "string" ? message.notificationId : "";
+    if (!notificationId || !("Notification" in w)) return true;
+    if (w.Notification.permission !== "granted") return true;
+
+    try {
+      // 不主动 requestPermission；只有用户已经授予浏览器通知权限时才展示。
+      const notification = new w.Notification(String(message.title || ""), browserNotificationOptions(message));
+      activeBrowserNotifications.set(notificationId, notification);
+      notification.onclick = () => {
+        sendBrowserNotificationEvent(notificationId, "click");
+      };
+      notification.onclose = () => {
+        activeBrowserNotifications.delete(notificationId);
+        sendBrowserNotificationEvent(notificationId, "close");
+      };
+    } catch {}
+    return true;
+  }
+
   function flushAppHostRelayMessages(state) {
     if (!state || state.closed || state.flushing) return;
     state.flushing = true;
@@ -3047,6 +3123,18 @@
             maybeLogLargeOrSlowWsInbound({
               handledBy: "app-host",
               handleMs: Date.now() - appHostStartedAtMs,
+              parseMs,
+              rawChars,
+              summary: gatewayWsInboundSummary(msg),
+            });
+          }
+          return;
+        }
+        if (handleOpenCodexNotificationMessage(msg)) {
+          if (WS_DEBUG_ENABLED) {
+            maybeLogLargeOrSlowWsInbound({
+              handledBy: "opencodex-notification",
+              handleMs: Math.max(0, Date.now() - parseStartedAtMs - parseMs),
               parseMs,
               rawChars,
               summary: gatewayWsInboundSummary(msg),

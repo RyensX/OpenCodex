@@ -65,6 +65,16 @@
   "web.settings.close": "Close settings",
   "web.settings.mobileKeyboard": "Mobile keyboard optimization",
   "web.settings.mobileSidebarCollapse": "Collapse sidebar after opening a chat on mobile",
+  "web.settings.notifications": "Browser notifications",
+  "web.settings.notificationEnable": "Enable",
+  "web.settings.notificationEnabled": "Enabled",
+  "web.settings.notificationBlocked": "Blocked by browser",
+  "web.settings.notificationBlockedHelp": "Notification permission was not granted. Some browsers restrict non-HTTPS origins; try HTTPS or localhost and retry.",
+  "web.settings.notificationPrompt": "Not enabled",
+  "web.settings.notificationRequesting": "Requesting permission...",
+  "web.settings.notificationTestTitle": "OpenCodex notifications enabled",
+  "web.settings.notificationTestBody": "Future official notifications will be shown by this browser.",
+  "web.settings.notificationUnsupported": "Not supported by this browser",
   "web.settings.about": "About",
   "web.settings.star": "Star OpenCodex on GitHub"
 }

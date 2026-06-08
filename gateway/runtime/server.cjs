@@ -30,6 +30,7 @@ const {
   createOfficialAppHostRelay,
   getI18nSnapshot,
   getOfficialBundle,
+  handleOfficialNotificationEvent,
   invokeOfficialIpc,
   listOfficialIpcChannels,
   rejectPendingInternalResponses,
@@ -436,7 +437,11 @@ async function createGateway() {
   });
 
   // 注入 app-host relay 工厂：WS hub 只管理浏览器连接，真正的官方 MessagePort 仍由 official-runtime 创建。
-  const webSocketHub = createWsHub(server, { createAppHostRelay: createOfficialAppHostRelay, isAuthed });
+  const webSocketHub = createWsHub(server, {
+    createAppHostRelay: createOfficialAppHostRelay,
+    handleNotificationEvent: handleOfficialNotificationEvent,
+    isAuthed,
+  });
   // official-runtime 通过这个 hub 把官方 renderer 的异步消息转发给浏览器。
   setWsHub(webSocketHub);
   installShutdownHandlers(server, localFiles);
