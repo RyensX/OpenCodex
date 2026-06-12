@@ -147,6 +147,215 @@ function launchAtLoginArgs() {
   return process.defaultApp ? [app.getAppPath(), ...args] : args;
 }
 
+function quoteWindowsCommandArg(value) {
+  const text = String(value || "");
+  if (!text) return "\"\"";
+  if (!/[ \t"]/.test(text)) return text;
+  return `"${text.replace(/(\\*)"/g, "$1$1\\\"").replace(/\\+$/, "$&$&")}"`;
+}
+
+function windowsLaunchCommand() {
+  return [process.execPath, ...launchAtLoginArgs()].map(quoteWindowsCommandArg).join(" ");
+}
+
+function windowsStartupScriptName() {
+  const safeName = String(app.getName() || "OpenCodex")
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "")
+    .trim();
+  return `${safeName || "OpenCodex"}.vbs`;
+}
+
+function windowsStartupScriptTargets() {
+  if (process.platform !== "win32") return [];
+  const scriptName = windowsStartupScriptName();
+  const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+  const programData = process.env.PROGRAMDATA || path.join(path.parse(os.homedir()).root, "ProgramData");
+  const candidates = [
+    {
+      scope: "user",
+      path: path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", scriptName),
+    },
+    {
+      scope: "machine",
+      path: path.join(programData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", scriptName),
+    },
+  ];
+  const seen = new Set();
+  return candidates.filter((target) => {
+    const key = target.path.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function windowsStartupScriptContent() {
+  const command = windowsLaunchCommand().replace(/"/g, "\"\"");
+  return [
+    "' OpenCodex 管理的启动项；应用路径变化时启动器会自动重写。",
+    "Set WshShell = CreateObject(\"WScript.Shell\")",
+    `WshShell.Run "${command}", 0, False`,
+    "",
+  ].join("\r\n");
+}
+
+function readTextFilePreservingUnicode(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return buffer.slice(2).toString("utf16le");
+  }
+  return buffer.toString("utf8");
+}
+
+function writeWindowsStartupScript(filePath) {
+  ensureDir(path.dirname(filePath));
+  // VBS 对中文路径的兼容性依赖 BOM，运行时启动脚本用 UTF-16LE 写入。
+  const content = windowsStartupScriptContent();
+  fs.writeFileSync(filePath, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(content, "utf16le")]));
+}
+
+function readWindowsStartupScriptState() {
+  const expectedContent = windowsStartupScriptContent();
+  const items = windowsStartupScriptTargets().map((target) => {
+    try {
+      const content = readTextFilePreservingUnicode(target.path);
+      return {
+        ...target,
+        exists: true,
+        matches: content === expectedContent,
+        error: "",
+      };
+    } catch (error) {
+      return {
+        ...target,
+        exists: false,
+        matches: false,
+        error: error && error.code === "ENOENT" ? "" : error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+  return {
+    enabled: items.some((item) => item.exists && item.matches),
+    present: items.some((item) => item.exists),
+    stale: items.some((item) => item.exists && !item.matches),
+    items,
+  };
+}
+
+function encodePowerShellScript(script) {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+function runWindowsPowerShell(script) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShellScript(script)], {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (chunk) => {
+      stdout = `${stdout}${chunk.toString("utf8")}`.slice(-8192);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = `${stderr}${chunk.toString("utf8")}`.slice(-8192);
+    });
+    child.on("error", (error) => {
+      resolve({ ok: false, code: null, stdout, stderr, error: error instanceof Error ? error.message : String(error) });
+    });
+    child.on("close", (code) => {
+      resolve({ ok: code === 0, code, stdout, stderr, error: "" });
+    });
+  });
+}
+
+function childProcessFailureText(result) {
+  if (!result) return "";
+  return String(result.stderr || result.stdout || result.error || (result.code == null ? "" : `exit ${result.code}`)).trim();
+}
+
+async function runElevatedWindowsStartupScript(openAtLogin) {
+  const targets = windowsStartupScriptTargets();
+  const userTarget = targets.find((target) => target.scope === "user") || targets[0];
+  const payload = {
+    openAtLogin: !!openAtLogin,
+    writePath: userTarget ? userTarget.path : "",
+    removePaths: targets.map((target) => target.path),
+    content: windowsStartupScriptContent(),
+  };
+  const payloadBase64 = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+  const elevatedScript = `
+$ErrorActionPreference = 'Stop'
+$payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payloadBase64}'))
+$payload = $payloadJson | ConvertFrom-Json
+if ($payload.openAtLogin) {
+  $parent = Split-Path -LiteralPath $payload.writePath -Parent
+  New-Item -ItemType Directory -Force -LiteralPath $parent | Out-Null
+  [IO.File]::WriteAllText($payload.writePath, $payload.content, [Text.Encoding]::Unicode)
+} else {
+  foreach ($targetPath in $payload.removePaths) {
+    if (Test-Path -LiteralPath $targetPath) {
+      Remove-Item -LiteralPath $targetPath -Force
+    }
+  }
+}
+`;
+  const encodedElevatedScript = encodePowerShellScript(elevatedScript);
+  // 只有普通用户级启动项写入失败时才触发 UAC，避免每次切换都打扰用户。
+  const wrapperScript = `
+$ErrorActionPreference = 'Stop'
+$argumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', '${encodedElevatedScript}')
+$process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentList -Verb RunAs -Wait -PassThru
+if ($null -eq $process) { exit 1 }
+exit $process.ExitCode
+`;
+  return runWindowsPowerShell(wrapperScript);
+}
+
+async function applyWindowsStartupScriptSetting(openAtLogin, options = {}) {
+  const errors = [];
+  if (openAtLogin) {
+    const userTarget = windowsStartupScriptTargets().find((target) => target.scope === "user");
+    if (userTarget) {
+      try {
+        writeWindowsStartupScript(userTarget.path);
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    if (readWindowsStartupScriptState().enabled) return { ok: true, error: "" };
+    if (options.allowElevated) {
+      const elevated = await runElevatedWindowsStartupScript(true);
+      if (!elevated.ok) errors.push(childProcessFailureText(elevated));
+      if (readWindowsStartupScriptState().enabled) return { ok: true, error: "" };
+    }
+    return {
+      ok: false,
+      error: errors.filter(Boolean).join("; ") || launcherText("launcher.error.launchAtLoginVerifyFailed"),
+    };
+  }
+
+  for (const item of readWindowsStartupScriptState().items) {
+    if (!item.exists) continue;
+    try {
+      fs.unlinkSync(item.path);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  // 关闭时同名脚本无论是否为当前内容都要清掉，避免旧路径继续触发开机启动。
+  if (!readWindowsStartupScriptState().present) return { ok: true, error: "" };
+  if (options.allowElevated) {
+    const elevated = await runElevatedWindowsStartupScript(false);
+    if (!elevated.ok) errors.push(childProcessFailureText(elevated));
+    if (!readWindowsStartupScriptState().present) return { ok: true, error: "" };
+  }
+  return {
+    ok: false,
+    error: errors.filter(Boolean).join("; ") || launcherText("launcher.error.launchAtLoginVerifyFailed"),
+  };
+}
+
 function loginItemQueryOptions() {
   if (process.platform !== "win32") return {};
   return {
@@ -180,7 +389,7 @@ function loginItemSettingsOptions(openAtLogin) {
   return options;
 }
 
-function readLaunchAtLoginState() {
+function readElectronLaunchAtLoginState() {
   if (!launchAtLoginSupported()) {
     return {
       supported: false,
@@ -207,7 +416,21 @@ function readLaunchAtLoginState() {
   }
 }
 
-function applyLaunchAtLoginSetting(openAtLogin) {
+function readLaunchAtLoginState() {
+  const electronState = readElectronLaunchAtLoginState();
+  if (process.platform !== "win32" || !electronState.supported) return electronState;
+  const startupScript = readWindowsStartupScriptState();
+  return {
+    ...electronState,
+    openAtLogin: electronState.openAtLogin || startupScript.enabled,
+    detail: {
+      ...(electronState.detail || {}),
+      openCodexStartupScript: startupScript,
+    },
+  };
+}
+
+function applyElectronLaunchAtLoginSetting(openAtLogin) {
   if (!launchAtLoginSupported()) {
     return {
       ok: false,
@@ -225,21 +448,56 @@ function applyLaunchAtLoginSetting(openAtLogin) {
   }
 }
 
-function syncLaunchAtLoginWithSettings(settings) {
+async function applyWindowsLaunchAtLoginSetting(openAtLogin, options = {}) {
+  const errors = [];
+  const electronResult = applyElectronLaunchAtLoginSetting(openAtLogin);
+  if (!electronResult.ok) errors.push(electronResult.error);
+
+  const electronState = readElectronLaunchAtLoginState();
+  if (openAtLogin && electronState.openAtLogin) {
+    await applyWindowsStartupScriptSetting(false, { allowElevated: false });
+    return { ok: true, error: "" };
+  }
+
+  const scriptResult = await applyWindowsStartupScriptSetting(openAtLogin, {
+    allowElevated: !!options.allowElevated,
+  });
+  if (!scriptResult.ok) errors.push(scriptResult.error);
+
+  const current = readLaunchAtLoginState();
+  if (openAtLogin && current.openAtLogin) return { ok: true, error: "" };
+  if (!openAtLogin && !current.openAtLogin && !readWindowsStartupScriptState().present) return { ok: true, error: "" };
+
+  return {
+    ok: false,
+    error: launcherText("launcher.error.launchAtLoginApplyFailed", {
+      error: errors.filter(Boolean).join("; ") || launcherText("launcher.error.launchAtLoginVerifyFailed"),
+    }),
+  };
+}
+
+async function applyLaunchAtLoginSetting(openAtLogin, options = {}) {
+  if (process.platform === "win32") {
+    return applyWindowsLaunchAtLoginSetting(openAtLogin, options);
+  }
+  return applyElectronLaunchAtLoginSetting(openAtLogin);
+}
+
+async function syncLaunchAtLoginWithSettings(settings) {
   if (!launchAtLoginSupported()) return;
   const current = readLaunchAtLoginState();
   // 系统登录项是开机自启的事实源；这里只修复“用户在启动器里开启过，但系统项丢失”的情况。
   if (current.error || current.openAtLogin || !(settings && settings.launchAtLogin)) return;
-  const result = applyLaunchAtLoginSetting(!!settings.launchAtLogin);
+  const result = await applyLaunchAtLoginSetting(!!settings.launchAtLogin, { allowElevated: false });
   if (!result.ok) gatewayState.lastError = result.error;
 }
 
-function initializeLauncherSettings() {
+async function initializeLauncherSettings() {
   const paths = runtimePaths();
   ensureRuntimeLayout(paths);
   gatewayState.paths = paths;
   gatewayState.settings = loadLauncherSettings(paths);
-  syncLaunchAtLoginWithSettings(gatewayState.settings);
+  await syncLaunchAtLoginWithSettings(gatewayState.settings);
   return gatewayState.settings;
 }
 
@@ -946,13 +1204,13 @@ ipcMain.handle("launcher:update-minimize-to-tray", (_event, value) => {
   broadcastState();
   return buildState();
 });
-ipcMain.handle("launcher:update-launch-at-login", (_event, value) => {
+ipcMain.handle("launcher:update-launch-at-login", async (_event, value) => {
   const paths = runtimePaths();
   ensureRuntimeLayout(paths);
   gatewayState.paths = paths;
   const nextLaunchAtLogin = !!value;
   const previousSettings = gatewayState.settings || loadLauncherSettings(paths);
-  const result = applyLaunchAtLoginSetting(nextLaunchAtLogin);
+  const result = await applyLaunchAtLoginSetting(nextLaunchAtLogin, { allowElevated: true });
   if (!result.ok) {
     gatewayState.lastError = result.error;
     broadcastState();
@@ -983,7 +1241,7 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
-    initializeLauncherSettings();
+    await initializeLauncherSettings();
     createWindow({ startHidden: shouldStartHidden() });
     createLauncherTray();
     await startGateway();

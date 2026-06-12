@@ -58,6 +58,8 @@
   "launcher.paths.rendererCache": "渲染器缓存",
   "launcher.error.invalidPort": "端口必须是 1 到 65535 之间的整数",
   "launcher.error.launchAtLoginUnsupported": "当前系统暂不支持开机自启设置",
+  "launcher.error.launchAtLoginVerifyFailed": "系统没有接受开机自启设置，请确认已允许系统权限提示",
+  "launcher.error.launchAtLoginApplyFailed": "开机自启设置失败：{error}",
   "web.status.checkingAuth": "正在检查访问权限...",
   "web.auth.passwordLabel": "访问密码",
   "web.auth.passwordPlaceholder": "请输入密码",

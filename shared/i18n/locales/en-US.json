@@ -58,6 +58,8 @@
   "launcher.paths.rendererCache": "Renderer cache",
   "launcher.error.invalidPort": "Port must be an integer between 1 and 65535",
   "launcher.error.launchAtLoginUnsupported": "Launch at login is not supported on this system",
+  "launcher.error.launchAtLoginVerifyFailed": "The system did not accept the launch-at-login setting. Confirm the system permission prompt and try again.",
+  "launcher.error.launchAtLoginApplyFailed": "Failed to update launch at login: {error}",
   "web.status.checkingAuth": "Checking access...",
   "web.auth.passwordLabel": "Access password",
   "web.auth.passwordPlaceholder": "Enter password",
