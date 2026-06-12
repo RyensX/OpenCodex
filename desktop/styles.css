@@ -305,6 +305,67 @@ button.primary:hover {
   flex-shrink: 0;
 }
 
+/* 开关用于持久性窗口/系统设置，固定尺寸避免状态切换时挤压设置行。 */
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 46px;
+  height: 28px;
+  flex: 0 0 auto;
+}
+
+.switch input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switch span {
+  width: 46px;
+  height: 28px;
+  border-radius: 999px;
+  background-color: var(--btn-border);
+  border: 1px solid transparent;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.switch span::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background-color: #FFFFFF;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  transition: transform 0.15s ease;
+}
+
+.switch input:checked + span {
+  background-color: var(--accent-color);
+}
+
+.switch input:checked + span::before {
+  transform: translateX(18px);
+}
+
+.switch input:disabled {
+  cursor: not-allowed;
+}
+
+.switch input:disabled + span {
+  opacity: 0.48;
+}
+
+.switch input:focus-visible + span {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
 /* Inputs */
 input[type="number"],
 input[type="password"] {

@@ -91,6 +91,38 @@
           </div>
         </section>
 
+        <!-- 窗口行为 -->
+        <section class="setting-section">
+          <h2><span data-i18n="launcher.window.title">窗口行为</span> <span class="section-caption" data-i18n="launcher.window.caption">后台运行</span></h2>
+          <div class="setting-list">
+            <div class="setting-item">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="launcher.settings.minimizeToTray.label">最小化到托盘</div>
+                <div class="setting-desc" data-i18n="launcher.settings.minimizeToTray.description">点击最小化后隐藏窗口，服务继续在右下角托盘运行</div>
+              </div>
+              <div class="setting-control">
+                <label class="switch">
+                  <input id="minimizeToTrayInput" type="checkbox" aria-label="最小化到托盘" data-i18n-aria-label="launcher.settings.minimizeToTray.label" />
+                  <span aria-hidden="true"></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="launcher.settings.launchAtLogin.label">开机自启</div>
+                <div class="setting-desc" id="launchAtLoginDesc" data-i18n="launcher.settings.launchAtLogin.description">登录系统后自动启动 OpenCodex，并默认驻留托盘</div>
+              </div>
+              <div class="setting-control">
+                <label class="switch">
+                  <input id="launchAtLoginInput" type="checkbox" aria-label="开机自启" data-i18n-aria-label="launcher.settings.launchAtLogin.label" />
+                  <span aria-hidden="true"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <!-- Codex 运行时 -->
         <section class="setting-section">
           <h2>Codex <span class="section-caption" data-i18n="launcher.codex.caption">官方运行时</span></h2>

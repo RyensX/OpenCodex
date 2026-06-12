@@ -97,6 +97,13 @@ function renderPort(port) {
   input.value = port ? String(port) : "";
 }
 
+function renderSwitch(id, enabled, disabled) {
+  const input = $(id);
+  if (!input) return;
+  input.checked = !!enabled;
+  input.disabled = !!disabled;
+}
+
 function renderUrls(state) {
   const urls = state.urls || {};
   const primary = urls.primary || state.url || "";
@@ -151,6 +158,15 @@ function render(state) {
   if (pendingHostMode && settings.hostMode === pendingHostMode) pendingHostMode = "";
   renderHostMode(settings.hostMode);
   renderPort(settings.port || state.port);
+  renderSwitch("minimizeToTrayInput", settings.minimizeToTray, false);
+  renderSwitch("launchAtLoginInput", settings.launchAtLogin, !(state.platform && state.platform.launchAtLoginSupported));
+  const launchAtLoginDesc = $("launchAtLoginDesc");
+  if (launchAtLoginDesc) {
+    launchAtLoginDesc.textContent =
+      state.platform && state.platform.launchAtLoginSupported === false
+        ? t("launcher.settings.launchAtLogin.unsupported")
+        : t("launcher.settings.launchAtLogin.description");
+  }
   text("serviceTitle", settings.hostMode === "lan" ? t("launcher.service.lan") : t("launcher.service.local"));
 
   text("codexVersion", official.version || t("common.unknown"));
@@ -245,7 +261,21 @@ document.addEventListener("keydown", async (event) => {
 
 document.addEventListener("change", async (event) => {
   const target = event.target;
-  if (!target || target.name !== "hostMode") return;
+  if (!target) return;
+
+  if (target.id === "minimizeToTrayInput") {
+    target.disabled = true;
+    render(await launcher.updateMinimizeToTray(target.checked));
+    return;
+  }
+
+  if (target.id === "launchAtLoginInput") {
+    target.disabled = true;
+    render(await launcher.updateLaunchAtLogin(target.checked));
+    return;
+  }
+
+  if (target.name !== "hostMode") return;
   const hostMode = selectedHostMode();
   pendingHostMode = hostMode;
   renderHostMode(hostMode);

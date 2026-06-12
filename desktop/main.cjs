@@ -9,6 +9,7 @@ const { prepareOfficialElectronRuntime } = require("../gateway/runner/index.cjs"
 const { PREFERRED_LANGUAGES_ENV, formatMessage, resolveOpenCodexI18n } = require("../shared/i18n/index.cjs");
 
 const APP_ROOT = path.resolve(__dirname, "..");
+const START_HIDDEN_ARG = "--opencodex-start-hidden";
 
 const DEFAULT_HOST = process.env.OPENCODEX_HOST || "127.0.0.1";
 const DEFAULT_PORT = normalizePort(process.env.OPENCODEX_PORT);
@@ -94,17 +95,26 @@ function defaultSettings() {
   return {
     hostMode: DEFAULT_HOST === "0.0.0.0" ? "lan" : "local",
     port: DEFAULT_PORT,
+    minimizeToTray: true,
+    launchAtLogin: false,
   };
+}
+
+function normalizeBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
 }
 
 function loadLauncherSettings(paths) {
   try {
     const parsed = JSON.parse(fs.readFileSync(paths.settingsPath, "utf8"));
+    const defaults = defaultSettings();
     return {
-      ...defaultSettings(),
+      ...defaults,
       ...parsed,
       hostMode: normalizeHostMode(parsed.hostMode),
       port: normalizePort(parsed.port),
+      minimizeToTray: normalizeBoolean(parsed.minimizeToTray, defaults.minimizeToTray),
+      launchAtLogin: normalizeBoolean(parsed.launchAtLogin, defaults.launchAtLogin),
     };
   } catch {
     return defaultSettings();
@@ -117,6 +127,8 @@ function saveLauncherSettings(paths, settings) {
     ...settings,
     hostMode: normalizeHostMode(settings && settings.hostMode),
     port: normalizePort(settings && settings.port),
+    minimizeToTray: normalizeBoolean(settings && settings.minimizeToTray, true),
+    launchAtLogin: normalizeBoolean(settings && settings.launchAtLogin, false),
   };
   fs.writeFileSync(paths.settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf8");
   return nextSettings;
@@ -124,6 +136,117 @@ function saveLauncherSettings(paths, settings) {
 
 function hostForMode(hostMode) {
   return normalizeHostMode(hostMode) === "lan" ? "0.0.0.0" : "127.0.0.1";
+}
+
+function launchAtLoginSupported() {
+  return process.platform === "win32" || process.platform === "darwin";
+}
+
+function launchAtLoginArgs() {
+  const args = [START_HIDDEN_ARG];
+  return process.defaultApp ? [app.getAppPath(), ...args] : args;
+}
+
+function loginItemQueryOptions() {
+  if (process.platform !== "win32") return {};
+  return {
+    path: process.execPath,
+    args: launchAtLoginArgs(),
+    name: app.getName(),
+  };
+}
+
+function loginItemSettingsOptions(openAtLogin) {
+  const enabled = !!openAtLogin;
+  const options = {
+    openAtLogin: enabled,
+  };
+  if (process.platform === "win32") {
+    return {
+      ...options,
+      path: process.execPath,
+      args: launchAtLoginArgs(),
+      name: app.getName(),
+      enabled,
+    };
+  }
+  if (process.platform === "darwin") {
+    return {
+      ...options,
+      // 老版本 macOS 仍会读取该字段；新版本忽略也不会影响 Windows 主路径。
+      openAsHidden: enabled,
+    };
+  }
+  return options;
+}
+
+function readLaunchAtLoginState() {
+  if (!launchAtLoginSupported()) {
+    return {
+      supported: false,
+      openAtLogin: false,
+      detail: null,
+      error: "",
+    };
+  }
+  try {
+    const detail = app.getLoginItemSettings(loginItemQueryOptions());
+    return {
+      supported: true,
+      openAtLogin: !!(detail && detail.openAtLogin),
+      detail,
+      error: "",
+    };
+  } catch (error) {
+    return {
+      supported: true,
+      openAtLogin: false,
+      detail: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function applyLaunchAtLoginSetting(openAtLogin) {
+  if (!launchAtLoginSupported()) {
+    return {
+      ok: false,
+      error: launcherText("launcher.error.launchAtLoginUnsupported"),
+    };
+  }
+  try {
+    app.setLoginItemSettings(loginItemSettingsOptions(openAtLogin));
+    return { ok: true, error: "" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function syncLaunchAtLoginWithSettings(settings) {
+  if (!launchAtLoginSupported()) return;
+  const current = readLaunchAtLoginState();
+  // 系统登录项是开机自启的事实源；这里只修复“用户在启动器里开启过，但系统项丢失”的情况。
+  if (current.error || current.openAtLogin || !(settings && settings.launchAtLogin)) return;
+  const result = applyLaunchAtLoginSetting(!!settings.launchAtLogin);
+  if (!result.ok) gatewayState.lastError = result.error;
+}
+
+function initializeLauncherSettings() {
+  const paths = runtimePaths();
+  ensureRuntimeLayout(paths);
+  gatewayState.paths = paths;
+  gatewayState.settings = loadLauncherSettings(paths);
+  syncLaunchAtLoginWithSettings(gatewayState.settings);
+  return gatewayState.settings;
+}
+
+function shouldStartHidden() {
+  if (process.argv.includes(START_HIDDEN_ARG)) return true;
+  const loginItemState = readLaunchAtLoginState();
+  return !!(loginItemState.detail && (loginItemState.detail.wasOpenedAtLogin || loginItemState.detail.wasOpenedAsHidden));
 }
 
 function sha256Hex(value) {
@@ -314,6 +437,7 @@ async function ensurePortSetting(paths, settings) {
 
 function buildState() {
   const i18n = currentGatewayI18n();
+  const launchAtLogin = readLaunchAtLoginState();
   return {
     running: !!gatewayState.child && !gatewayState.child.killed,
     pid: gatewayState.child ? gatewayState.child.pid : null,
@@ -327,7 +451,15 @@ function buildState() {
       lan: gatewayState.lanUrls,
     },
     paths: gatewayState.paths,
-    settings: gatewayState.settings || defaultSettings(),
+    settings: {
+      ...(gatewayState.settings || defaultSettings()),
+      launchAtLogin: launchAtLogin.supported
+        ? launchAtLogin.openAtLogin
+        : false,
+    },
+    platform: {
+      launchAtLoginSupported: launchAtLogin.supported,
+    },
     auth: {
       enabled: gatewayState.paths ? readAuthEnabled(gatewayState.paths.configPath) : false,
     },
@@ -547,10 +679,27 @@ async function restartGateway() {
   return startGateway();
 }
 
-function createWindow() {
+function hideLauncherWindowToTray() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    // 隐藏到托盘时从任务栏移除，避免用户看到一个不可交互的最小化窗口残留。
+    if (typeof mainWindow.setSkipTaskbar === "function") mainWindow.setSkipTaskbar(true);
+  } catch {}
+  mainWindow.hide();
+  hideLauncherDockIconForTray();
+  updateTrayMenu();
+}
+
+function launcherShouldMinimizeToTray() {
+  const settings = gatewayState.settings || defaultSettings();
+  return !!settings.minimizeToTray;
+}
+
+function createWindow(options = {}) {
   // Windows/Linux 默认会显示 Electron 应用菜单；启动器不需要菜单栏，创建窗口前统一关闭。
   Menu.setApplicationMenu(null);
-  void showLauncherDockIcon();
+  const startHidden = !!options.startHidden;
+  if (!startHidden) void showLauncherDockIcon();
   mainWindow = new BrowserWindow({
     width: 980,
     height: 720,
@@ -559,6 +708,8 @@ function createWindow() {
     title: "OpenCodex",
     backgroundColor: "#f7f6f2",
     autoHideMenuBar: true,
+    show: !startHidden,
+    skipTaskbar: startHidden,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -569,12 +720,28 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, "index.html"));
   mainWindow.setMenuBarVisibility(false);
+  mainWindow.on("minimize", (event) => {
+    if (!launcherShouldMinimizeToTray()) return;
+    event.preventDefault();
+    hideLauncherWindowToTray();
+  });
+  mainWindow.on("show", () => {
+    try {
+      mainWindow.setSkipTaskbar(false);
+    } catch {}
+  });
+  mainWindow.on("close", (event) => {
+    if (isQuitting || !launcherShouldMinimizeToTray()) return;
+    event.preventDefault();
+    hideLauncherWindowToTray();
+  });
   mainWindow.on("closed", () => {
     // 窗口允许真正关闭；后台驻留由托盘对象和 app 生命周期负责，之后需要时再重建窗口。
     mainWindow = null;
     hideLauncherDockIconIfWindowless();
     updateTrayMenu();
   });
+  if (startHidden) hideLauncherDockIconForTray();
 }
 
 async function showLauncherDockIcon() {
@@ -591,8 +758,13 @@ async function showLauncherDockIcon() {
 
 function hideLauncherDockIconIfWindowless() {
   if (process.platform !== "darwin" || BrowserWindow.getAllWindows().length > 0) return;
+  hideLauncherDockIconForTray();
+}
+
+function hideLauncherDockIconForTray() {
+  if (process.platform !== "darwin") return;
   try {
-    // macOS 关掉最后一个窗口后只保留菜单栏托盘图标，避免 Dock 里留下一个无窗口应用图标。
+    // macOS 进入托盘后台模式后只保留菜单栏托盘图标，避免 Dock 里留下无窗口应用图标。
     if (app.dock && typeof app.dock.hide === "function") app.dock.hide();
   } catch {}
   try {
@@ -604,6 +776,9 @@ function hideLauncherDockIconIfWindowless() {
 function presentLauncherWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
+  try {
+    if (typeof mainWindow.setSkipTaskbar === "function") mainWindow.setSkipTaskbar(false);
+  } catch {}
   mainWindow.show();
   try {
     if (process.platform === "darwin" && typeof app.focus === "function") app.focus({ steal: true });
@@ -760,6 +935,37 @@ ipcMain.handle("launcher:update-port", async (_event, port) => {
   });
   return restartGateway();
 });
+ipcMain.handle("launcher:update-minimize-to-tray", (_event, value) => {
+  const paths = runtimePaths();
+  ensureRuntimeLayout(paths);
+  gatewayState.paths = paths;
+  gatewayState.settings = saveLauncherSettings(paths, {
+    ...(gatewayState.settings || loadLauncherSettings(paths)),
+    minimizeToTray: !!value,
+  });
+  broadcastState();
+  return buildState();
+});
+ipcMain.handle("launcher:update-launch-at-login", (_event, value) => {
+  const paths = runtimePaths();
+  ensureRuntimeLayout(paths);
+  gatewayState.paths = paths;
+  const nextLaunchAtLogin = !!value;
+  const previousSettings = gatewayState.settings || loadLauncherSettings(paths);
+  const result = applyLaunchAtLoginSetting(nextLaunchAtLogin);
+  if (!result.ok) {
+    gatewayState.lastError = result.error;
+    broadcastState();
+    return buildState();
+  }
+  gatewayState.settings = saveLauncherSettings(paths, {
+    ...previousSettings,
+    launchAtLogin: nextLaunchAtLogin,
+  });
+  gatewayState.lastError = "";
+  broadcastState();
+  return buildState();
+});
 ipcMain.handle("launcher:update-password", async (_event, password) => {
   const paths = runtimePaths();
   ensureRuntimeLayout(paths);
@@ -777,7 +983,8 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
-    createWindow();
+    initializeLauncherSettings();
+    createWindow({ startHidden: shouldStartHidden() });
     createLauncherTray();
     await startGateway();
   });
