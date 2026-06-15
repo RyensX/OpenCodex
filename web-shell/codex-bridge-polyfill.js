@@ -73,6 +73,28 @@
     } catch {}
   }
 
+  const tokenUsageCapability = createTokenUsageCapability();
+
+  function createTokenUsageCapability() {
+    const factory = w.__OpenCodexCreateTokenUsageCapability;
+    if (typeof factory !== "function") return null;
+    try {
+      // tokenUsage 的重逻辑拆到独立 capability 文件，polyfill 只提供认证 header 和消息入口。
+      return factory({ getAuthHeaders: gatewayAuthHeaders });
+    } catch (error) {
+      console.warn("[opencodex-token-usage] failed to initialize capability", error);
+      return null;
+    }
+  }
+
+  function handleTokenUsageAppHostData(data) {
+    tokenUsageCapability?.handleAppHostData?.(data);
+  }
+
+  function handleTokenUsageGatewayPayload(payload) {
+    tokenUsageCapability?.handleGatewayPayload?.(payload);
+  }
+
   function gatewayAuthToken() {
     try {
       return String(w.__OPEN_CODEX_RUNTIME_AUTH_TOKEN__ || "").trim();
@@ -1000,6 +1022,7 @@
         isMobile: isLikelyMobileKeyboardDevice,
       },
     };
+    if (tokenUsageCapability) capabilities.tokenUsage = tokenUsageCapability;
     const pluginSystem = opencodexPluginSystem();
     if (pluginSystem && typeof pluginSystem.activate === "function") {
       pluginSystem.activate("renderer", capabilities);
@@ -1758,6 +1781,7 @@
       });
       return true;
     }
+    handleTokenUsageAppHostData(data);
     try {
       state.port.postMessage(data);
       if (data === null) closeAppHostRelay(state, "official_closed", false);
@@ -2840,6 +2864,7 @@
           if (effectiveChannel === "fetch-stream-error") {
             surfaceFetchIpcError("fetch-stream-error", messagePayload);
           }
+          handleTokenUsageGatewayPayload(messagePayload);
           if (shouldDispatchGatewayMessage(msg.channel, effectiveChannel)) {
             dispatch(effectiveChannel, messagePayload);
           }

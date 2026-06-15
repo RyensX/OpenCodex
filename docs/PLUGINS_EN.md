@@ -134,6 +134,37 @@ pluginSystem.registerPlugin({
 | `context.settings.list(options)` | Read plugin setting descriptors. |
 | `context.settings.register(setting)` | Register a plugin setting descriptor dynamically. The current UI does not auto-render these child settings yet. |
 | `context.platform.isMobile()` | Returns whether the environment looks like a mobile input device. |
+| `context.capabilities.tokenUsage` | Reads normalized reply token usage by `threadId + turnId`. |
+
+### tokenUsage capability
+
+`tokenUsage` is a dedicated capability mounted by the bridge, with the implementation kept in `codex-token-usage-capability.js`, for reading AI reply token usage on demand. It does not expose raw gateway, app-host messages, or session text to plugins. The bridge listens for and parses token data only after a plugin calls `acquireConsumer`; `getForTurn` reads the matching reply's session token record only on a runtime cache miss. Runtime caches are pruned globally and per thread so they do not grow without bounds.
+
+```js
+const release = context.capabilities.tokenUsage.acquireConsumer("example.token-usage");
+const disposeUpdate = context.capabilities.tokenUsage.onUpdate((usage) => {
+  console.log(usage.threadId, usage.turnId, usage.inputTokens, usage.outputTokens, usage.cacheHitRate);
+});
+
+context.capabilities.tokenUsage
+  .getForTurn({ threadId, turnId })
+  .then((usage) => {
+    // usage may be null when no data can be safely associated with this reply.
+  });
+```
+
+Returned fields:
+
+| Field | Description |
+| --- | --- |
+| `threadId` | Conversation ID. |
+| `turnId` | Turn ID for the reply. |
+| `inputTokens` | Input tokens, or `null` when unknown. |
+| `outputTokens` | Output tokens, or `null` when unknown. |
+| `cachedInputTokens` | Cached input tokens, or `null` when unknown. |
+| `cacheHitRate` | `cachedInputTokens / inputTokens`, or `null` when it cannot be computed. |
+| `updatedAt` | Timestamp when the bridge normalized the record. |
+| `source` | Data source marker, for example `app-host`, `gateway`, or `session-api`. |
 
 ## Current Events
 
@@ -171,4 +202,3 @@ activate(context) {
 - Plugins can access the DOM directly, which also means they are responsible for compatibility and security risks.
 - Settings currently auto-renders only the main switch for each plugin. Custom plugin setting descriptors do not have a complete UI yet.
 - Plugin descriptions are not wired into the main project i18n. Plugins should provide the final display copy themselves.
-

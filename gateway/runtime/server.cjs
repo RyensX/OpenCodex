@@ -25,6 +25,7 @@ const {
 } = require("./core/config.cjs");
 const { readBody, send, sendJson } = require("./http/http-utils.cjs");
 const { createLocalFileService } = require("./http/local-files.cjs");
+const { handleTokenUsageRequest } = require("./http/token-usage.cjs");
 const {
   buildGatewayStatus,
   createOfficialAppHostRelay,
@@ -297,6 +298,10 @@ function createRequestHandler({ localFiles, staticAssets }) {
     if (pathname === "/api/ipc/handlers") {
       // 这个端点主要用于排查官方 bundle 是否注册了预期 IPC handler。
       return sendJson(res, 200, listOfficialIpcChannels(), { "cache-control": "no-store" });
+    }
+
+    if (pathname === "/api/token-usage") {
+      return handleTokenUsageRequest(req, res, url);
     }
 
     if (pathname.startsWith("/api/app-fs/@fs/") && req.method === "GET") {

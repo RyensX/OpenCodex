@@ -134,6 +134,37 @@ pluginSystem.registerPlugin({
 | `context.settings.list(options)` | 读取插件设置声明。 |
 | `context.settings.register(setting)` | 动态注册插件设置声明。当前 UI 暂未自动渲染这些子设置。 |
 | `context.platform.isMobile()` | 判断当前环境是否更像移动端输入设备。 |
+| `context.capabilities.tokenUsage` | 按 `threadId + turnId` 读取归一化后的回复 token 用量。 |
+
+### tokenUsage capability
+
+`tokenUsage` 是 bridge 挂载的专用能力，具体逻辑位于 `codex-token-usage-capability.js`，用于插件按需读取 AI 回复的 token 消耗。它不会向插件暴露原始 gateway、app-host 消息或 session 正文。只有插件调用 `acquireConsumer` 后，bridge 才会监听/解析相关数据；`getForTurn` 在运行期缓存未命中时才会读取对应回复的 session token 记录。运行期缓存会按全局和会话维度裁剪，不会无限增长。
+
+```js
+const release = context.capabilities.tokenUsage.acquireConsumer("example.token-usage");
+const disposeUpdate = context.capabilities.tokenUsage.onUpdate((usage) => {
+  console.log(usage.threadId, usage.turnId, usage.inputTokens, usage.outputTokens, usage.cacheHitRate);
+});
+
+context.capabilities.tokenUsage
+  .getForTurn({ threadId, turnId })
+  .then((usage) => {
+    // usage 可能为 null，表示当前没有可安全关联到该回复的数据。
+  });
+```
+
+返回值字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `threadId` | 会话 ID。 |
+| `turnId` | 回复对应的 turn ID。 |
+| `inputTokens` | 输入 token 数；未知时为 `null`。 |
+| `outputTokens` | 输出 token 数；未知时为 `null`。 |
+| `cachedInputTokens` | 命中缓存的输入 token 数；未知时为 `null`。 |
+| `cacheHitRate` | `cachedInputTokens / inputTokens`；无法计算时为 `null`。 |
+| `updatedAt` | bridge 归一化该记录的时间戳。 |
+| `source` | 数据来源标记，例如 `app-host`、`gateway` 或 `session-api`。 |
 
 ## 当前事件
 
@@ -171,4 +202,3 @@ activate(context) {
 - 插件可以直接访问 DOM，但这也意味着插件需要自己承担兼容性和安全风险。
 - 设置页目前只自动渲染每个插件的总开关，插件子设置声明还没有完整 UI。
 - 插件描述暂不接入主项目 i18n，建议插件自己提供最终展示文案。
-

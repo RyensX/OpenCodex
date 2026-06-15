@@ -13,6 +13,7 @@ const { gzipIfUseful, send } = require("./http-utils.cjs");
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
 const OPENCODEX_PLUGIN_URL_PREFIX = "/opencodex-plugins/";
+const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
 const WEB_SHELL_PLUGINS_DIR = path.join(WEB_SHELL_DIR, "plugins");
 const SAFE_PLUGIN_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\.js$/;
@@ -75,6 +76,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<script src="/codex-web-config.js"></script>',
       '<script src="/opencodex-plugin-system.js"></script>',
       '<script src="/opencodex-plugin-loader.js"></script>',
+      '<script src="/codex-token-usage-capability.js"></script>',
       '<script src="/codex-bridge-polyfill.js"></script>',
       '<script src="/codex-tooltip-dismiss-guard.js"></script>',
     ].join("\n    ");
@@ -231,6 +233,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (
       reqPath === OPENCODEX_PLUGIN_LOADER_PATH ||
       reqPath === "/opencodex-plugin-system.js" ||
+      reqPath === OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH ||
       reqPath === "/codex-bridge-polyfill.js" ||
       reqPath === "/codex-tooltip-dismiss-guard.js"
     ) {
@@ -306,6 +309,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (reqPath === "/favicon.ico") return path.join(WEB_SHELL_DIR, "assets", "icon.png");
     if (reqPath === PWA_MANIFEST_PATH) return path.join(WEB_SHELL_DIR, "manifest.webmanifest");
     if (reqPath === "/opencodex-plugin-system.js") return path.join(WEB_SHELL_DIR, "opencodex-plugin-system.js");
+    if (reqPath === OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH) return path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js");
     if (reqPath === "/codex-bridge-polyfill.js") return path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js");
     if (reqPath === "/codex-tooltip-dismiss-guard.js") return path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js");
     if (reqPath.startsWith(OPENCODEX_PLUGIN_URL_PREFIX)) {
