@@ -32,6 +32,16 @@
     return !!request && request.method === "turn/start";
   }
 
+  function isIOSWebKitDevice() {
+    const nav = w.navigator || {};
+    const ua = String(nav.userAgent || "");
+    const platform = String(nav.platform || "");
+    const touchPoints = Number(nav.maxTouchPoints || 0);
+    // iPadOS 桌面 UA 会伪装成 MacIntel，只能结合触控点数识别。
+    const isAppleTouchDevice = /iP(?:hone|ad|od)/i.test(ua) || (platform === "MacIntel" && touchPoints > 1);
+    return isAppleTouchDevice && /WebKit/i.test(ua) && !/Android/i.test(ua);
+  }
+
   pluginSystem.registerPlugin({
     id: "opencodex.mobile-keyboard-optimization",
     name: "Mobile keyboard optimization",
@@ -56,9 +66,9 @@
       style.id = "opencodex-mobile-keyboard-plugin-styles";
       style.textContent = `
         @media (max-width: 820px), (pointer: coarse) {
-          html[data-opencodex-mobile-keyboard-optimization="true"],
-          html[data-opencodex-mobile-keyboard-optimization="true"] body,
-          html[data-opencodex-mobile-keyboard-optimization="true"] #root {
+          html[data-opencodex-mobile-keyboard-optimization="true"]:not([data-opencodex-ios-keyboard-optimization="true"]),
+          html[data-opencodex-mobile-keyboard-optimization="true"]:not([data-opencodex-ios-keyboard-optimization="true"]) body,
+          html[data-opencodex-mobile-keyboard-optimization="true"]:not([data-opencodex-ios-keyboard-optimization="true"]) #root {
             height: var(--codex-visual-viewport-height, 100dvh) !important;
             min-height: var(--codex-visual-viewport-height, 100dvh) !important;
             max-height: var(--codex-visual-viewport-height, 100dvh) !important;
@@ -78,6 +88,20 @@
             font-size: max(16px, 1em) !important;
             scroll-margin-bottom: calc(var(--codex-keyboard-inset-bottom, 0px) + 96px);
           }
+
+          html[data-opencodex-ios-keyboard-optimization="true"] {
+            /* iOS 下同时避让 Safari 底栏/软键盘和 Home Indicator 安全区。 */
+            --codex-ios-bottom-avoidance: max(var(--codex-keyboard-inset-bottom, 0px), env(safe-area-inset-bottom, 0px));
+          }
+
+          html[data-opencodex-ios-keyboard-optimization="true"] .app-shell-main-content-viewport {
+            --thread-floating-content-bottom-inset: calc(var(--spacing, 4px) * 3 + var(--codex-ios-bottom-avoidance, 0px));
+          }
+
+          html[data-opencodex-ios-keyboard-optimization="true"] [data-thread-find-composer="true"] {
+            transform: translate3d(0, calc(-1 * var(--codex-ios-bottom-avoidance, 0px)), 0);
+            will-change: transform;
+          }
         }
       `;
       (document.head || document.documentElement).appendChild(style);
@@ -86,6 +110,7 @@
         const enabled = isEnabled();
         const root = document.documentElement;
         root.dataset.opencodexMobileKeyboardOptimization = enabled ? "true" : "false";
+        root.dataset.opencodexIosKeyboardOptimization = enabled && isMobile() && isIOSWebKitDevice() ? "true" : "false";
         if (!enabled) {
           root.style.removeProperty("--codex-visual-viewport-height");
           root.style.removeProperty("--codex-visual-viewport-offset-top");
@@ -99,8 +124,13 @@
         const viewport = w.visualViewport;
         const height = Math.max(0, Math.floor(viewport?.height || w.innerHeight || document.documentElement.clientHeight || 0));
         const offsetTop = Math.max(0, Math.floor(viewport?.offsetTop || 0));
-        const layoutHeight = Math.max(0, Math.floor(w.innerHeight || document.documentElement.clientHeight || height));
-        const keyboardInset = Math.max(0, layoutHeight - height - offsetTop);
+        const layoutHeight = Math.max(0, Math.floor(document.documentElement.clientHeight || w.innerHeight || height));
+        const innerHeight = Math.max(0, Math.floor(w.innerHeight || layoutHeight || height));
+        const viewportBottom = height + offsetTop;
+        // iOS Safari 的地址栏和软键盘不会稳定改写布局视口；用可视视口底部差值推导被遮挡高度。
+        const keyboardInset = isIOSWebKitDevice()
+          ? Math.max(0, layoutHeight - viewportBottom, innerHeight - viewportBottom)
+          : Math.max(0, innerHeight - viewportBottom);
         const root = document.documentElement;
         if (height > 0) root.style.setProperty("--codex-visual-viewport-height", `${height}px`);
         root.style.setProperty("--codex-visual-viewport-offset-top", `${offsetTop}px`);
@@ -229,6 +259,7 @@
         if (style.parentNode) style.parentNode.removeChild(style);
         focusGuardState.shouldSuppressFocus = () => false;
         document.documentElement.removeAttribute("data-opencodex-mobile-keyboard-optimization");
+        document.documentElement.removeAttribute("data-opencodex-ios-keyboard-optimization");
         document.documentElement.style.removeProperty("--codex-visual-viewport-height");
         document.documentElement.style.removeProperty("--codex-visual-viewport-offset-top");
         document.documentElement.style.removeProperty("--codex-keyboard-inset-bottom");
