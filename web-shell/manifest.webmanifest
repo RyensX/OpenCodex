@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "OpenCodeApp",
-  "short_name": "OpenCodeApp",
+  "name": "OpenCodex",
+  "short_name": "OpenCodex",
   "description": "OpenCodex browser shell",
   "start_url": "/",
   "scope": "/",

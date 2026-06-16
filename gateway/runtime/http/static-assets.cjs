@@ -49,7 +49,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
      * - codex-web-config.js，提供端口、workspace roots 等运行时信息。
      * - opencodex-plugin-system.js，提供插件 host。
      * - opencodex-plugin-loader.js，按目录扫描结果加载插件脚本。
-     * - manifest/theme-color，允许 Chrome 把 Web 入口安装为独立窗口壳。
+     * - manifest/移动 Web App 元数据，允许入口安装为独立窗口壳。
      * - bridge polyfill，把 Electron API 转成 HTTP/WS 调用。
      */
     let html = rawHtml;
@@ -57,7 +57,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     html = patchHtmlLang(html, currentI18n().locale);
     html = html.replace(
       /<meta([^>]*\bname=["']viewport["'][^>]*)>/i,
-      '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />'
+      '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />'
     );
     const iconLinks = [
       '<link rel="icon" type="image/png" href="/assets/icon.png" />',
@@ -73,6 +73,11 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<base href="/official/">',
       '<link rel="manifest" href="/manifest.webmanifest">',
       '<meta name="theme-color" content="#ffffff">',
+      '<meta name="application-name" content="OpenCodex">',
+      '<meta name="mobile-web-app-capable" content="yes">',
+      '<meta name="apple-mobile-web-app-title" content="OpenCodex">',
+      '<meta name="apple-mobile-web-app-capable" content="yes">',
+      '<meta name="apple-mobile-web-app-status-bar-style" content="default">',
       '<script src="/codex-web-config.js"></script>',
       '<script src="/opencodex-plugin-system.js"></script>',
       '<script src="/opencodex-plugin-loader.js"></script>',
@@ -185,7 +190,13 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   }
 
   function createPluginLoaderScript() {
-    const pluginUrls = listPluginFileNames().map((fileName) => `${OPENCODEX_PLUGIN_URL_PREFIX}${fileName}`);
+    const pluginUrls = listPluginFileNames().map((fileName) => {
+      const file = path.join(WEB_SHELL_PLUGINS_DIR, fileName);
+      const stat = fs.statSync(file);
+      // iOS Safari 偶发会复用同 URL 的脚本；mtime/size 版本号保证插件调试改动立即生效。
+      const version = `${Math.round(stat.mtimeMs)}-${stat.size}`;
+      return `${OPENCODEX_PLUGIN_URL_PREFIX}${fileName}?v=${version}`;
+    });
     return `(() => {
   const pluginUrls = ${JSON.stringify(pluginUrls)};
   // loader 由 gateway 生成；刷新页面即可重新扫描 web-shell/plugins 下的插件文件。

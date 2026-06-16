@@ -66,6 +66,7 @@
   "web.settings.open": "Settings",
   "web.settings.title": "Settings",
   "web.settings.close": "Close settings",
+  "web.settings.iosFix": "iOS Safari compatibility fix",
   "web.settings.mobileKeyboard": "Mobile keyboard optimization",
   "web.settings.mobileSidebarCollapse": "Collapse sidebar after opening a chat on mobile",
   "web.settings.plugins": "Plugins",

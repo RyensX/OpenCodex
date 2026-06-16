@@ -66,6 +66,7 @@
   "web.settings.open": "设置",
   "web.settings.title": "设置",
   "web.settings.close": "关闭设置",
+  "web.settings.iosFix": "iOS Safari 兼容修复",
   "web.settings.mobileKeyboard": "移动端软键盘优化",
   "web.settings.mobileSidebarCollapse": "移动端点击会话自动收起侧栏",
   "web.settings.plugins": "插件",
