@@ -22,7 +22,7 @@ Compared with the official option, OpenCodex still has advantages in several usa
 - Native Codex experience.
 - Supports local access, LAN access, and remote LAN access with Tailscale / ZeroTier / VPN.
 - Supports setting an access password to avoid unauthenticated exposure.
-- Provides a desktop launcher for visual configuration of the listen address, port, access password, and more.
+- Provides a launcher for visual configuration of the listen address, port, access password, and more.
 - Automatically updates to the local Codex Desktop version on startup, keeping compatibility with new-version features.
 - Provides optimizations for mobile devices.
 
@@ -45,7 +45,7 @@ Compared with the official option, OpenCodex still has advantages in several usa
 
 ## How To Use
 
-### Desktop Launcher
+### Launcher
 
 Download and install:
 
@@ -58,19 +58,19 @@ pnpm install
 ```
 
 ```bash
-pnpm run desktop:dev
+pnpm run launcher:dev
 ```
 
 Build a macOS installer:
 
 ```bash
-pnpm run desktop:dist:mac
+pnpm run launcher:dist:mac
 ```
 
 Build a Windows installer:
 
 ```bash
-pnpm run desktop:dist:win
+pnpm run launcher:dist:win
 ```
 
 Artifacts are written to `release/`. On first startup, OpenCodex randomly selects an available port. After changing the listen address, port, or access password, it automatically restarts the service so the configuration takes effect.

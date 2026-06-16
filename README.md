@@ -57,19 +57,19 @@ pnpm install
 ```
 
 ```bash
-pnpm run desktop:dev
+pnpm run launcher:dev
 ```
 
 生成 macOS 安装包：
 
 ```bash
-pnpm run desktop:dist:mac
+pnpm run launcher:dist:mac
 ```
 
 生成 Windows 安装包：
 
 ```bash
-pnpm run desktop:dist:win
+pnpm run launcher:dist:win
 ```
 
 产物会输出到 `release/`。首次启动会随机选择一个可用端口，修改监听地址、端口或访问密码后会自动重启服务让配置生效。

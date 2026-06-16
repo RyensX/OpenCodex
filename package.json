@@ -1,7 +1,7 @@
 {
   "name": "opencodex",
   "productName": "OpenCodex",
-  "main": "desktop/main.cjs",
+  "main": "launcher/main.cjs",
   "author": "Ryens",
   "version": "2.0.1",
   "description": "OpenCodex is a middleware layer for Codex Desktop. It lets you use a phone, tablet, or another computer to access and operate Codex on a target machine through a browser, making it suitable for continuous AI Coding in LAN or remote LAN environments.",
@@ -13,13 +13,13 @@
     "web:dev": "pnpm run build:gateway && node gateway/dev/run-gateway.cjs",
     "build": "pnpm run build:gateway",
     "build:gateway": "pnpm run sync:version && node -e \"require('node:fs').rmSync('gateway/dist', { force: true, recursive: true })\" && tsc -p gateway/tsconfig.json",
-    "desktop:dev": "pnpm run build && pnpm exec electron .",
-    "desktop:pack:mac": "pnpm run build && pnpm exec electron-builder --mac --dir",
-    "desktop:dist:mac": "pnpm run build && pnpm exec electron-builder --mac dmg zip",
-    "desktop:pack:win": "pnpm run build && pnpm exec electron-builder --win --dir --x64",
-    "desktop:dist:win": "pnpm run build && pnpm exec electron-builder --win nsis zip --x64",
-    "desktop:pack:linux": "pnpm run build && pnpm exec electron-builder --linux --dir --x64",
-    "desktop:dist:linux": "pnpm run build && pnpm exec electron-builder --linux AppImage deb zip --x64"
+    "launcher:dev": "pnpm run build && pnpm exec electron .",
+    "launcher:pack:mac": "pnpm run build && pnpm exec electron-builder --mac --dir",
+    "launcher:dist:mac": "pnpm run build && pnpm exec electron-builder --mac dmg zip",
+    "launcher:pack:win": "pnpm run build && pnpm exec electron-builder --win --dir --x64",
+    "launcher:dist:win": "pnpm run build && pnpm exec electron-builder --win nsis zip --x64",
+    "launcher:pack:linux": "pnpm run build && pnpm exec electron-builder --linux --dir --x64",
+    "launcher:dist:linux": "pnpm run build && pnpm exec electron-builder --linux AppImage deb zip --x64"
   },
   "dependencies": {
     "@electron/asar": "^4.1.2",
@@ -51,7 +51,7 @@
     },
     "files": [
       "package.json",
-      "desktop/**/*",
+      "launcher/**/*",
       "shared/**/*",
       "gateway/*.cjs",
       "gateway/runner/**/*",
