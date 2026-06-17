@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld("openCodexLauncher", {
   restart: () => ipcRenderer.invoke("launcher:restart"),
   openUrl: () => ipcRenderer.invoke("launcher:open-url"),
   openLogs: () => ipcRenderer.invoke("launcher:open-logs"),
+  openGitHub: () => ipcRenderer.invoke("launcher:open-github"),
+  openAuthor: () => ipcRenderer.invoke("launcher:open-author"),
   revealPath: (targetPath) => ipcRenderer.invoke("launcher:reveal-path", targetPath),
   copy: (value) => ipcRenderer.invoke("launcher:copy", value),
   updateHostMode: (hostMode) => ipcRenderer.invoke("launcher:update-host-mode", hostMode),

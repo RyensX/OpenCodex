@@ -8,12 +8,16 @@ const { spawn } = require("child_process");
 const { prepareOfficialElectronRuntime } = require("../gateway/runner/index.cjs");
 const { OPENCODEX_VERSION_LABEL } = require("../shared/app-version.cjs");
 const { PREFERRED_LANGUAGES_ENV, formatMessage, resolveOpenCodexI18n } = require("../shared/i18n/index.cjs");
+const packageMetadata = require("../package.json");
 
 const APP_ROOT = path.resolve(__dirname, "..");
 
 const DEFAULT_HOST = process.env.OPENCODEX_HOST || "127.0.0.1";
 const DEFAULT_PORT = normalizePort(process.env.OPENCODEX_PORT);
 const PLUGIN_DIRS_ENV = "OPENCODEX_PLUGIN_DIRS";
+const OPENCODEX_GITHUB_URL = "https://github.com/RyensX/OpenCodex";
+const OPENCODEX_AUTHOR_URL = "https://github.com/RyensX";
+const OPENCODEX_AUTHOR = packageMetadata.author || "Ryens";
 
 let mainWindow = null;
 let tray = null;
@@ -375,6 +379,9 @@ function buildState() {
     // launcher 版本来自构建前同步的静态文件，不依赖 gateway 或官方 Codex runtime 状态。
     app: {
       version: OPENCODEX_VERSION_LABEL,
+      author: OPENCODEX_AUTHOR,
+      authorUrl: OPENCODEX_AUTHOR_URL,
+      githubUrl: OPENCODEX_GITHUB_URL,
     },
     externalPlugins: externalPluginStatus((gatewayState.settings || defaultSettings()).pluginDirs),
     status: gatewayState.status,
@@ -788,6 +795,14 @@ ipcMain.handle("launcher:open-url", () => {
 ipcMain.handle("launcher:open-logs", () => {
   if (gatewayState.paths) revealPath(gatewayState.paths.logPath);
   return buildState();
+});
+ipcMain.handle("launcher:open-github", () => {
+  // GitHub 入口不接收渲染进程传参，固定打开项目主页，减少外链面。
+  return shell.openExternal(OPENCODEX_GITHUB_URL);
+});
+ipcMain.handle("launcher:open-author", () => {
+  // 作者入口同样固定到作者主页，不复用通用外链接口。
+  return shell.openExternal(OPENCODEX_AUTHOR_URL);
 });
 ipcMain.handle("launcher:reveal-path", (_event, targetPath) => revealPath(targetPath));
 ipcMain.handle("launcher:copy", (_event, value) => {

@@ -22,6 +22,15 @@ function pathButton(id, value, fallbackKey) {
   node.disabled = !value;
 }
 
+function linkButton(id, value, fallbackKey) {
+  const node = $(id);
+  if (!node) return;
+  // 关于区链接只负责展示地址；真实打开由主进程固定到可信仓库地址。
+  node.textContent = value || t(fallbackKey || "common.notFound");
+  node.title = value || "";
+  node.disabled = !value;
+}
+
 function t(key, values) {
   const template = currentMessages[key] || key;
   if (!values || typeof values !== "object") return template;
@@ -176,6 +185,9 @@ function render(state) {
 
   // launcher 自身版本固定展示在左上角品牌区，避免占用设置列表空间。
   text("openCodexVersion", appInfo.version || t("common.unknown"));
+  // 底部关于区展示应用元信息，随 package.json 与主进程状态同步。
+  linkButton("authorLink", appInfo.author, "common.unknown");
+  linkButton("githubLink", appInfo.githubUrl, "common.notFound");
   text("codexVersion", official.version || t("common.unknown"));
   text("codexBuild", official.build || t("common.unknown"));
   text("cacheUpdatedAt", formatDateTime(official.cacheProcessedAt));
@@ -266,6 +278,14 @@ document.addEventListener("click", async (event) => {
   }
   if (target.id === "openLogs") {
     await launcher.openLogs();
+    return;
+  }
+  if (target.id === "githubLink") {
+    await launcher.openGitHub();
+    return;
+  }
+  if (target.id === "authorLink") {
+    await launcher.openAuthor();
     return;
   }
   if (target.classList && target.classList.contains("path")) {

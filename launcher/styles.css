@@ -467,6 +467,25 @@ input:focus {
   flex: 0 0 140px;
 }
 
+/* 关于信息位于页面底部，去掉额外底部间距，让最后一组信息收束干净。 */
+.about-section {
+  margin-bottom: 0;
+}
+
+.about-list .external-link {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.about-list .external-link::after {
+  content: "↗";
+  margin-left: 6px;
+  font-size: 12px;
+  line-height: 1;
+}
+
 @media (max-width: 640px) {
   .hero-section {
     flex-direction: column;
