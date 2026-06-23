@@ -11,6 +11,7 @@ const {
   fetchLatestReleaseState,
   markLatestReleaseChecking,
 } = require("./latest-release.cjs");
+const { createBoundedLogWriter } = require("./log-writer.cjs");
 const { OPENCODEX_VERSION_LABEL } = require("../shared/app-version.cjs");
 const { PREFERRED_LANGUAGES_ENV, formatMessage, resolveOpenCodexI18n } = require("../shared/i18n/index.cjs");
 const packageMetadata = require("../package.json");
@@ -30,6 +31,7 @@ let trayMenu = null;
 let statusTimer = null;
 let latestReleaseCheckedForForeground = false;
 let isQuitting = false;
+const gatewayLogWriter = createBoundedLogWriter();
 
 const gatewayState = {
   child: null,
@@ -55,11 +57,34 @@ function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
 }
 
-function appendLog(line) {
+function appendLog(line, options) {
   if (!gatewayState.paths || !gatewayState.paths.logPath) return;
   try {
-    fs.appendFileSync(gatewayState.paths.logPath, line);
+    // Launcher 主流程只把日志交给 writer 入队；真正落盘和轮转由后台 flush 处理。
+    gatewayLogWriter.append(gatewayState.paths.logPath, line, options);
   } catch {}
+}
+
+function flushGatewayLog() {
+  try {
+    // 打开日志前主动 flush，避免用户看到的文件明显落后于内存缓冲。
+    return gatewayLogWriter.flush();
+  } catch {
+    return Promise.resolve();
+  }
+}
+
+function flushGatewayLogSync() {
+  try {
+    // 只有退出和异常路径允许同步写盘，用短暂阻塞换取关键日志尽量落盘。
+    gatewayLogWriter.flushSync();
+  } catch {}
+}
+
+function errorLogText(error) {
+  if (error instanceof Error && error.stack) return error.stack;
+  if (error instanceof Error && error.message) return error.message;
+  return String(error);
 }
 
 function runtimePaths() {
@@ -532,6 +557,7 @@ async function startGateway() {
 
   if (!fs.existsSync(paths.gatewayScriptPath)) {
     gatewayState.lastError = `Missing gateway entry: ${paths.gatewayScriptPath}`;
+    appendLog(`[launcher] ${gatewayState.lastError}\n`, { urgent: true });
     broadcastState();
     return buildState();
   }
@@ -557,7 +583,7 @@ async function startGateway() {
     gatewayState.officialRuntime = officialRuntime;
   } catch (error) {
     gatewayState.lastError = error instanceof Error ? error.message : String(error);
-    appendLog(`[launcher] official Electron runtime prepare failed: ${gatewayState.lastError}\n`);
+    appendLog(`[launcher] official Electron runtime prepare failed: ${gatewayState.lastError}\n`, { urgent: true });
     broadcastState();
     return buildState();
   }
@@ -601,14 +627,14 @@ async function startGateway() {
   gatewayState.child = child;
 
   child.stdout.on("data", (chunk) => appendLog(`[gateway] ${chunk.toString()}`));
-  child.stderr.on("data", (chunk) => appendLog(`[gateway:err] ${chunk.toString()}`));
+  child.stderr.on("data", (chunk) => appendLog(`[gateway:err] ${chunk.toString()}`, { urgent: true }));
   child.on("error", (error) => {
     gatewayState.lastError = error instanceof Error ? error.message : String(error);
-    appendLog(`[launcher] gateway spawn error: ${gatewayState.lastError}\n`);
+    appendLog(`[launcher] gateway spawn error: ${gatewayState.lastError}\n`, { urgent: true });
     broadcastState();
   });
   child.on("exit", (code, signal) => {
-    appendLog(`[launcher] gateway exited: code=${code} signal=${signal}\n`);
+    appendLog(`[launcher] gateway exited: code=${code} signal=${signal}\n`, { urgent: true });
     gatewayState.child = null;
     gatewayState.status = null;
     if (!isQuitting) {
@@ -838,7 +864,8 @@ ipcMain.handle("launcher:restart", () => restartGateway());
 ipcMain.handle("launcher:open-url", () => {
   return openOpenCodex();
 });
-ipcMain.handle("launcher:open-logs", () => {
+ipcMain.handle("launcher:open-logs", async () => {
+  await flushGatewayLog();
   if (gatewayState.paths) revealPath(gatewayState.paths.logPath);
   return buildState();
 });
@@ -922,6 +949,22 @@ ipcMain.handle("launcher:choose-plugin-dir", async () => {
   return restartGateway();
 });
 
+process.on("uncaughtExceptionMonitor", (error) => {
+  appendLog(`[launcher] uncaught exception: ${errorLogText(error)}\n`, { urgent: true });
+  // 进程即将按 Node 默认流程崩溃时，只能走同步 flush 尽量保留现场日志。
+  flushGatewayLogSync();
+});
+
+process.on("unhandledRejection", (reason) => {
+  appendLog(`[launcher] unhandled rejection: ${errorLogText(reason)}\n`, { urgent: true });
+  // 未处理 Promise 拒绝同样属于关键故障，允许在这里短暂阻塞写盘。
+  flushGatewayLogSync();
+});
+
+process.on("exit", () => {
+  flushGatewayLogSync();
+});
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -956,5 +999,6 @@ if (!gotLock) {
         gatewayState.child.kill("SIGTERM");
       } catch {}
     }
+    flushGatewayLogSync();
   });
 }

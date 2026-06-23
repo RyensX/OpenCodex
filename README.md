@@ -125,6 +125,7 @@ http://127.0.0.1:3737
 | `OPENCODEX_PORT` | 随机可用端口 | Launcher 首次启动 gateway 时使用的默认端口。 |
 | `OPENCODEX_PREFERRED_LANGUAGES` | `zh-CN` | OpenCodex 自有界面语言首选列表，支持 JSON 数组或逗号分隔，例如 `["zh-Hans-CN","en-CN"]`。Launcher 会自动传入系统首选语言。 |
 | `OPENCODEX_PLUGIN_DIRS` | 空 | 外部插件根目录，结构需与 `web-shell/plugins` 一致；多个目录可用系统路径分隔符或 JSON 数组传入。 |
+| `OPENCODEX_LOG_MAX_MB` | `10` | Launcher 写入的 `gateway.log` 单文件大小上限，单位 MB；最多额外保留一个 `gateway.log.old`。 |
 | `CODEX_WEB_CONFIG_PATH` | `config.yaml` | gateway 认证配置文件路径。 |
 | `CODEX_WEB_AUTH_TOKEN_TTL_MS` | `43200000` | gateway 访问 token 有效期，默认 12 小时。 |
 | `CODEX_WEB_DEBUG` | 空 | 设为 `1` 或 `true` 后输出更多调试日志。 |

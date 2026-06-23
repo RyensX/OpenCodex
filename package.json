@@ -10,7 +10,7 @@
     "sync": "pnpm run sync:version",
     "sync:version": "node scripts/sync-app-version.cjs",
     "check:version": "node scripts/sync-app-version.cjs --check",
-    "test": "node --test gateway/test/auth-rate-limit.test.cjs gateway/test/http-utils.test.cjs",
+    "test": "node --test gateway/test/auth-rate-limit.test.cjs gateway/test/http-utils.test.cjs launcher/test/log-writer.test.cjs",
     "web:dev": "pnpm run build:gateway && node gateway/dev/run-gateway.cjs",
     "build": "pnpm run build:gateway",
     "build:gateway": "pnpm run sync:version && node -e \"require('node:fs').rmSync('gateway/dist', { force: true, recursive: true })\" && tsc -p gateway/tsconfig.json",
