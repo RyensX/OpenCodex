@@ -428,6 +428,64 @@ input:focus {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
+/* 防睡眠是二元状态，用紧凑开关减少设置区横向占用。 */
+.toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 46px;
+  height: 26px;
+  flex: 0 0 auto;
+}
+
+.toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.toggle span {
+  position: relative;
+  width: 46px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--btn-border);
+  background-color: var(--bg-secondary);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.toggle span::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background-color: #FFFFFF;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  transition: transform 0.15s ease;
+}
+
+.toggle input:checked + span {
+  border-color: var(--accent-color);
+  background-color: var(--accent-color);
+}
+
+.toggle input:checked + span::before {
+  transform: translateX(20px);
+}
+
+.toggle input:focus-visible + span {
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.toggle input:disabled + span {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 /* Value Display / Path Button */
 .setting-value {
   font-family: "JetBrains Mono", monospace;

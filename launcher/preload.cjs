@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("openCodexLauncher", {
   updatePort: (port) => ipcRenderer.invoke("launcher:update-port", port),
   updatePassword: (password) => ipcRenderer.invoke("launcher:update-password", password),
   updatePluginDirs: (pluginDirs) => ipcRenderer.invoke("launcher:update-plugin-dirs", pluginDirs),
+  updatePreventSleep: (preventSleep) => ipcRenderer.invoke("launcher:update-prevent-sleep", preventSleep),
   choosePluginDir: () => ipcRenderer.invoke("launcher:choose-plugin-dir"),
   onState: (callback) => {
     const listener = (_event, state) => callback(state);

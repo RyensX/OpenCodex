@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, clipboard, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, clipboard, dialog, ipcMain, nativeImage, powerSaveBlocker, shell } = require("electron");
 const crypto = require("crypto");
 const fs = require("fs");
 const net = require("net");
@@ -29,6 +29,7 @@ let mainWindow = null;
 let tray = null;
 let trayMenu = null;
 let statusTimer = null;
+let preventSleepBlockerId = null;
 let latestReleaseCheckedForForeground = false;
 let isQuitting = false;
 const gatewayLogWriter = createBoundedLogWriter();
@@ -132,6 +133,11 @@ function normalizePluginDirs(value) {
   return String(value || "").trim();
 }
 
+function normalizePreventSleep(value, fallback = false) {
+  if (value === undefined || value === null) return fallback;
+  return value === true;
+}
+
 function splitConfiguredPluginDirs(value) {
   const text = normalizePluginDirs(value);
   if (!text) return [];
@@ -153,6 +159,7 @@ function defaultSettings() {
     hostMode: DEFAULT_HOST === "0.0.0.0" ? "lan" : "local",
     port: DEFAULT_PORT,
     pluginDirs: "",
+    preventSleep: true,
   };
 }
 
@@ -165,6 +172,7 @@ function loadLauncherSettings(paths) {
       hostMode: normalizeHostMode(parsed.hostMode),
       port: normalizePort(parsed.port),
       pluginDirs: normalizePluginDirs(parsed.pluginDirs),
+      preventSleep: normalizePreventSleep(parsed.preventSleep, defaultSettings().preventSleep),
     };
   } catch {
     return defaultSettings();
@@ -178,9 +186,51 @@ function saveLauncherSettings(paths, settings) {
     hostMode: normalizeHostMode(settings && settings.hostMode),
     port: normalizePort(settings && settings.port),
     pluginDirs: normalizePluginDirs(settings && settings.pluginDirs),
+    preventSleep: normalizePreventSleep(settings && settings.preventSleep, defaultSettings().preventSleep),
   };
   fs.writeFileSync(paths.settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf8");
   return nextSettings;
+}
+
+function isPreventSleepBlockerStarted() {
+  if (preventSleepBlockerId === null) return false;
+  try {
+    return powerSaveBlocker.isStarted(preventSleepBlockerId);
+  } catch {
+    return false;
+  }
+}
+
+function startPreventSleepBlocker() {
+  if (isPreventSleepBlockerStarted()) return;
+  try {
+    // 只阻止系统挂起，允许屏幕按系统设置熄灭或锁屏。
+    preventSleepBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+    appendLog(`[launcher] prevent sleep blocker started: id=${preventSleepBlockerId}\n`);
+  } catch (error) {
+    gatewayState.lastError = error instanceof Error ? error.message : String(error);
+    appendLog(`[launcher] prevent sleep blocker failed: ${gatewayState.lastError}\n`, { urgent: true });
+  }
+}
+
+function stopPreventSleepBlocker() {
+  if (preventSleepBlockerId === null) return;
+  const blockerId = preventSleepBlockerId;
+  preventSleepBlockerId = null;
+  try {
+    if (powerSaveBlocker.isStarted(blockerId)) powerSaveBlocker.stop(blockerId);
+    appendLog(`[launcher] prevent sleep blocker stopped: id=${blockerId}\n`);
+  } catch (error) {
+    appendLog(`[launcher] prevent sleep blocker stop failed: ${errorLogText(error)}\n`, { urgent: true });
+  }
+}
+
+function applyPreventSleepSetting(settings) {
+  if (normalizePreventSleep(settings && settings.preventSleep)) {
+    startPreventSleepBlocker();
+  } else {
+    stopPreventSleepBlocker();
+  }
 }
 
 function hostForMode(hostMode) {
@@ -553,6 +603,7 @@ async function startGateway() {
   gatewayState.paths = paths;
   ensureRuntimeLayout(paths);
   gatewayState.settings = await ensurePortSetting(paths, loadLauncherSettings(paths));
+  applyPreventSleepSetting(gatewayState.settings);
   gatewayState.host = hostForMode(gatewayState.settings.hostMode);
 
   if (!fs.existsSync(paths.gatewayScriptPath)) {
@@ -929,6 +980,18 @@ ipcMain.handle("launcher:update-plugin-dirs", async (_event, pluginDirs) => {
   });
   return restartGateway();
 });
+ipcMain.handle("launcher:update-prevent-sleep", async (_event, preventSleep) => {
+  const paths = runtimePaths();
+  ensureRuntimeLayout(paths);
+  gatewayState.paths = paths;
+  gatewayState.settings = saveLauncherSettings(paths, {
+    ...(gatewayState.settings || loadLauncherSettings(paths)),
+    preventSleep: normalizePreventSleep(preventSleep),
+  });
+  applyPreventSleepSetting(gatewayState.settings);
+  broadcastState();
+  return buildState();
+});
 ipcMain.handle("launcher:choose-plugin-dir", async () => {
   const dialogOptions = {
     properties: ["openDirectory"],
@@ -993,6 +1056,7 @@ if (!gotLock) {
 
   app.on("before-quit", () => {
     isQuitting = true;
+    stopPreventSleepBlocker();
     if (statusTimer) clearInterval(statusTimer);
     if (gatewayState.child) {
       try {

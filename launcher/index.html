@@ -97,6 +97,20 @@
               </div>
             </div>
 
+            <!-- 防睡眠能力由 launcher 主进程持有，开关只负责切换持久化设置。 -->
+            <div class="setting-item">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="launcher.settings.preventSleep.label">阻止电脑睡眠</div>
+                <div class="setting-desc" data-i18n="launcher.settings.preventSleep.description">启用后会保持系统唤醒保证服务可用，但不会阻止屏幕熄灭和锁屏</div>
+              </div>
+              <div class="setting-control">
+                <label class="toggle" for="preventSleepInput">
+                  <input id="preventSleepInput" type="checkbox" data-i18n-aria-label="launcher.settings.preventSleep.toggle" />
+                  <span aria-hidden="true"></span>
+                </label>
+              </div>
+            </div>
+
             <div class="setting-item">
               <div class="setting-info">
                 <div class="setting-label" data-i18n="launcher.settings.pluginDirs.label">外部插件目录</div>
