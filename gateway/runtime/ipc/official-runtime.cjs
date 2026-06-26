@@ -597,6 +597,173 @@ function hideOfficialWindow(win) {
   } catch {}
 }
 
+function sameWebContents(left, right) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  return typeof left.id === "number" && typeof right.id === "number" && left.id === right.id;
+}
+
+function isOfficialHiddenWebContents(webContents) {
+  return sameWebContents(webContents, officialIpc.hiddenWebContents);
+}
+
+function isHiddenOfficialDialogParent(parent) {
+  // 官方新版会把目录选择器挂到 event.sender 对应窗口；OpenCodex 的官方窗口是隐藏后台窗口，不能作为可见弹窗 parent。
+  if (!parent) return false;
+  if (parent === officialIpc.hiddenWindow || parent.__opencodexOfficialGatewayRegistered === true) return true;
+  if (
+    officialIpc.hiddenWindow &&
+    typeof parent.id === "number" &&
+    typeof officialIpc.hiddenWindow.id === "number" &&
+    parent.id === officialIpc.hiddenWindow.id
+  ) {
+    return true;
+  }
+  return isOfficialHiddenWebContents(parent.webContents);
+}
+
+function dialogOptionsSummary(options) {
+  return {
+    title: options && typeof options.title === "string" ? options.title : "",
+    properties:
+      options && Array.isArray(options.properties)
+        ? options.properties.filter((item) => typeof item === "string").join(",")
+        : "",
+  };
+}
+
+function dialogParentSummary(parent) {
+  const parentWebContents = parent && parent.webContents ? parent.webContents : null;
+  let parentVisible = null;
+  try {
+    parentVisible = parent && typeof parent.isVisible === "function" ? parent.isVisible() : null;
+  } catch {}
+  return {
+    hasParent: !!parent,
+    parentId: parent && typeof parent.id === "number" ? parent.id : null,
+    parentWebContentsId: parentWebContents && typeof parentWebContents.id === "number" ? parentWebContents.id : null,
+    hiddenWindowId:
+      officialIpc.hiddenWindow && typeof officialIpc.hiddenWindow.id === "number" ? officialIpc.hiddenWindow.id : null,
+    hiddenWebContentsId:
+      officialIpc.hiddenWebContents && typeof officialIpc.hiddenWebContents.id === "number"
+        ? officialIpc.hiddenWebContents.id
+        : null,
+    parentRegistered: !!(parent && parent.__opencodexOfficialGatewayRegistered),
+    parentVisible,
+  };
+}
+
+function dialogProperties(options) {
+  return options && Array.isArray(options.properties) ? options.properties : [];
+}
+
+function canUseAppleScriptOpenDirectoryDialog(options) {
+  if (process.platform !== "darwin") return false;
+  const properties = dialogProperties(options);
+  return properties.includes("openDirectory") && !properties.includes("openFile");
+}
+
+function appleScriptOpenDirectoryArgs(options) {
+  const title = options && typeof options.title === "string" && options.title.trim() ? options.title : "Select Folder";
+  const allowMultiple = dialogProperties(options).includes("multiSelections");
+  const body = allowMultiple
+    ? [
+        "set pickedFolders to choose folder with prompt promptText with multiple selections allowed",
+        'set outputText to ""',
+        "repeat with pickedFolder in pickedFolders",
+        "set outputText to outputText & POSIX path of pickedFolder & linefeed",
+        "end repeat",
+        "return outputText",
+      ]
+    : ["set pickedFolder to choose folder with prompt promptText", "return POSIX path of pickedFolder"];
+  const script = ["on run argv", "set promptText to item 1 of argv", ...body, "end run"];
+  return {
+    allowMultiple,
+    args: script.flatMap((line) => ["-e", line]).concat(title),
+    title,
+  };
+}
+
+function normalizeAppleScriptFolderPath(filePath) {
+  const normalized = String(filePath || "").trim();
+  return normalized.length > 1 ? normalized.replace(/\/+$/g, "") : normalized;
+}
+
+function isAppleScriptUserCanceled(error) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  const stderr = error && typeof error === "object" && typeof error.stderr === "string" ? error.stderr : "";
+  return /User canceled|-128/.test(`${message}\n${stderr}`);
+}
+
+function execFileForDialog(command, args, options) {
+  return new Promise((resolve, reject) => {
+    childProcess.execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function showOpenDirectoryDialogViaAppleScript(options) {
+  const script = appleScriptOpenDirectoryArgs(options);
+  try {
+    // LSBackgroundOnly 的 gateway 进程不适合作为原生目录选择器宿主；用 osascript 让系统直接显示可见选择器。
+    const result = await execFileForDialog("/usr/bin/osascript", script.args, {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024,
+    });
+    const filePaths = String(result.stdout || "")
+      .split(/\r?\n/)
+      .map(normalizeAppleScriptFolderPath)
+      .filter(Boolean);
+    diagnosticLog("official-runtime", "dialog_applescript_open_directory_end", {
+      ...dialogOptionsSummary(options),
+      allowMultiple: script.allowMultiple,
+      count: filePaths.length,
+    });
+    return filePaths.length > 0 ? { canceled: false, filePaths } : { canceled: true, filePaths: [] };
+  } catch (error) {
+    if (isAppleScriptUserCanceled(error)) {
+      diagnosticLog("official-runtime", "dialog_applescript_open_directory_canceled", dialogOptionsSummary(options));
+      return { canceled: true, filePaths: [] };
+    }
+    diagnosticWarn("official-runtime", "dialog_applescript_open_directory_failed", {
+      ...dialogOptionsSummary(options),
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+function installDialogHooks() {
+  if (electron.dialog.__opencodexOfficialGatewayDialogPatched) return;
+  electron.dialog.__opencodexOfficialGatewayDialogPatched = true;
+  const originalShowOpenDialog = electron.dialog.showOpenDialog.bind(electron.dialog);
+  diagnosticLog("official-runtime", "dialog_hook_installed");
+
+  electron.dialog.showOpenDialog = function patchedShowOpenDialog(parentOrOptions, maybeOptions) {
+    if (isHiddenOfficialDialogParent(parentOrOptions)) {
+      const options = maybeOptions || {};
+      const mode = canUseAppleScriptOpenDirectoryDialog(options) ? "osascript_open_directory" : "electron_unparented";
+      diagnosticLog("official-runtime", "dialog_hidden_parent_detached", {
+        ...dialogParentSummary(parentOrOptions),
+        ...dialogOptionsSummary(options),
+        mode,
+      });
+      if (canUseAppleScriptOpenDirectoryDialog(options)) return showOpenDirectoryDialogViaAppleScript(options);
+      // 非目录选择器继续去掉隐藏 parent，恢复 2.0.0 时无 parent 的系统弹窗行为。
+      return originalShowOpenDialog(options);
+    }
+    if (arguments.length <= 1) return originalShowOpenDialog(parentOrOptions);
+    return originalShowOpenDialog(parentOrOptions, maybeOptions);
+  };
+}
+
 function payloadFromArgs(args) {
   return args.length <= 1 ? (args[0] ?? null) : args;
 }
@@ -1044,6 +1211,17 @@ function installBrowserWindowHooks() {
     return win;
   }
 
+  if (typeof NativeBrowserWindow.fromWebContents === "function") {
+    GatewayBrowserWindow.fromWebContents = (webContents) => {
+      const win = NativeBrowserWindow.fromWebContents(webContents);
+      if (win && isOfficialHiddenWebContents(webContents)) {
+        // fromWebContents 可能返回新的 JS 包装对象，重新打标后 dialog hook 才能稳定识别隐藏 parent。
+        win.__opencodexOfficialGatewayRegistered = true;
+      }
+      return win;
+    };
+  }
+
   Object.setPrototypeOf(GatewayBrowserWindow, NativeBrowserWindow);
   GatewayBrowserWindow.prototype = NativeBrowserWindow.prototype;
   try {
@@ -1371,6 +1549,7 @@ function startOfficialRuntime() {
   installAppServerSpawnHook(officialBundle);
   installIpcMainHooks();
   installBrowserWindowHooks();
+  installDialogHooks();
   installOfficialNotificationHook(electron, {
     publishNotification: (payload) => (wsHub ? wsHub.broadcast(payload, { suppressDiagnostic: true }) : 0),
   });
