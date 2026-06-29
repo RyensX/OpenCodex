@@ -93,6 +93,34 @@ class OfficialBundleCache {
     }
   }
 
+  reuseWithoutSourceScanBlockReason(manifest: any | null): string {
+    if (!manifest) return "缓存清单不存在";
+    const schemaVersion = Number.isFinite(Number(this.refreshPolicy?.schemaVersion))
+      ? this.refreshPolicy.schemaVersion
+      : MANIFEST_SCHEMA_VERSION;
+    if (manifest.schemaVersion !== schemaVersion) {
+      return `缓存清单版本变化：${manifest.schemaVersion || "none"} -> ${schemaVersion}`;
+    }
+    if (!this.isWebviewReady()) return "已处理的官方运行时缓存缺失或不完整";
+
+    const sourceAsarPath = typeof manifest.sourceAsarPath === "string" ? manifest.sourceAsarPath : "";
+    if (!sourceAsarPath) return "缓存清单缺少 app.asar 来源路径";
+    if (!this.fileSystem.isFile(sourceAsarPath)) return "缓存记录的 app.asar 不存在";
+
+    const sourceResourcesPath =
+      typeof manifest.sourceResourcesPath === "string" && manifest.sourceResourcesPath
+        ? manifest.sourceResourcesPath
+        : path.dirname(sourceAsarPath);
+    // 即使不扫描升级，官方 resources 目录仍要给 hidden runtime 查找 CLI、插件等配套资源。
+    if (!this.fileSystem.isDirectory(sourceResourcesPath)) return "缓存记录的官方 resources 目录不存在";
+
+    const sourceCodexBinaryPath =
+      typeof manifest.sourceCodexBinaryPath === "string" ? manifest.sourceCodexBinaryPath : "";
+    // 如果 manifest 记录了 CLI 路径，就必须确认它仍可用，避免 app-server hook 指向失效二进制。
+    if (sourceCodexBinaryPath && !this.fileSystem.isFile(sourceCodexBinaryPath)) return "缓存记录的 Codex CLI 不存在";
+    return "";
+  }
+
   refreshReason(manifest: any | null, sourceInfo: any): string {
     return this.refreshPolicy.reason({
       manifest,

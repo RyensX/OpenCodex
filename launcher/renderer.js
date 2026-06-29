@@ -152,6 +152,13 @@ function renderPreventSleep(preventSleep) {
   input.checked = !!preventSleep;
 }
 
+function renderOfficialAutoScanUpgrade(officialAutoScanUpgrade) {
+  const input = $("officialAutoScanUpgradeInput");
+  if (!input) return;
+  // 旧版设置没有该字段时按默认开启展示，保持升级前后的启动行为一致。
+  input.checked = officialAutoScanUpgrade !== false;
+}
+
 function renderUrls(state) {
   const urls = state.urls || {};
   const primary = urls.primary || state.url || "";
@@ -209,6 +216,7 @@ function render(state) {
   renderPort(settings.port || state.port);
   renderPluginDirs(settings.pluginDirs);
   renderPreventSleep(settings.preventSleep);
+  renderOfficialAutoScanUpgrade(settings.officialAutoScanUpgrade);
   renderExternalPluginStatus(state.externalPlugins);
 
   // launcher 自身版本固定展示在左上角品牌区，避免占用设置列表空间。
@@ -357,6 +365,16 @@ document.addEventListener("change", async (event) => {
     } finally {
       target.disabled = false;
     }
+    return;
+  }
+  if (target.id === "officialAutoScanUpgradeInput") {
+    target.disabled = true;
+    try {
+      render(await launcher.updateOfficialAutoScanUpgrade(target.checked));
+    } finally {
+      target.disabled = false;
+    }
+    return;
   }
 });
 

@@ -111,6 +111,20 @@
               </div>
             </div>
 
+            <!-- 官方运行时扫描策略由 gateway 启动环境变量消费，关闭后优先复用已有缓存。 -->
+            <div class="setting-item">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="launcher.settings.officialAutoScanUpgrade.label">自动扫描官方运行时更新</div>
+                <div class="setting-desc" data-i18n="launcher.settings.officialAutoScanUpgrade.description">开启后启动时会扫描本地Codex版本，在发现新版时会自动跟进更新；关闭后复用现有缓存，仅在缓存缺失或不可用时才扫描。</div>
+              </div>
+              <div class="setting-control">
+                <label class="toggle" for="officialAutoScanUpgradeInput">
+                  <input id="officialAutoScanUpgradeInput" type="checkbox" data-i18n-aria-label="launcher.settings.officialAutoScanUpgrade.toggle" />
+                  <span aria-hidden="true"></span>
+                </label>
+              </div>
+            </div>
+
             <div class="setting-item">
               <div class="setting-info">
                 <div class="setting-label" data-i18n="launcher.settings.pluginDirs.label">外部插件目录</div>

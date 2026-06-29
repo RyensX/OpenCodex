@@ -21,6 +21,7 @@ const APP_ROOT = path.resolve(__dirname, "..");
 const DEFAULT_HOST = process.env.OPENCODEX_HOST || "127.0.0.1";
 const DEFAULT_PORT = normalizePort(process.env.OPENCODEX_PORT);
 const PLUGIN_DIRS_ENV = "OPENCODEX_PLUGIN_DIRS";
+const OFFICIAL_AUTO_SCAN_UPGRADE_ENV = "CODEX_WEB_OFFICIAL_AUTO_SCAN_UPGRADE";
 const OPENCODEX_GITHUB_URL = "https://github.com/RyensX/OpenCodex";
 const OPENCODEX_AUTHOR_URL = "https://github.com/RyensX";
 const OPENCODEX_AUTHOR = packageMetadata.author || "Ryens";
@@ -138,6 +139,11 @@ function normalizePreventSleep(value, fallback = false) {
   return value === true;
 }
 
+function normalizeOfficialAutoScanUpgrade(value, fallback = true) {
+  if (value === undefined || value === null) return fallback;
+  return value !== false && value !== "0";
+}
+
 function splitConfiguredPluginDirs(value) {
   const text = normalizePluginDirs(value);
   if (!text) return [];
@@ -160,6 +166,7 @@ function defaultSettings() {
     port: DEFAULT_PORT,
     pluginDirs: "",
     preventSleep: true,
+    officialAutoScanUpgrade: true,
   };
 }
 
@@ -173,6 +180,10 @@ function loadLauncherSettings(paths) {
       port: normalizePort(parsed.port),
       pluginDirs: normalizePluginDirs(parsed.pluginDirs),
       preventSleep: normalizePreventSleep(parsed.preventSleep, defaultSettings().preventSleep),
+      officialAutoScanUpgrade: normalizeOfficialAutoScanUpgrade(
+        parsed.officialAutoScanUpgrade,
+        defaultSettings().officialAutoScanUpgrade
+      ),
     };
   } catch {
     return defaultSettings();
@@ -187,6 +198,10 @@ function saveLauncherSettings(paths, settings) {
     port: normalizePort(settings && settings.port),
     pluginDirs: normalizePluginDirs(settings && settings.pluginDirs),
     preventSleep: normalizePreventSleep(settings && settings.preventSleep, defaultSettings().preventSleep),
+    officialAutoScanUpgrade: normalizeOfficialAutoScanUpgrade(
+      settings && settings.officialAutoScanUpgrade,
+      defaultSettings().officialAutoScanUpgrade
+    ),
   };
   fs.writeFileSync(paths.settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf8");
   return nextSettings;
@@ -605,6 +620,7 @@ async function startGateway() {
   gatewayState.settings = await ensurePortSetting(paths, loadLauncherSettings(paths));
   applyPreventSleepSetting(gatewayState.settings);
   gatewayState.host = hostForMode(gatewayState.settings.hostMode);
+  const officialAutoScanUpgrade = normalizeOfficialAutoScanUpgrade(gatewayState.settings.officialAutoScanUpgrade);
 
   if (!fs.existsSync(paths.gatewayScriptPath)) {
     gatewayState.lastError = `Missing gateway entry: ${paths.gatewayScriptPath}`;
@@ -660,6 +676,7 @@ async function startGateway() {
     CODEX_WEB_OFFICIAL_BUNDLE_DIR: paths.officialBundleDir,
     CODEX_WEB_GATEWAY_BASE_URL: gatewayState.primaryUrl,
     CODEX_WEB_LAUNCHER_TOKEN: gatewayState.token,
+    [OFFICIAL_AUTO_SCAN_UPGRADE_ENV]: officialAutoScanUpgrade ? "1" : "0",
   };
   const pluginDirs = normalizePluginDirs(gatewayState.settings && gatewayState.settings.pluginDirs);
   if (pluginDirs) {
@@ -991,6 +1008,17 @@ ipcMain.handle("launcher:update-prevent-sleep", async (_event, preventSleep) => 
   applyPreventSleepSetting(gatewayState.settings);
   broadcastState();
   return buildState();
+});
+ipcMain.handle("launcher:update-official-auto-scan-upgrade", async (_event, officialAutoScanUpgrade) => {
+  const paths = runtimePaths();
+  ensureRuntimeLayout(paths);
+  gatewayState.paths = paths;
+  gatewayState.settings = saveLauncherSettings(paths, {
+    ...(gatewayState.settings || loadLauncherSettings(paths)),
+    // 该设置通过环境变量影响官方运行时准备流程，保存后重启 gateway 才能立即应用。
+    officialAutoScanUpgrade: normalizeOfficialAutoScanUpgrade(officialAutoScanUpgrade),
+  });
+  return restartGateway();
 });
 ipcMain.handle("launcher:choose-plugin-dir", async () => {
   const dialogOptions = {

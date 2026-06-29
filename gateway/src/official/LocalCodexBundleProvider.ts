@@ -12,6 +12,8 @@ const { CodexBundleSourceInfoReader } = require("./CodexBundleSourceInfoReader")
 const { OfficialBundleCache, OfficialBundleManifestFactory } = require("./OfficialBundleCache");
 const { AsarWebviewExtractor } = require("./AsarWebviewExtractor");
 
+const OFFICIAL_AUTO_SCAN_UPGRADE_ENV = "CODEX_WEB_OFFICIAL_AUTO_SCAN_UPGRADE";
+
 type EnsureOfficialBundleResult = {
   bundleDir: string;
   webviewDir: string;
@@ -33,6 +35,7 @@ type LocalCodexBundleProviderOptions = {
   appCandidates?: string[];
   logger?: any;
   fileSystem?: any;
+  env?: Record<string, string | undefined>;
 };
 
 /**
@@ -55,17 +58,19 @@ class LocalCodexBundleProvider {
   constructor(options: LocalCodexBundleProviderOptions = {}) {
     const fileSystem = options.fileSystem || new OfficialBundleFileSystem();
     const archive = new AsarArchiveReader();
+    this.env = options.env || process.env;
     this.defaultBundleDir = options.defaultBundleDir || DEFAULT_BUNDLE_DIR;
     this.bundleDirEnv =
       options.bundleDirEnv ||
-      process.env.CODEX_WEB_OFFICIAL_BUNDLE_DIR ||
-      (process.env.CODEX_WEB_RUNTIME_DIR
-        ? path.join(process.env.CODEX_WEB_RUNTIME_DIR, "cache", "codex-official-bundle")
+      this.env.CODEX_WEB_OFFICIAL_BUNDLE_DIR ||
+      (this.env.CODEX_WEB_RUNTIME_DIR
+        ? path.join(this.env.CODEX_WEB_RUNTIME_DIR, "cache", "codex-official-bundle")
         : "");
+    this.autoScanUpgrade = this.env[OFFICIAL_AUTO_SCAN_UPGRADE_ENV] !== "0";
     this.logger = options.logger || new OfficialBundleLogger();
     this.fileSystem = fileSystem;
     this.scanner = new CodexAsarScanner({
-      configuredPath: options.appPathEnv || process.env.CODEX_DESKTOP_APP_PATH || "",
+      configuredPath: options.appPathEnv || this.env.CODEX_DESKTOP_APP_PATH || "",
       defaultCandidates: options.appCandidates || null,
       fileSystem,
     });
@@ -82,6 +87,14 @@ class LocalCodexBundleProvider {
      */
     const cache = this.createCache(projectRoot);
     const manifest = cache.readManifest();
+    if (!this.autoScanUpgrade) {
+      const blockReason = cache.reuseWithoutSourceScanBlockReason(manifest);
+      if (!blockReason) {
+        return this.resultFromCachedManifest({ cache, manifest });
+      }
+      this.logger.info(`自动扫描官方运行时更新已关闭，但${blockReason}，将扫描一次以重建缓存`);
+    }
+
     const layout = this.scanner.find({ cachedAsarPath: manifest?.sourceAsarPath });
     const sourceInfo = this.sourceInfoReader.read(layout);
     const reason = cache.refreshReason(manifest, sourceInfo);
@@ -109,6 +122,27 @@ class LocalCodexBundleProvider {
       codexBinaryPath: sourceInfo.codexBinaryPath,
       version: sourceInfo.version,
       build: sourceInfo.build,
+    };
+  }
+
+  private resultFromCachedManifest({ cache, manifest }: { cache: any; manifest: any }): EnsureOfficialBundleResult {
+    const sourceAsarPath = manifest.sourceAsarPath || "";
+    const sourceResourcesPath = manifest.sourceResourcesPath || path.dirname(sourceAsarPath);
+    this.logger.info("自动扫描官方运行时更新已关闭，复用现有官方运行时缓存");
+    this.logger.info(`缓存命中：${manifest.version || "unknown"} (build ${manifest.build || "unknown"})`);
+    return {
+      bundleDir: cache.bundleDir,
+      webviewDir: cache.webviewDir,
+      // 关闭扫描时不读取安装源文件身份，直接使用已处理缓存中的官方 bootstrap。
+      bootstrapPath: cache.bootstrapPath,
+      packageJsonPath: path.join(cache.bundleDir, "package.json"),
+      manifest,
+      sourceAppPath: manifest.sourceAppPath || "",
+      sourceAsarPath,
+      sourceResourcesPath,
+      codexBinaryPath: manifest.sourceCodexBinaryPath || null,
+      version: String(manifest.version || "unknown"),
+      build: String(manifest.build || "unknown"),
     };
   }
 
@@ -195,4 +229,5 @@ module.exports = {
   CodexAsarScanner,
   CodexBundleSourceInfoReader,
   AsarArchiveReader,
+  OFFICIAL_AUTO_SCAN_UPGRADE_ENV,
 };
