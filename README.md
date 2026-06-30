@@ -112,6 +112,10 @@ auth:
 http://127.0.0.1:3737
 ```
 
+### 无头服务器启动
+
+[配置步骤](docs/Xvfb.md)
+
 ### 远程访问
 
 OpenCodex本身不提供远程访问服务，如果需要在其他设备中远程访问，请使用Tailscale、ZeroTier、Cloudflare Tunnel、企业自建 VPN 等方式搭建网络，然后在启动器中打开局域网模式进行访问。
