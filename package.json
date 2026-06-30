@@ -16,7 +16,7 @@
     "build:gateway": "pnpm run sync:version && node -e \"require('node:fs').rmSync('gateway/dist', { force: true, recursive: true })\" && tsc -p gateway/tsconfig.json",
     "launcher:dev": "pnpm run build && pnpm exec electron .",
     "launcher:pack:mac": "pnpm run build && pnpm exec electron-builder --mac --dir",
-    "launcher:dist:mac": "pnpm run build && pnpm exec electron-builder --mac dmg zip",
+    "launcher:dist:mac": "pnpm run build && pnpm exec electron-builder --mac dmg zip --x64 --arm64",
     "launcher:pack:win": "pnpm run build && pnpm exec electron-builder --win --dir --x64",
     "launcher:dist:win": "pnpm run build && pnpm exec electron-builder --win nsis zip --x64",
     "launcher:pack:linux": "pnpm run build && pnpm exec electron-builder --linux --dir --x64",
@@ -63,6 +63,7 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "target": [
         {
           "target": "dmg",
