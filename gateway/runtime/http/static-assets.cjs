@@ -95,9 +95,10 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     // 官方产物里的相对路径统一映射到 /official/，避免和 web-shell 自己的 /assets 冲突。
     html = html.replace(/(src|href)=["']\/(?!(?:official|assets)\/)([^"'#?]+)["']/g, '$1="/official/$2"');
     html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
+    // manifest 在 Cloudflare Access 等前置认证后面也必须带同源凭据，否则 Chrome 可能拿不到受保护的 manifest。
     const base = [
       '<base href="/official/">',
-      `<link rel="manifest" href="${PWA_MANIFEST_PATH}">`,
+      `<link rel="manifest" href="${PWA_MANIFEST_PATH}" crossorigin="use-credentials">`,
       '<meta name="theme-color" content="#ffffff">',
       '<meta name="application-name" content="OpenCodex">',
       '<meta name="mobile-web-app-capable" content="yes">',
@@ -132,10 +133,27 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   /** desktop HTML 的 CSP 会拦截浏览器里部分依赖的 Function/eval 探测，需要在 gateway 层放开。 */
   function patchOfficialCspForWeb(rawHtml) {
-    if (rawHtml.includes("&#39;unsafe-eval&#39;") || rawHtml.includes("'unsafe-eval'")) return rawHtml;
-    return rawHtml
-      .replace("&#39;wasm-unsafe-eval&#39;", "&#39;wasm-unsafe-eval&#39; &#39;unsafe-eval&#39;")
-      .replace("'wasm-unsafe-eval'", "'wasm-unsafe-eval' 'unsafe-eval'");
+    let html = rawHtml;
+    if (!html.includes("&#39;unsafe-eval&#39;") && !html.includes("'unsafe-eval'")) {
+      html = html
+        .replace("&#39;wasm-unsafe-eval&#39;", "&#39;wasm-unsafe-eval&#39; &#39;unsafe-eval&#39;")
+        .replace("'wasm-unsafe-eval'", "'wasm-unsafe-eval' 'unsafe-eval'");
+    }
+    return patchOfficialCspManifestSrc(html);
+  }
+
+  function patchOfficialCspManifestSrc(rawHtml) {
+    const cspMetaPattern =
+      /(<meta\b(?=[^>]*\bhttp-equiv=["']Content-Security-Policy["'])(?=[^>]*\bcontent=(["']))[^>]*\bcontent=\2)([\s\S]*?)(\2[^>]*>)/i;
+    return rawHtml.replace(cspMetaPattern, (match, start, _quote, content, end) => {
+      if (/\bmanifest-src\b/i.test(content)) return match;
+      const trimmedContent = content.trimEnd();
+      const trailingWhitespace = content.slice(trimmedContent.length);
+      const separator = trimmedContent.endsWith(";") ? " " : "; ";
+      const selfSource = content.includes("&#39;") ? "&#39;self&#39;" : "'self'";
+      // 官方 CSP 默认 default-src 'none'，必须显式允许 manifest，否则 Chrome 会把 PWA 视为 no-manifest。
+      return `${start}${trimmedContent}${separator}manifest-src ${selfSource};${trailingWhitespace}${end}`;
+    });
   }
 
   function patchOfficialHtmlForWeb(rawHtml) {
