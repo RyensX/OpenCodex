@@ -71,6 +71,10 @@
     try {
       opencodexPluginSystem()?.events?.emit?.(eventName, payload);
     } catch {}
+    try {
+      // 独立 web-shell 脚本通过 DOM 事件旁路监听 IPC 上下文，避免继续扩大 bridge polyfill 的业务逻辑。
+      w.dispatchEvent(new CustomEvent("opencodex:plugin-event", { detail: { eventName, payload } }));
+    } catch {}
   }
 
   const tokenUsageCapability = createTokenUsageCapability();

@@ -81,6 +81,8 @@
   "web.auth.logoutGateway": "Log out of OpenCodex",
   "web.auth.logoutGatewayBusy": "Logging out of OpenCodex...",
   "web.auth.logoutGatewayFailed": "OpenCodex logout failed: {error}",
+  "web.remoteFile.downloadFile": "Download file",
+  "web.remoteFile.downloadFailed": "Unable to download this file.",
   "web.settings.open": "Settings",
   "web.settings.title": "Settings",
   "web.settings.close": "Close settings",

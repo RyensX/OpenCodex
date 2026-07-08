@@ -1,0 +1,198 @@
+const assert = require("node:assert/strict");
+const { once } = require("node:events");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { Writable } = require("node:stream");
+const test = require("node:test");
+const zlib = require("node:zlib");
+const { LOCAL_DOWNLOAD_ARCHIVE_MAX_BYTES, LOCAL_DOWNLOAD_ARCHIVE_MAX_FILES } = require("../runtime/core/config.cjs");
+const { createLocalFileService } = require("../runtime/http/local-files.cjs");
+
+function makeTempFile(t, fileName, content) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-local-file-test-"));
+  t.after(() => fs.rmSync(dir, { force: true, recursive: true }));
+  const filePath = path.join(dir, fileName);
+  fs.writeFileSync(filePath, content);
+  return filePath;
+}
+
+function makeTempDir(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-local-file-test-"));
+  t.after(() => fs.rmSync(dir, { force: true, recursive: true }));
+  return dir;
+}
+
+function createResponseRecorder() {
+  const chunks = [];
+  // local-files 现在通过 stream.pipeline 写响应，测试响应对象需要实现 Writable。
+  const response = new Writable({
+    write(chunk, encoding, callback) {
+      chunks.push(Buffer.isBuffer(chunk) ? Buffer.from(chunk) : Buffer.from(chunk, encoding));
+      callback();
+    },
+  });
+  response.body = Buffer.alloc(0);
+  response.headers = null;
+  response.headersSent = false;
+  response.status = null;
+  response.writeHead = (status, headers) => {
+    response.status = status;
+    response.headers = headers;
+    response.headersSent = true;
+  };
+  response.on("finish", () => {
+    response.body = Buffer.concat(chunks);
+  });
+  return response;
+}
+
+async function waitForResponseBody(response) {
+  if (!response.writableFinished) await once(response, "finish");
+  return response.body;
+}
+
+function pathnameFromLocalFileUrl(url) {
+  return new URL(url, "http://opencodex.local").pathname;
+}
+
+function localZipEntries(zipBuffer) {
+  const entries = new Map();
+  let offset = 0;
+  while (offset + 4 <= zipBuffer.length) {
+    const signature = zipBuffer.readUInt32LE(offset);
+    if (signature === 0x02014b50 || signature === 0x06054b50) break;
+    assert.equal(signature, 0x04034b50);
+    const method = zipBuffer.readUInt16LE(offset + 8);
+    const compressedSize = zipBuffer.readUInt32LE(offset + 18);
+    const uncompressedSize = zipBuffer.readUInt32LE(offset + 22);
+    const nameLength = zipBuffer.readUInt16LE(offset + 26);
+    const extraLength = zipBuffer.readUInt16LE(offset + 28);
+    const nameStart = offset + 30;
+    const dataStart = nameStart + nameLength + extraLength;
+    const name = zipBuffer.subarray(nameStart, nameStart + nameLength).toString("utf-8");
+    const compressed = zipBuffer.subarray(dataStart, dataStart + compressedSize);
+    // 流式 zip writer 会回填 local header，这里按 header size 直接解压验证内容。
+    const content = method === 8 ? zlib.inflateRawSync(compressed) : compressed;
+    assert.equal(content.length, uncompressedSize);
+    entries.set(name, content);
+    offset = dataStart + compressedSize;
+  }
+  return entries;
+}
+
+test("serves local file tokens inline or as attachment", async (t) => {
+  const service = createLocalFileService();
+  t.after(() => service.dispose());
+  const filePath = makeTempFile(t, 'report "final".txt', "hello");
+
+  const preview = service.createLocalFilePreview(filePath);
+  assert.equal(preview.url.includes("?download=1"), false);
+  assert.equal(preview.downloadUrl.endsWith("?download=1"), true);
+
+  const previewResponse = createResponseRecorder();
+  await service.serveLocalFile(pathnameFromLocalFileUrl(preview.url), previewResponse);
+  const previewBody = await waitForResponseBody(previewResponse);
+  assert.equal(previewResponse.status, 200);
+  assert.equal(previewResponse.headers["content-disposition"], 'inline; filename="report _final_.txt"');
+  assert.equal(previewResponse.headers["content-length"], "5");
+  assert.equal(Buffer.compare(previewBody, Buffer.from("hello")), 0);
+
+  const download = service.createLocalFileDownload(filePath);
+  assert.equal(download.url, download.downloadUrl);
+  assert.equal(download.downloadUrl.endsWith("?download=1"), true);
+
+  const downloadResponse = createResponseRecorder();
+  await service.serveLocalFile(pathnameFromLocalFileUrl(download.downloadUrl), downloadResponse, { download: true });
+  const downloadBody = await waitForResponseBody(downloadResponse);
+  assert.equal(downloadResponse.status, 200);
+  assert.equal(downloadResponse.headers["content-disposition"], 'attachment; filename="report _final_.txt"');
+  assert.equal(downloadResponse.headers["content-length"], "5");
+  assert.equal(Buffer.compare(downloadBody, Buffer.from("hello")), 0);
+
+  const pathDownload = await service.createLocalPathDownload(filePath);
+  assert.equal(pathDownload.name, 'report "final".txt');
+  assert.equal(pathDownload.downloadUrl.endsWith("?download=1"), true);
+});
+
+test("creates temporary zip downloads for directories", async (t) => {
+  const dir = makeTempDir(t);
+  const folder = path.join(dir, "bundle");
+  fs.mkdirSync(path.join(folder, "nested"), { recursive: true });
+  fs.writeFileSync(path.join(folder, "nested", "a.txt"), "alpha");
+  fs.writeFileSync(path.join(folder, "b.txt"), "beta");
+
+  const service = createLocalFileService();
+  t.after(() => service.dispose());
+
+  const download = await service.createLocalPathDownload(folder);
+  assert.equal(download.name, "bundle.zip");
+  assert.equal(download.downloadUrl.endsWith("?download=1"), true);
+
+  const response = createResponseRecorder();
+  await service.serveLocalFile(pathnameFromLocalFileUrl(download.downloadUrl), response, { download: true });
+  const responseBody = await waitForResponseBody(response);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["content-type"], "application/zip");
+  assert.equal(response.headers["content-disposition"], 'attachment; filename="bundle.zip"');
+  assert.equal(response.headers["content-length"], String(responseBody.length));
+  assert.equal(Buffer.compare(responseBody.subarray(0, 4), Buffer.from([0x50, 0x4b, 0x03, 0x04])), 0);
+  assert.equal(responseBody.includes(Buffer.from("bundle/nested/a.txt")), true);
+  assert.equal(responseBody.includes(Buffer.from("bundle/b.txt")), true);
+  const entries = localZipEntries(responseBody);
+  assert.equal(entries.get("bundle/nested/a.txt").toString("utf-8"), "alpha");
+  assert.equal(entries.get("bundle/b.txt").toString("utf-8"), "beta");
+});
+
+test("uses higher default archive limits for remote directory downloads", () => {
+  assert.equal(LOCAL_DOWNLOAD_ARCHIVE_MAX_FILES, 30000);
+  assert.equal(LOCAL_DOWNLOAD_ARCHIVE_MAX_BYTES, 1024 * 1024 * 1024);
+});
+
+test("resolves relative download paths inside workspace roots only", (t) => {
+  const workspaceRoot = makeTempDir(t);
+  fs.mkdirSync(path.join(workspaceRoot, "src"), { recursive: true });
+  const filePath = path.join(workspaceRoot, "src", "index.js");
+  fs.writeFileSync(filePath, "console.log('ok');");
+
+  const service = createLocalFileService({ getWorkspaceRoots: () => [workspaceRoot] });
+  t.after(() => service.dispose());
+
+  assert.equal(service.resolveLocalDownloadPath("src/index.js"), filePath);
+  assert.equal(service.resolveLocalDownloadPath("src/../src/index.js"), filePath);
+  assert.equal(service.resolveLocalDownloadPath("."), workspaceRoot);
+  assert.equal(service.resolveLocalDownloadPath(".", { workspaceRoot }), workspaceRoot);
+  assert.equal(service.resolveLocalDownloadPath("../outside.txt"), "");
+  assert.equal(service.resolveLocalDownloadPath("src/index.js", { workspaceRoot }), filePath);
+});
+
+test("prefers an existing relative download path across workspace roots", (t) => {
+  const firstRoot = makeTempDir(t);
+  const secondRoot = makeTempDir(t);
+  fs.mkdirSync(path.join(secondRoot, "src"), { recursive: true });
+  const filePath = path.join(secondRoot, "src", "index.js");
+  fs.writeFileSync(filePath, "console.log('ok');");
+
+  const service = createLocalFileService({ getWorkspaceRoots: () => [firstRoot, secondRoot] });
+  t.after(() => service.dispose());
+
+  assert.equal(service.resolveLocalDownloadPath("src/index.js"), filePath);
+});
+
+test("does not use the gateway cwd as a fallback relative download root", (t) => {
+  const service = createLocalFileService();
+  t.after(() => service.dispose());
+
+  assert.equal(service.resolveLocalDownloadPath("package.json"), "");
+});
+
+test("ignores an unregistered requested workspace root", (t) => {
+  const workspaceRoot = makeTempDir(t);
+  const filePath = path.join(workspaceRoot, "package.json");
+  fs.writeFileSync(filePath, "{}");
+
+  const service = createLocalFileService();
+  t.after(() => service.dispose());
+
+  assert.equal(service.resolveLocalDownloadPath("package.json", { workspaceRoot }), "");
+});

@@ -23,7 +23,8 @@ const {
   ensureDir,
   exists,
 } = require("./core/config.cjs");
-const { readBody, send, sendJson } = require("./http/http-utils.cjs");
+const { hostnameFromHostHeader, isLoopbackHostHeader } = require("./core/loopback-host.cjs");
+const { isRequestBodyTooLargeError, readBody, send, sendJson } = require("./http/http-utils.cjs");
 const { createLocalFileService } = require("./http/local-files.cjs");
 const { handleTokenUsageRequest } = require("./http/token-usage.cjs");
 const {
@@ -40,14 +41,18 @@ const {
   startOfficialRuntime,
   webConfigScript,
 } = require("./ipc/official-runtime.cjs");
+const { openFileTargetFromIpc } = require("./ipc/open-file-context.cjs");
 const { createPickedFilesService } = require("./ipc/picked-files.cjs");
 const { createStaticAssetService } = require("./http/static-assets.cjs");
 const { createWsHub } = require("./ipc/ws-hub.cjs");
+const { workspaceRootsFromIpcPayload } = require("./ipc/workspace-root-context.cjs");
 const { createWorkspaceRootsService } = require("./ipc/workspace-roots.cjs");
 const { diagnosticError, diagnosticLog, diagnosticWarn, sanitizeDiagnosticValue, shortId } = require("./core/diagnostics.cjs");
 const { markGatewaySilentQuit } = require("./lifecycle/quit-confirmation-suppressor.cjs");
 
 // server.cjs 只负责编排 HTTP/WS 生命周期；官方 Electron hook 细节放在 official-runtime.cjs。
+const LOCAL_DOWNLOAD_PATH_BODY_MAX_BYTES = 32 * 1024;
+
 function gatewayUrl(req) {
   // Node 原生 req.url 只有 path，需要补 host 才能安全解析 query 参数。
   return new URL(req.url, `http://${req.headers.host || "localhost"}`);
@@ -181,6 +186,77 @@ async function handleClientLog(req, res) {
   return sendJson(res, 200, { ok: true }, { "cache-control": "no-store" });
 }
 
+async function handleLocalDownloadPath(req, res, localFiles) {
+  if (isLoopbackHostHeader(req.headers.host)) {
+    // localhost 保持桌面原生体验，不暴露侧栏远端下载 API。
+    return sendJson(res, 404, { ok: false, error: "Remote path downloads are unavailable on localhost." }, { "cache-control": "no-store" });
+  }
+
+  let body = "";
+  try {
+    body = await readBody(req, { maxBytes: LOCAL_DOWNLOAD_PATH_BODY_MAX_BYTES });
+  } catch (error) {
+    if (isRequestBodyTooLargeError(error)) {
+      return sendJson(res, 413, { ok: false, error: "Request body is too large." }, { "cache-control": "no-store" });
+    }
+    throw error;
+  }
+
+  let parsed = {};
+  try {
+    parsed = JSON.parse(body || "{}");
+  } catch {
+    return sendJson(res, 400, { ok: false, error: "Invalid JSON body" }, { "cache-control": "no-store" });
+  }
+
+  const filePath = typeof parsed.path === "string" ? parsed.path.trim() : "";
+  const workspaceRoot = typeof parsed.workspaceRoot === "string" ? parsed.workspaceRoot.trim() : "";
+  const normalizedPath = localFiles.resolveLocalDownloadPath(filePath, { workspaceRoot });
+  const diagnosticBase = {
+    filePath,
+    host: req.headers.host || "",
+    normalizedPath,
+    remoteAddress: remoteAddressFromRequest(req),
+    workspaceRoot,
+  };
+  diagnosticLog("local-download", "path_request", diagnosticBase);
+  if (!normalizedPath || !path.isAbsolute(normalizedPath)) {
+    diagnosticWarn("local-download", "invalid_path", diagnosticBase);
+    return sendJson(res, 400, { ok: false, error: "Invalid download path." }, { "cache-control": "no-store" });
+  }
+  if (!localFiles.isAllowedLocalDownloadPath(normalizedPath)) {
+    diagnosticWarn("local-download", "path_not_allowed", diagnosticBase);
+    return sendJson(res, 403, { ok: false, error: "Path is not allowed." }, { "cache-control": "no-store" });
+  }
+
+  try {
+    const value = await localFiles.createLocalPathDownload(normalizedPath);
+    diagnosticLog("local-download", "path_ready", {
+      ...diagnosticBase,
+      downloadName: value && value.name,
+    });
+    return sendJson(res, 200, { ok: true, value }, { "cache-control": "no-store" });
+  } catch (error) {
+    const status =
+      error && typeof error.status === "number"
+        ? error.status
+        : error && (error.code === "ENOENT" || error.code === "ENOTDIR")
+          ? 404
+          : 500;
+    diagnosticWarn("local-download", "path_failed", {
+      ...diagnosticBase,
+      error: error instanceof Error ? error.message : String(error),
+      status,
+    });
+    return sendJson(
+      res,
+      status,
+      { ok: false, error: error instanceof Error ? error.message : String(error) },
+      { "cache-control": "no-store" }
+    );
+  }
+}
+
 function installShutdownHandlers(server, localFiles, pickedFiles) {
   let shuttingDown = false;
   function shutdown(signal) {
@@ -307,14 +383,19 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets, workspace
       return handleTokenUsageRequest(req, res, url);
     }
 
+    if (pathname === "/api/local-file/download-path" && req.method === "POST") {
+      // 侧栏文件树右键下载入口：文件直接下发，目录先临时压缩再返回短期 token。
+      return handleLocalDownloadPath(req, res, localFiles);
+    }
+
     if (pathname.startsWith("/api/app-fs/@fs/") && req.method === "GET") {
       // 官方 renderer 里的 app://fs 图片会被前端改写到这个 HTTP 入口。
       return localFiles.serveAppFsFile(pathname, res);
     }
 
     if (pathname.startsWith("/api/local-file/") && req.method === "GET") {
-      // 只有官方 openFile 生成的短期 token 可以走这里预览本机文件。
-      return localFiles.serveLocalFile(pathname, res);
+      // 只有官方 openFile 生成的短期 token 可以走这里预览或下载本机文件。
+      return localFiles.serveLocalFile(pathname, res, { download: url.searchParams.get("download") === "1" });
     }
 
     if (pathname === "/api/ipc/invoke" && req.method === "POST") {
@@ -375,6 +456,10 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
   const payload = payloadFromArgs(args);
   const clientId = typeof parsed.clientId === "string" ? parsed.clientId : "";
   const remoteAddress = remoteAddressFromRequest(req);
+  const browserHostname = hostnameFromHostHeader(req.headers.host);
+  const isLoopbackBrowserHost = isLoopbackHostHeader(req.headers.host);
+  const openFileTarget = openFileTargetFromIpc(channel, payload);
+  const ipcWorkspaceRoots = workspaceRootsFromIpcPayload(channel, payload);
   const startedAtMs = Date.now();
   const diagnosticBase = {
     ...ipcPayloadSummary(payload),
@@ -387,6 +472,18 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
   // 成功 IPC start/end 会跟随前端渲染频率放大；默认保留慢调用和失败日志，DEBUG 时再展开完整链路。
   if (DEBUG_LOGS && !suppressRoutineLog) diagnosticLog("gateway-ipc", "invoke_start", diagnosticBase);
   try {
+    for (const root of ipcWorkspaceRoots) {
+      try {
+        // 官方文件树和 open-in-targets IPC 已经携带当前 cwd/root；注册后供远端右键下载复用同一 allowlist。
+        workspaceRoots.registerWorkspaceRoot(root);
+      } catch (error) {
+        diagnosticWarn("gateway-ipc", "workspace_root_register_failed", {
+          channel,
+          error: error instanceof Error ? error.message : String(error),
+          root,
+        });
+      }
+    }
     if (channel === "pick-files") {
       // Web 端 pick-files 必须在浏览器侧选文件，再由 gateway 落盘；不能继续转给官方 Electron dialog。
       const value = pickedFiles.handlePickFilesPayload(payload);
@@ -405,19 +502,28 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
       }
       return sendJson(res, 200, { ok: true, value });
     }
-    // AsyncLocalStorage 让后续官方 webContents.send 能知道这次 HTTP IPC 属于哪个浏览器 client。
-    const value = await requestContext.run({ clientId, remoteAddress }, () =>
-      invokeOfficialIpc(channel, args, {
+    // AsyncLocalStorage 让后续官方 webContents.send 和打开文件拦截能知道这次 HTTP IPC 属于哪个浏览器 client。
+    const value = await requestContext.run(
+      {
+        browserHostname,
         clientId,
+        createLocalFileDownload: localFiles.createLocalFileDownload,
+        isLoopbackBrowserHost,
+        openFileTarget,
         remoteAddress,
-        setTitle: () => true,
-        openExternal: (urlToOpen) => {
-          if (urlToOpen) console.log(`[openExternal] ${urlToOpen}`);
-          return true;
-        },
-        // 官方 openFile 在桌面里会打开系统应用；Web 端改成短期 token 的浏览器预览链接。
-        openFile: (filePath) => localFiles.createLocalFilePreview(filePath),
-      })
+      },
+      () =>
+        invokeOfficialIpc(channel, args, {
+          clientId,
+          remoteAddress,
+          setTitle: () => true,
+          openExternal: (urlToOpen) => {
+            if (urlToOpen) console.log(`[openExternal] ${urlToOpen}`);
+            return true;
+          },
+          // 官方 openFile 在桌面里会打开系统应用；Web 端改成短期 token 的浏览器预览链接。
+          openFile: (filePath) => localFiles.createLocalFilePreview(filePath),
+        })
     );
     const elapsedMs = Date.now() - startedAtMs;
     if (DEBUG_LOGS && !suppressRoutineLog) diagnosticLog("gateway-ipc", "invoke_end", { ...diagnosticBase, elapsedMs, ok: true });

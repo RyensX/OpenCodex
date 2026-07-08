@@ -9,6 +9,7 @@ const {
   mimeType,
   readText,
 } = require("../core/config.cjs");
+const { isLoopbackHostHeader } = require("../core/loopback-host.cjs");
 const {
   OPENCODEX_PLUGIN_URL_PREFIX,
   listPluginEntries,
@@ -24,12 +25,23 @@ const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js"
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overlay.css";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
 const CODEX_BRIDGE_POLYFILL_PATH = "/codex-bridge-polyfill.js";
+const CODEX_REMOTE_FILE_ACTIONS_PATH = "/codex-remote-file-actions.js";
 const CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH = "/codex-workspace-root-picker.css";
 const CODEX_WORKSPACE_ROOT_PICKER_PATH = "/codex-workspace-root-picker.js";
 const CODEX_TOOLTIP_DISMISS_GUARD_PATH = "/codex-tooltip-dismiss-guard.js";
 const FAVICON_PATH = "/favicon.ico";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
 const WEB_SHELL_ASSETS_DIR = path.join(WEB_SHELL_DIR, "assets");
+const OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID = "artifactTab.preview.openInFolder";
+const OPENCODEX_DOWNLOAD_FILE_MESSAGE_ID = "web.remoteFile.downloadFile";
+const JS_STRING_LITERAL = String.raw`(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|` + "`" + String.raw`(?:\\.|[^` + "`" + String.raw`\\])*` + "`" + ")";
+const REGEXP_SPECIAL_CHARS_RE = /[.*+?^${}()|[\]\\]/g;
+function escapeRegExp(value) {
+  return String(value).replace(REGEXP_SPECIAL_CHARS_RE, "\\$&");
+}
+const OPEN_IN_FOLDER_LOCALE_VALUE_RE = new RegExp(
+  `("${escapeRegExp(OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID)}"\\s*:\\s*)${JS_STRING_LITERAL}`
+);
 // 固定 web-shell 资源只在这里登记一次，白名单和文件映射共用同一份配置。
 const WEB_SHELL_STATIC_FILES = new Map([
   [FAVICON_PATH, path.join(WEB_SHELL_ASSETS_DIR, "icon.png")],
@@ -39,6 +51,7 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
   [CODEX_BRIDGE_POLYFILL_PATH, path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js")],
+  [CODEX_REMOTE_FILE_ACTIONS_PATH, path.join(WEB_SHELL_DIR, "codex-remote-file-actions.js")],
   [CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.css")],
   [CODEX_WORKSPACE_ROOT_PICKER_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.js")],
   [CODEX_TOOLTIP_DISMISS_GUARD_PATH, path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js")],
@@ -113,6 +126,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
       `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
       `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
+      `<script src="${CODEX_REMOTE_FILE_ACTIONS_PATH}"></script>`,
       `<script src="${CODEX_WORKSPACE_ROOT_PICKER_PATH}"></script>`,
       `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
     ].join("\n    ");
@@ -341,13 +355,27 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     );
   }
 
+  function downloadFileMessage() {
+    const messages = currentI18n().messages || {};
+    return messages[OPENCODEX_DOWNLOAD_FILE_MESSAGE_ID] || "Download file";
+  }
+
+  function patchOpenInFolderLocaleMessage(source) {
+    if (!source.includes(OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID)) return source;
+    // 这里按官方 message id 改 locale 值，不匹配“打开所在文件夹”等展示文案，也不改官方缓存文件。
+    return source.replace(OPEN_IN_FOLDER_LOCALE_VALUE_RE, (_match, prefix) => `${prefix}${JSON.stringify(downloadFileMessage())}`);
+  }
+
   /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
-  function patchOfficialAsset(reqPath, data) {
+  function patchOfficialAsset(reqPath, data, req) {
     if (!shouldPatchOfficialAsset(reqPath)) return data;
     const source = data.toString("utf-8");
-    const patched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
+    let patched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
       ? patchAppServerManagerSignalsChunk(source)
       : source;
+    if (!isLoopbackHostHeader(req && req.headers && req.headers.host)) {
+      patched = patchOpenInFolderLocaleMessage(patched);
+    }
     return Buffer.from(patched, "utf-8");
   }
 
@@ -391,7 +419,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   /** 发送静态文件，并按路径套用合适的缓存策略。 */
   function serveFile(req, res, file, status = 200, reqPath = "") {
-    const data = patchOfficialAsset(reqPath, fs.readFileSync(file));
+    const data = patchOfficialAsset(reqPath, fs.readFileSync(file), req);
     const response = gzipIfUseful(
       req,
       { "content-type": mimeType(file), "cache-control": cacheControlForRequestPath(reqPath) },

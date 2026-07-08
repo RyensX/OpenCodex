@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const util = require("util");
 const { AsyncLocalStorage } = require("async_hooks");
+const { EventEmitter } = require("events");
 const {
   AUTH_CONFIG_PATH,
   CODEX_HOME,
@@ -169,6 +170,128 @@ function spawnArgList(args) {
   return Array.isArray(args) ? args.map((item) => String(item)) : [];
 }
 
+function shouldInterceptRemoteFileManagerStore(store) {
+  return !!store && store.isLoopbackBrowserHost === false && store.openFileTarget === "fileManager";
+}
+
+function currentRequestStore() {
+  return (requestContext && typeof requestContext.getStore === "function" && requestContext.getStore()) || {};
+}
+
+function sendCurrentClientGatewayEvent(channel, payload, diagnosticSummary = {}) {
+  const store = currentRequestStore();
+  if (!wsHub || !store.clientId) {
+    diagnosticWarn("official-runtime", "remote_file_manager_download_client_missing", {
+      channel,
+      clientId: store.clientId ? shortId(store.clientId) : "",
+      ...diagnosticSummary,
+    });
+    return false;
+  }
+  return wsHub.sendTo(
+    store.clientId,
+    { channel, payload },
+    {
+      diagnosticSummary: {
+        channel,
+        clientId: shortId(store.clientId),
+        ...diagnosticSummary,
+      },
+      suppressDiagnostic: true,
+    }
+  );
+}
+
+function emitRemoteFileDownloadError(reason, filePath) {
+  // 远端浏览器无法打开服务端文件管理器，失败时也要阻止原生打开并给前端一个 toast 入口。
+  return sendCurrentClientGatewayEvent(
+    "codex-web:download-file-error",
+    {
+      name: filePath ? path.basename(filePath) : "",
+      reason,
+    },
+    { reason }
+  );
+}
+
+function createSuccessfulSpawnStub() {
+  const child = new EventEmitter();
+  child.stdin = null;
+  child.stdout = null;
+  child.stderr = null;
+  child.pid = 0;
+  child.killed = false;
+  child.kill = () => false;
+  // 被拦截的系统打开动作等价于“已经处理完成”，避免官方 handler 继续等待子进程。
+  process.nextTick(() => {
+    child.emit("exit", 0, null);
+    child.emit("close", 0, null);
+  });
+  return child;
+}
+
+function fileManagerPathFromSpawn(command, normalizedArgs) {
+  const commandName = path.basename(String(command || "")).toLowerCase();
+  const args = Array.isArray(normalizedArgs) ? normalizedArgs.map((item) => String(item)) : [];
+  if (!commandName || args.length === 0) return "";
+  if (commandName === "open") {
+    const revealIndex = args.indexOf("-R");
+    return revealIndex >= 0 ? args[revealIndex + 1] || "" : "";
+  }
+  if (
+    commandName === "xdg-open" ||
+    commandName === "gio" ||
+    commandName === "explorer" ||
+    commandName === "explorer.exe"
+  ) {
+    return args.find((item) => item && !item.startsWith("-")) || "";
+  }
+  return "";
+}
+
+function maybeInterceptRemoteFileManagerOpen(filePath) {
+  const store = currentRequestStore();
+  if (!shouldInterceptRemoteFileManagerStore(store)) return false;
+  const normalizedPath = typeof filePath === "string" ? filePath : String(filePath || "");
+  if (!normalizedPath) {
+    emitRemoteFileDownloadError("empty_path", "");
+    return true;
+  }
+  try {
+    const stats = fs.statSync(normalizedPath);
+    if (!stats.isFile()) {
+      emitRemoteFileDownloadError("not_file", normalizedPath);
+      return true;
+    }
+  } catch {
+    emitRemoteFileDownloadError("not_found", normalizedPath);
+    return true;
+  }
+  if (typeof store.createLocalFileDownload !== "function") {
+    emitRemoteFileDownloadError("download_unavailable", normalizedPath);
+    return true;
+  }
+  try {
+    const payload = store.createLocalFileDownload(normalizedPath);
+    sendCurrentClientGatewayEvent("codex-web:download-file", payload, {
+      fileName: path.basename(normalizedPath),
+      remoteBrowserHost: store.browserHostname || "",
+    });
+    diagnosticLog("official-runtime", "remote_file_manager_open_intercepted", {
+      clientId: shortId(store.clientId || ""),
+      fileName: path.basename(normalizedPath),
+      remoteBrowserHost: store.browserHostname || "",
+    });
+  } catch (error) {
+    diagnosticWarn("official-runtime", "remote_file_manager_download_failed", {
+      error: error instanceof Error ? error.message : String(error),
+      fileName: path.basename(normalizedPath),
+    });
+    emitRemoteFileDownloadError("download_failed", normalizedPath);
+  }
+  return true;
+}
+
 function execFileOptionsFromArgs(args, options) {
   if (Array.isArray(args)) return typeof options === "function" ? undefined : options;
   return typeof args === "function" ? undefined : args;
@@ -254,6 +377,10 @@ function redirectHiddenAppServerSpawn(originalSpawn, bundle, self, command, args
   if (looksLikeOfficialCodexBinary(command, bundle, spawnOptions) && isHiddenOfficialAppServerArgs(normalizedArgs)) {
     recordHiddenAppServerRedirect("spawn", command, normalizedArgs, bundle.codexBinaryPath);
     return originalSpawn.call(self, bundle.codexBinaryPath, normalizedArgs, spawnOptions);
+  }
+  const fileManagerPath = fileManagerPathFromSpawn(command, normalizedArgs);
+  if (fileManagerPath && maybeInterceptRemoteFileManagerOpen(fileManagerPath)) {
+    return createSuccessfulSpawnStub();
   }
   return originalSpawn.apply(self, rawArguments);
 }
@@ -762,6 +889,26 @@ function installDialogHooks() {
     if (arguments.length <= 1) return originalShowOpenDialog(parentOrOptions);
     return originalShowOpenDialog(parentOrOptions, maybeOptions);
   };
+}
+
+function installRemoteFileManagerOpenHooks() {
+  const shell = electron && electron.shell;
+  if (!shell || shell.__opencodexRemoteFileManagerOpenPatched) return;
+  shell.__opencodexRemoteFileManagerOpenPatched = true;
+  if (typeof shell.showItemInFolder === "function") {
+    const originalShowItemInFolder = shell.showItemInFolder.bind(shell);
+    shell.showItemInFolder = function patchedShowItemInFolder(targetPath) {
+      if (maybeInterceptRemoteFileManagerOpen(String(targetPath || ""))) return undefined;
+      return originalShowItemInFolder(targetPath);
+    };
+  }
+  if (typeof shell.openPath === "function") {
+    const originalOpenPath = shell.openPath.bind(shell);
+    shell.openPath = function patchedOpenPath(targetPath) {
+      if (maybeInterceptRemoteFileManagerOpen(String(targetPath || ""))) return Promise.resolve("");
+      return originalOpenPath(targetPath);
+    };
+  }
 }
 
 function payloadFromArgs(args) {
@@ -1550,6 +1697,7 @@ function startOfficialRuntime() {
   installIpcMainHooks();
   installBrowserWindowHooks();
   installDialogHooks();
+  installRemoteFileManagerOpenHooks();
   installOfficialNotificationHook(electron, {
     publishNotification: (payload) => (wsHub ? wsHub.broadcast(payload, { suppressDiagnostic: true }) : 0),
   });
@@ -1585,4 +1733,8 @@ module.exports = {
   setWsHub,
   startOfficialRuntime,
   webConfigScript,
+  __test: {
+    fileManagerPathFromSpawn,
+    shouldInterceptRemoteFileManagerStore,
+  },
 };

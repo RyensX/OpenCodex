@@ -81,6 +81,8 @@
   "web.auth.logoutGateway": "退出认证",
   "web.auth.logoutGatewayBusy": "正在退出认证...",
   "web.auth.logoutGatewayFailed": "退出认证失败：{error}",
+  "web.remoteFile.downloadFile": "下载文件",
+  "web.remoteFile.downloadFailed": "无法下载该文件。",
   "web.settings.open": "设置",
   "web.settings.title": "设置",
   "web.settings.close": "关闭设置",

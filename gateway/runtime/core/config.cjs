@@ -48,6 +48,12 @@ const AUTH_TOKEN_TTL_MS = Math.max(
 const DEBUG_LOGS = process.env.CODEX_WEB_DEBUG === "1" || process.env.CODEX_WEB_DEBUG === "true";
 const IPC_SLOW_LOG_MS = Number(process.env.CODEX_WEB_SLOW_LOG_MS || 750);
 const LOCAL_FILE_TOKEN_TTL_MS = Math.max(1_000, Number(process.env.CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS || 5 * 60 * 1000));
+const LOCAL_DOWNLOAD_ARCHIVE_DIR = path.join(RUNTIME_DIR, "local-downloads");
+const LOCAL_DOWNLOAD_ARCHIVE_MAX_FILES = positiveIntegerFromEnv("CODEX_WEB_DOWNLOAD_ARCHIVE_MAX_FILES", 30000);
+const LOCAL_DOWNLOAD_ARCHIVE_MAX_BYTES = positiveIntegerFromEnv(
+  "CODEX_WEB_DOWNLOAD_ARCHIVE_MAX_BYTES",
+  1024 * 1024 * 1024
+);
 // 路径版本是响应期 patch 的缓存破坏位：官方文件 hash 不变，但 gateway 注入逻辑可能变化。
 const PATCHED_OFFICIAL_PREFIX = "/official-patched-v4/";
 // 这两个 channel 是官方桌面 renderer/main 的主消息桥，gateway 通过 hook 复用它们。
@@ -118,6 +124,8 @@ function mimeType(file) {
       return "application/wasm";
     case ".svg":
       return "image/svg+xml";
+    case ".zip":
+      return "application/zip";
     case ".ico":
       return "image/x-icon";
     case ".png":
@@ -211,6 +219,9 @@ module.exports = {
   HOST,
   IPC_SLOW_LOG_MS,
   LAUNCHER_TOKEN,
+  LOCAL_DOWNLOAD_ARCHIVE_DIR,
+  LOCAL_DOWNLOAD_ARCHIVE_MAX_BYTES,
+  LOCAL_DOWNLOAD_ARCHIVE_MAX_FILES,
   LOCAL_FILE_TOKEN_TTL_MS,
   MESSAGE_FOR_VIEW_CHANNEL,
   MESSAGE_FROM_VIEW_CHANNEL,
