@@ -66,6 +66,55 @@ function samePortableRuntimeFingerprint(left, right) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
 
+function windowsVersionAssemblyManifestName(entryName) {
+  const match = String(entryName || "").match(/^(\d+(?:\.\d+)+)\.manifest$/i);
+  return match ? match[1] : "";
+}
+
+function windowsVersionAssemblyManifestSource(version) {
+  return `<assembly
+  xmlns='urn:schemas-microsoft-com:asm.v1' manifestVersion='1.0'>
+  <assemblyIdentity
+      name='${version}'
+      version='${version}'
+      type='win32'/>
+  <file name='chrome_elf.dll'/>
+</assembly>
+`;
+}
+
+function tryWriteWindowsVersionAssemblyManifest({ entry, targetPath, logger, error, platform = process.platform }) {
+  if (platform !== "win32" || !entry.isFile()) return false;
+  const version = windowsVersionAssemblyManifestName(entry.name);
+  if (!version) return false;
+
+  /**
+   * Windows Store/MSIX 目录中的版本号 manifest 只是 chrome_elf.dll 的 side-by-side assembly 清单。
+   * 部分 WindowsApps 权限组合会让 copyfile 对它返回 UNKNOWN；目标 runner 仍需要这个清单，所以复制失败时按版本号重建。
+   */
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.writeFileSync(targetPath, windowsVersionAssemblyManifestSource(version), "utf8");
+  const reason = error && error.code ? error.code : error instanceof Error ? error.message : String(error || "");
+  logLine(logger, `official Electron runtime synthesized Windows assembly manifest after copy failure: ${entry.name} (${reason})`);
+  return true;
+}
+
+function copyPortableRuntimeEntry({ entry, sourcePath, targetPath, logger, platform = process.platform }) {
+  try {
+    fs.cpSync(sourcePath, targetPath, {
+      recursive: true,
+      force: true,
+      verbatimSymlinks: true,
+    });
+    return { copied: true, synthesized: false };
+  } catch (error) {
+    if (tryWriteWindowsVersionAssemblyManifest({ entry, targetPath, logger, error, platform })) {
+      return { copied: false, synthesized: true };
+    }
+    throw error;
+  }
+}
+
 function ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath, markerPath, logger }) {
   const nextFingerprint = portableRuntimeFingerprint(layout);
   const previous = readJsonIfPresent(markerPath);
@@ -88,11 +137,7 @@ function ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath
   for (const entry of fs.readdirSync(layout.runtimeRoot, { withFileTypes: true })) {
     const sourcePath = path.join(layout.runtimeRoot, entry.name);
     if (shouldSkipPortableRuntimeEntry(entry, sourcePath, layout)) continue;
-    fs.cpSync(sourcePath, path.join(runnerRootDir, entry.name), {
-      recursive: true,
-      force: true,
-      verbatimSymlinks: true,
-    });
+    copyPortableRuntimeEntry({ entry, sourcePath, targetPath: path.join(runnerRootDir, entry.name), logger });
   }
   fs.copyFileSync(layout.executablePath, runnerExecutablePath);
   if (process.platform !== "win32") fs.chmodSync(runnerExecutablePath, 0o755);
@@ -137,4 +182,9 @@ async function createPortableRunner({ layout, runtimeDir, logger }) {
 
 module.exports = {
   createPortableRunner,
+  __test: {
+    copyPortableRuntimeEntry,
+    windowsVersionAssemblyManifestName,
+    windowsVersionAssemblyManifestSource,
+  },
 };
