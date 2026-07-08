@@ -104,7 +104,10 @@ test("injects remote file actions after the bridge polyfill", (t) => {
   assert.notEqual(bridgeIndex, -1);
   assert.notEqual(remoteFileIndex, -1);
   assert.equal(remoteFileIndex > bridgeIndex, true);
-  assert.equal(service.staticFile("/codex-remote-file-actions.js").endsWith("web-shell/codex-remote-file-actions.js"), true);
+  assert.equal(
+    service.staticFile("/codex-remote-file-actions.js"),
+    path.resolve(__dirname, "..", "..", "web-shell", "codex-remote-file-actions.js")
+  );
 });
 
 test("renames official open-in-folder locale message only for remote browser hosts", (t) => {

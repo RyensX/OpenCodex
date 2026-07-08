@@ -13,6 +13,7 @@ function makeTempFile(t, fileName, content) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-local-file-test-"));
   t.after(() => fs.rmSync(dir, { force: true, recursive: true }));
   const filePath = path.join(dir, fileName);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
   return filePath;
 }
@@ -84,7 +85,9 @@ function localZipEntries(zipBuffer) {
 test("serves local file tokens inline or as attachment", async (t) => {
   const service = createLocalFileService();
   t.after(() => service.dispose());
-  const filePath = makeTempFile(t, 'report "final".txt', "hello");
+  const fileName = process.platform === "win32" ? "report final.txt" : 'report "final".txt';
+  const headerFileName = process.platform === "win32" ? "report final.txt" : "report _final_.txt";
+  const filePath = makeTempFile(t, fileName, "hello");
 
   const preview = service.createLocalFilePreview(filePath);
   assert.equal(preview.url.includes("?download=1"), false);
@@ -94,7 +97,7 @@ test("serves local file tokens inline or as attachment", async (t) => {
   await service.serveLocalFile(pathnameFromLocalFileUrl(preview.url), previewResponse);
   const previewBody = await waitForResponseBody(previewResponse);
   assert.equal(previewResponse.status, 200);
-  assert.equal(previewResponse.headers["content-disposition"], 'inline; filename="report _final_.txt"');
+  assert.equal(previewResponse.headers["content-disposition"], `inline; filename="${headerFileName}"`);
   assert.equal(previewResponse.headers["content-length"], "5");
   assert.equal(Buffer.compare(previewBody, Buffer.from("hello")), 0);
 
@@ -106,12 +109,12 @@ test("serves local file tokens inline or as attachment", async (t) => {
   await service.serveLocalFile(pathnameFromLocalFileUrl(download.downloadUrl), downloadResponse, { download: true });
   const downloadBody = await waitForResponseBody(downloadResponse);
   assert.equal(downloadResponse.status, 200);
-  assert.equal(downloadResponse.headers["content-disposition"], 'attachment; filename="report _final_.txt"');
+  assert.equal(downloadResponse.headers["content-disposition"], `attachment; filename="${headerFileName}"`);
   assert.equal(downloadResponse.headers["content-length"], "5");
   assert.equal(Buffer.compare(downloadBody, Buffer.from("hello")), 0);
 
   const pathDownload = await service.createLocalPathDownload(filePath);
-  assert.equal(pathDownload.name, 'report "final".txt');
+  assert.equal(pathDownload.name, fileName);
   assert.equal(pathDownload.downloadUrl.endsWith("?download=1"), true);
 });
 
