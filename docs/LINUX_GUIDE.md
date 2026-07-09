@@ -1,6 +1,6 @@
-# Xvfb 无头运行指南
+# Linux运行指南
 
-OpenCodex 本身是一个 Codex Desktop Web 中间层，让浏览器访问 Codex。原版仅支持 macOS/Windows，通过 Xvfb 可使其在无显示器的 Linux 服务器上运行。
+OpenCodex本身只是一个Codex Desktop中间层，通过 Xvfb 可使其在无显示器的Linux 服务器上运行。
 
 ## 原理
 
@@ -10,13 +10,13 @@ Codex Desktop 基于 Electron，需要一个 X Window 显示环境渲染界面�
 无头服务器                 用户浏览器
 ┌──────────────────┐      ┌─────────────┐
 │  Xvfb :99        │      │             │
-│  (虚拟 framebuffer)│     │ 手机/平板/   │
-│       ↑          │      │ 另一台电脑   │
+│ (虚拟 framebuffer)│      │ 手机/平板/   │
+│       ↑          │      │ 另一台电脑    │
 │  Codex Desktop   │◄────►│             │
 │  (Electron)      │ HTTP │             │
-│       ↑          │  +WS │             │
-│  OpenCodex        │      │             │
-│  Gateway         │────►│             │
+│       ↑          │ +WS  │             │
+│  OpenCodex       │      │             │
+│  Gateway         │ ────►│             │
 └──────────────────┘      └─────────────┘
 ```
 
@@ -127,17 +127,17 @@ export CODEX_CLI_PATH=/opt/codex-cli/codex
 
 cd /path/to/OpenCodex
 pnpm install
-PORT=3737 pnpm run web:dev
+PORT=这里填端口 pnpm run web:dev
 ```
 
-访问 `http://服务器IP:3737` 即可使用。
-
-如设置了密码，先编辑 `config.yaml`：
+强烈建议设置密码，先编辑 `config.yaml`：
 
 ```yaml
 auth:
   password: "你的密码"
 ```
+
+访问 `http://服务器IP:端口` 即可使用。
 
 ## 与 systemd 集成
 

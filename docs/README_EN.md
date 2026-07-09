@@ -11,7 +11,7 @@ Bad timing😭 Just as this project was about to be open sourced, ChatGPT App ad
 Compared with the official option, OpenCodex still has advantages in several usage scenarios:
 
 1. No proxy network required.
-2. No overseas Google Play / Apple account required.
+2. No overseas Google Play / Apple account is required, and remote usage with third-party API login is supported.
 3. Supports full Codex capabilities, including file tree, terminal, review, and more, making anytime-anywhere AI Coding easier.
 4. Freely pair it with intranet tunneling or public network access without going through the official relay server, making it faster and easier to protect private data.
 
@@ -42,7 +42,7 @@ Compared with the official option, OpenCodex still has advantages in several usa
 - Node.js environment.
 - pnpm.
 - Codex Desktop installed locally. It does not need to be running, and it can still be used at the same time.
-- macOS or Windows. Linux has not been tested yet.
+- macOS / Windows / Linux (Linux requires command-line startup; see the guide below.)
 
 ## How To Use
 
@@ -115,6 +115,10 @@ After startup, visit:
 http://127.0.0.1:3737
 ```
 
+### Linux Usage
+
+No prebuilt launcher is provided for Linux. Command-line usage is recommended. See the [Linux setup guide](LINUX_GUIDE_EN.md).
+
 ### Remote Access
 
 OpenCodex itself does not provide a remote access service. If you need remote access from another device, use Tailscale, ZeroTier, Cloudflare Tunnel, a company VPN, or a similar network solution, then enable LAN mode in the Launcher.
@@ -143,6 +147,7 @@ OpenCodex itself does not provide a remote access service. If you need remote ac
 | `CODEX_CLI_PATH` | Auto scan | Codex CLI executable path override on Windows. |
 | `CODEX_WEB_RUNTIME_DIR` | `.data/runtime` | Runtime directory for command-line gateway startup; packaged Launcher mode points this to the user data directory. |
 | `CODEX_WEB_OFFICIAL_BUNDLE_DIR` | `.data/cache/codex-official-bundle` | Official bundle extraction cache directory. |
+| `CODEX_WEB_OFFICIAL_AUTO_SCAN_UPGRADE` | `1` | Controls whether official Codex runtime updates are automatically scanned on startup. Set to `0` to prefer reusing the existing cache, scanning only when the cache is missing or unavailable. |
 | `CODEX_WEB_OFFICIAL_USER_DATA_DIR` | `.data/official-user-data` | Isolated official Electron profile directory. |
 | `CODEX_WEB_OFFICIAL_TMPDIR` / `CODEX_WEB_OFFICIAL_TMP_DIR` | Auto generated | Temporary directory for the hidden official runtime, used to isolate the official IPC socket. |
 | `CODEX_WEB_REPORTS_DIR` | `.data/reports` | Gateway diagnostics report output directory. |

@@ -10,7 +10,7 @@ OpenCodex 是一个Codex Desktop中间层，它可以让你直接使用手机、
 但对比官方还是有一些使用场景上的优势：
 
 1. 无需魔法上网。
-2. 无需外区Google Play/苹果账号。
+2. 无需外区Google Play/苹果账号，且支持三方API登录的远程使用
 3. 支持 Codex 的完整功能，例如文件树、终端、审查等，便于随时随地 AI Coding。
 4. 自由搭配内网穿透/公网，无需经过官方中继服务器，速度快且数据易于保护隐私数据。
 
@@ -41,7 +41,7 @@ OpenCodex 是一个Codex Desktop中间层，它可以让你直接使用手机、
 - Node环境
 - pnpm
 - 本机已安装 Codex Desktop（无需启动，但也支持同时使用）。
-- macOS 或 Windows（Linux暂未测试）。
+- macOS/Windows/Linux(需要命令行启动，具体见下方文档)
 
 ## 如何使用
 
@@ -112,9 +112,9 @@ auth:
 http://127.0.0.1:3737
 ```
 
-### 无头服务器启动
+### Linux使用
 
-[配置步骤](docs/Xvfb.md)
+无预打包好的启动器，建议命令行使用，具体见 [配置步骤](docs/LINUX_GUIDE.md)
 
 ### 远程访问
 
