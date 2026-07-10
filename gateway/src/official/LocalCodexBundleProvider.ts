@@ -48,7 +48,7 @@ type LocalCodexBundleProviderOptions = {
  * 4. 用统一的 app.asar 文件身份判断缓存是否过期。
  * 5. 只在缓存过期时从 app.asar 解压运行时工作副本。
  *
- * 注意：这里不会修改官方 Codex.app / app.asar，也不会要求打包产物内置官方 bundle。
+ * 注意：这里不会修改官方 Codex.app / ChatGPT.app / app.asar，也不会要求打包产物内置官方 bundle。
  * 抽取结果只落到 OpenCodex 的用户可写 runtime cache，作为 gateway 启动官方代码的临时工作副本。
  *
  * 网关入口继续使用 ensureOfficialBundle()。

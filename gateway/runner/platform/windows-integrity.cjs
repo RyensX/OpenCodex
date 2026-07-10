@@ -27,7 +27,7 @@ function assertWindowsRunnerPatchTarget({ runnerRootDir, runnerExecutablePath, s
   const sourceRealPath = realpathSafe(sourceExecutablePath).toLowerCase();
   const runnerRealPath = realpathSafe(runnerExecutablePath).toLowerCase();
   if (sourceRealPath === runnerRealPath) {
-    throw new Error(`拒绝 patch 官方 Codex 安装目录里的可执行文件：${runnerExecutablePath}`);
+    throw new Error(`拒绝 patch 官方 Codex/ChatGPT Desktop 安装目录里的可执行文件：${runnerExecutablePath}`);
   }
 }
 
@@ -50,7 +50,7 @@ function patchWindowsRunnerAsarIntegrity({ runnerRootDir, runnerExecutablePath, 
 
   /**
    * Electron 的 Windows ASAR integrity 存在 PE resource 里，而不是 app.asar 自身。
-   * 这里只修改 OpenCodex 运行态里的 exe 副本；官方安装目录始终只读，避免影响原版 Codex Desktop。
+   * 这里只修改 OpenCodex 运行态里的 exe 副本；官方安装目录始终只读，避免影响 Codex/ChatGPT Desktop。
    */
   const exeData = fs.readFileSync(runnerExecutablePath);
   const exe = NtExecutable.from(exeData, { ignoreCert: true });

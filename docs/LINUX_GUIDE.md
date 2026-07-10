@@ -1,6 +1,6 @@
 # Linux运行指南
 
-OpenCodex本身只是一个Codex Desktop中间层，通过 Xvfb 可使其在无显示器的Linux 服务器上运行。
+OpenCodex 本身只是一个 Codex 桌面运行时中间层，通过 Xvfb 可使社区转换的 Electron 运行时在无显示器的 Linux 服务器上运行。
 
 ## 原理
 
@@ -36,7 +36,7 @@ sudo yum install xorg-x11-server-Xvfb
 
 ## 获取 Codex Desktop Linux
 
-Codex Desktop 官方仅提供 macOS/Windows 版。Linux 版由社区项目 [ilysenko/codex-desktop-linux](https://github.com/ilysenko/codex-desktop-linux) 自动从上游 macOS DMG 构建：
+OpenAI 当前仅提供 macOS/Windows 桌面应用。Linux 运行时由社区项目 [ilysenko/codex-desktop-linux](https://github.com/ilysenko/codex-desktop-linux) 从上游 macOS DMG 转换；社区产物继续使用 `codex-app` / `codex-desktop` 命名，新版 DMG 中的动态 main 同样可被 OpenCodex 识别：
 
 ```bash
 git clone https://github.com/ilysenko/codex-desktop-linux.git
@@ -55,7 +55,7 @@ codex-app/
 └── ...
 ```
 
-OpenCodex 默认期望 `CODEX_DESKTOP_PATH` 指向此目录。
+OpenCodex 默认期望 `CODEX_DESKTOP_APP_PATH` 指向此目录。
 
 ## 启动 Xvfb
 
@@ -85,8 +85,8 @@ pgrep -a Xvfb
 | 变量 | 说明 | 示例 |
 |------|------|------|
 | `DISPLAY` | Xvfb 显示编号 | `:99` |
-| `CODEX_DESKTOP_APP_PATH` | Codex Desktop 安装目录（含 `app.asar`） | `/tmp/codex-desktop-linux/codex-app` |
-| `CODEX_DESKTOP_EXECUTABLE_PATH` | Electron 可执行文件路径 | `/tmp/codex-desktop-linux/codex-app/codex` |
+| `CODEX_DESKTOP_APP_PATH` | 社区转换的桌面运行时目录（含 `app.asar`） | `/tmp/codex-desktop-linux/codex-app` |
+| `CODEX_DESKTOP_EXECUTABLE_PATH` | Electron 可执行文件路径 | `/tmp/codex-desktop-linux/codex-app/electron` |
 | `CODEX_CLI_PATH` | Codex CLI 二进制路径 | `/opt/codex-cli/codex` |
 | `CODEX_HOME` | Codex 配置目录 | `~/.codex` |
 
@@ -122,7 +122,7 @@ const officialRuntimeArgs = [
 ```bash
 export DISPLAY=:99
 export CODEX_DESKTOP_APP_PATH=/tmp/codex-desktop-linux/codex-app
-export CODEX_DESKTOP_EXECUTABLE_PATH=/tmp/codex-desktop-linux/codex-app/codex
+export CODEX_DESKTOP_EXECUTABLE_PATH=/tmp/codex-desktop-linux/codex-app/electron
 export CODEX_CLI_PATH=/opt/codex-cli/codex
 
 cd /path/to/OpenCodex

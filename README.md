@@ -2,7 +2,7 @@
 
 **中文** | [English](docs/README_EN.md)
 
-OpenCodex 是一个Codex Desktop中间层，它可以让你直接使用手机、平板或另一台电脑通过浏览器访问并操作目标机器上的 Codex，让你可以随时随地AI Coding。
+OpenCodex 是一个 Codex 桌面运行时中间层，同时兼容旧版 Codex Desktop 和新版 ChatGPT Desktop。它可以让你直接使用手机、平板或另一台电脑通过浏览器访问并操作目标机器上的 Codex，让你可以随时随地 AI Coding。
 
 ---
 天塌了😭刚准备开源，谁知道一觉醒来 ChatGPT App 就对 Codex 做了支持。
@@ -23,7 +23,7 @@ OpenCodex 是一个Codex Desktop中间层，它可以让你直接使用手机、
 - 支持本机访问、局域网访问和配合 Tailscale / ZeroTier / VPN 的远程局域网访问。
 - 支持设置访问密码，避免无认证暴露。
 - 提供桌面启动器，可可视化配置监听地址、端口和访问密码等。
-- 启动时会自动更新到本地 Codex Desktop 版本，自动兼容新版本功能。
+- 启动时会自动跟随本地 Codex/ChatGPT Desktop 运行时版本，自动兼容新版本功能。
 - 针对移动端提供优化。
 
 <p align="center">
@@ -40,7 +40,7 @@ OpenCodex 是一个Codex Desktop中间层，它可以让你直接使用手机、
 
 - Node环境
 - pnpm
-- 本机已安装 Codex Desktop（无需启动，但也支持同时使用）。
+- 本机已安装旧版 Codex Desktop 或包含 Codex 的新版 ChatGPT Desktop（无需启动，但也支持同时使用）。
 - macOS/Windows/Linux(需要命令行启动，具体见下方文档)
 
 ## 如何使用
@@ -75,7 +75,7 @@ pnpm run launcher:dist:win
 
 产物会输出到 `release/`。首次启动会随机选择一个可用端口，修改监听地址、端口或访问密码后会自动重启服务让配置生效。
 
-> 使用前需要本机已安装 Codex Desktop。
+> 使用前需要本机已安装旧版 Codex Desktop 或新版 ChatGPT Desktop。
 
 ### 命令行启动
 
@@ -138,8 +138,8 @@ OpenCodex本身不提供远程访问服务，如果需要在其他设备中远�
 | `CODEX_WEB_DEBUG` | 空 | 设为 `1` 或 `true` 后输出更多调试日志。 |
 | `CODEX_WEB_SLOW_LOG_MS` | `750` | IPC 慢调用日志阈值，单位毫秒。 |
 | `CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS` | `300000` | 本地文件预览 URL token 有效期，单位毫秒。 |
-| `CODEX_DESKTOP_APP_PATH` | 自动扫描 | 指定 Codex Desktop 安装路径或 `app.asar` 所在路径。 |
-| `CODEX_DESKTOP_EXECUTABLE_PATH` | 自动扫描 | Windows/Linux 下指定 Codex Desktop Electron 可执行文件路径。 |
+| `CODEX_DESKTOP_APP_PATH` | 自动扫描 | 指定 Codex/ChatGPT Desktop 安装路径或 `app.asar` 所在路径。 |
+| `CODEX_DESKTOP_EXECUTABLE_PATH` | 自动扫描 | Windows/Linux 下指定 Codex/ChatGPT Desktop Electron 可执行文件路径。 |
 | `CODEX_APP_SERVER_BINARY_PATH` | 自动扫描 | Windows 下指定 Codex app-server/CLI 可执行文件路径。 |
 | `CODEX_CLI_PATH` | 自动扫描 | Windows 下指定 Codex CLI 可执行文件路径。 |
 | `CODEX_WEB_RUNTIME_DIR` | `.data/runtime` | 命令行 gateway 运行目录；打包态由 Launcher 指向用户数据目录。 |

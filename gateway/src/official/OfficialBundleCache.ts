@@ -3,6 +3,7 @@ export {};
 
 const path = require("path");
 const { MANIFEST_SCHEMA_VERSION } = require("./constants");
+const { OfficialRuntimeEntryResolver } = require("./OfficialRuntimeEntryResolver");
 
 /** 按统一 schema 和 app.asar 文件身份判断缓存是否需要刷新。 */
 class OfficialBundleRefreshPolicy {
@@ -53,18 +54,21 @@ class OfficialBundleCache {
     logger,
     fileSystem,
     refreshPolicy = new OfficialBundleRefreshPolicy(),
+    runtimeEntryResolver = new OfficialRuntimeEntryResolver(),
   }: {
     projectRoot: string;
     configuredBundleDir: string;
     logger: any;
     fileSystem: any;
     refreshPolicy?: OfficialBundleRefreshPolicy;
+    runtimeEntryResolver?: OfficialRuntimeEntryResolver;
   }) {
     this.projectRoot = projectRoot;
     this.configuredBundleDir = configuredBundleDir;
     this.logger = logger;
     this.fileSystem = fileSystem;
     this.refreshPolicy = refreshPolicy;
+    this.runtimeEntryResolver = runtimeEntryResolver;
   }
 
   get bundleDir(): string {
@@ -78,8 +82,12 @@ class OfficialBundleCache {
   }
 
   get bootstrapPath(): string {
-    // 官方 Electron main 的入口文件，gateway 通过它启动 hidden runtime。
-    return path.join(this.bundleDir, ".vite", "build", "bootstrap.js");
+    // 保留 bootstrapPath 对外字段名；实际值按官方 package.json.main 兼容新旧入口。
+    const runtimeEntryPath = this.runtimeEntryResolver.resolveFromPackageFile({
+      packageJsonPath: path.join(this.bundleDir, "package.json"),
+      fileSystem: this.fileSystem,
+    });
+    return path.join(this.bundleDir, ...runtimeEntryPath.split("/"));
   }
 
   readManifest(): any | null {
@@ -155,9 +163,13 @@ class OfficialBundleCache {
     // 缓存完整性同时检查 renderer 和 main runtime，防止旧版只含 webview 的缓存被误复用。
     if (!this.fileSystem.exists(indexPath)) return false;
     if (!this.fileSystem.exists(assetsDir)) return false;
-    if (!this.fileSystem.exists(this.bootstrapPath)) return false;
     if (!this.fileSystem.exists(packagePath)) return false;
     if (!this.fileSystem.exists(nodeModulesDir)) return false;
+    try {
+      if (!this.fileSystem.exists(this.bootstrapPath)) return false;
+    } catch {
+      return false;
+    }
     try {
       return this.fileSystem.readDir(assetsDir).length > 0;
     } catch {

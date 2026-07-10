@@ -503,7 +503,7 @@ function requireOfficialBundleProvider() {
 function setProcessResourcesPath(resourcesPath) {
   if (!resourcesPath) return;
   try {
-    // 官方代码会读取 process.resourcesPath 拼接二进制和资源路径，这里对齐到 Codex.app 的 Resources。
+    // 官方代码会读取 process.resourcesPath 拼接二进制和资源路径，这里对齐到桌面应用的 Resources。
     Object.defineProperty(process, "resourcesPath", {
       configurable: true,
       enumerable: true,
@@ -524,7 +524,7 @@ function setOfficialAppPath(bundleDir) {
 
 function setOfficialPackagedMode() {
   try {
-    // gateway 复用的是已安装 Codex.app 的生产资源，不能让官方 main 走 localhost dev server。
+    // gateway 复用的是已安装 Codex/ChatGPT Desktop 的生产资源，不能让官方 main 走 localhost dev server。
     Object.defineProperty(app, "isPackaged", {
       configurable: true,
       get: () => true,
@@ -534,7 +534,7 @@ function setOfficialPackagedMode() {
 
 function alignOfficialElectronEnvironment(bundle) {
   /**
-   * 官方 main 认为自己运行在已打包 Codex.app 中。
+   * 官方 main 认为自己运行在已打包桌面应用中。
    * gateway 需要把 app path、resourcesPath、userData 和 build flavor 都伪装成官方生产环境，
    * 否则官方 bootstrap 会尝试连接开发服务器或找不到内置 codex 二进制。
    */
@@ -563,7 +563,7 @@ function alignOfficialElectronEnvironment(bundle) {
   if (officialResourcesPath) {
     /**
      * 官方 bundled plugin 管理器支持这个 env 作为资源源目录。
-     * 这里指回已安装 Codex.app 的 Resources/plugins，保持“复用官方资源”，不把插件复制进 OpenCodex cache/dist。
+     * 这里指回已安装桌面应用的 Resources/plugins，保持“复用官方资源”，不把插件复制进 OpenCodex cache/dist。
      */
     process.env.CODEX_ELECTRON_BUNDLED_PLUGINS_RESOURCES_PATH =
       process.env.CODEX_ELECTRON_BUNDLED_PLUGINS_RESOURCES_PATH || officialResourcesPath;
@@ -1686,7 +1686,7 @@ async function webConfigScript() {
 function startOfficialRuntime() {
   /**
    * 官方 runtime 启动点：
-   * - ensureOfficialBundle 负责从已安装 Codex.app 抽取白名单资源。
+   * - ensureOfficialBundle 负责从已安装 Codex/ChatGPT Desktop 抽取白名单资源。
    * - 环境伪装必须发生在 require(bootstrapPath) 之前。
    * - hook 必须先安装，才能捕获 bootstrap 注册的 IPC handler、官方 app-server 子进程，并隐藏官方 UI。
    */

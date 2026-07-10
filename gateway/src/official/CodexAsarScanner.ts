@@ -42,6 +42,8 @@ class CodexAsarCandidateProvider {
   private defaultInstallCandidates(): string[] {
     if (this.platform === "darwin") {
       return [
+        "/Applications/ChatGPT.app",
+        path.join(this.homeDir, "Applications", "ChatGPT.app"),
         "/Applications/Codex.app",
         path.join(this.homeDir, "Applications", "Codex.app"),
       ];
@@ -405,7 +407,7 @@ class CodexInstallLayoutResolver {
  *
  * 支持的输入：
  * 1. 直接指向 app.asar。
- * 2. 指向 macOS 的 Codex.app、Contents 或 Resources。
+ * 2. 指向 macOS 的 Codex.app / ChatGPT.app、Contents 或 Resources。
  * 3. 指向 Windows/Linux Electron 安装根或 resources 目录。
  * 4. 指向自定义目录时，做有限深度扫描，不全盘递归。
  *
@@ -448,7 +450,7 @@ class CodexAsarScanner {
       if (layout) return layout;
     }
     throw new Error(
-      `未找到 Codex 官方 app.asar。请将 CODEX_DESKTOP_APP_PATH 指向 Codex 安装目录、resources 目录或 app.asar。已尝试：${candidates.join(", ")}`
+      `未找到 Codex/ChatGPT Desktop 官方 app.asar。请将 CODEX_DESKTOP_APP_PATH 指向 Codex 或 ChatGPT 桌面应用安装目录、resources 目录或 app.asar。已尝试：${candidates.join(", ")}`
     );
   }
 

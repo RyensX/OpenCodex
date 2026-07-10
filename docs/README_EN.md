@@ -2,7 +2,7 @@
 
 [中文](../README.md) | **English**
 
-OpenCodex is a middleware layer for Codex Desktop. It lets you directly use a phone, tablet, or another computer to access and operate Codex on a target machine through a browser, so you can AI Code anytime, anywhere.
+OpenCodex is a middleware layer for the Codex desktop runtime, compatible with both legacy Codex Desktop and the new ChatGPT Desktop app. It lets you directly use a phone, tablet, or another computer to access and operate Codex on a target machine through a browser, so you can AI Code anytime, anywhere.
 
 ---
 
@@ -24,7 +24,7 @@ Compared with the official option, OpenCodex still has advantages in several usa
 - Supports local access, LAN access, and remote LAN access with Tailscale / ZeroTier / VPN.
 - Supports setting an access password to avoid unauthenticated exposure.
 - Provides a launcher for visual configuration of the listen address, port, access password, and more.
-- Automatically updates to the local Codex Desktop version on startup, keeping compatibility with new-version features.
+- Automatically follows the local Codex/ChatGPT Desktop runtime version on startup, keeping compatibility with new-version features.
 - Provides optimizations for mobile devices.
 
 <p align="center">
@@ -41,7 +41,7 @@ Compared with the official option, OpenCodex still has advantages in several usa
 
 - Node.js environment.
 - pnpm.
-- Codex Desktop installed locally. It does not need to be running, and it can still be used at the same time.
+- Legacy Codex Desktop or the new ChatGPT Desktop app with Codex installed locally. It does not need to be running, and it can still be used at the same time.
 - macOS / Windows / Linux (Linux requires command-line startup; see the guide below.)
 
 ## How To Use
@@ -76,7 +76,7 @@ pnpm run launcher:dist:win
 
 Artifacts are written to `release/`. On first startup, OpenCodex randomly selects an available port. After changing the listen address, port, or access password, it automatically restarts the service so the configuration takes effect.
 
-> Codex Desktop must be installed locally before use.
+> Legacy Codex Desktop or the new ChatGPT Desktop app must be installed locally before use.
 
 ### Command-Line Startup
 
@@ -141,8 +141,8 @@ OpenCodex itself does not provide a remote access service. If you need remote ac
 | `CODEX_WEB_DEBUG` | Empty | Set to `1` or `true` to output more debug logs. |
 | `CODEX_WEB_SLOW_LOG_MS` | `750` | Slow IPC call logging threshold, in milliseconds. |
 | `CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS` | `300000` | Local file preview URL token lifetime, in milliseconds. |
-| `CODEX_DESKTOP_APP_PATH` | Auto scan | Codex Desktop install path or path containing `app.asar`. |
-| `CODEX_DESKTOP_EXECUTABLE_PATH` | Auto scan | Codex Desktop Electron executable path override on Windows/Linux. |
+| `CODEX_DESKTOP_APP_PATH` | Auto scan | Codex/ChatGPT Desktop install path or path containing `app.asar`. |
+| `CODEX_DESKTOP_EXECUTABLE_PATH` | Auto scan | Codex/ChatGPT Desktop Electron executable path override on Windows/Linux. |
 | `CODEX_APP_SERVER_BINARY_PATH` | Auto scan | Codex app-server/CLI executable path override on Windows. |
 | `CODEX_CLI_PATH` | Auto scan | Codex CLI executable path override on Windows. |
 | `CODEX_WEB_RUNTIME_DIR` | `.data/runtime` | Runtime directory for command-line gateway startup; packaged Launcher mode points this to the user data directory. |
