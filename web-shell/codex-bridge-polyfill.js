@@ -1148,8 +1148,8 @@
 
   /** 安全序列化 IPC payload，支持 Error 和循环引用。 */
   function stringifyForIpc(value) {
-    const seen = new WeakSet();
-    return JSON.stringify(value, (_key, nestedValue) => {
+    const ancestors = [];
+    return JSON.stringify(value, function (_key, nestedValue) {
       if (nestedValue instanceof Error) {
         return {
           name: nestedValue.name,
@@ -1159,8 +1159,9 @@
         };
       }
       if (nestedValue && typeof nestedValue === "object") {
-        if (seen.has(nestedValue)) return "[Circular]";
-        seen.add(nestedValue);
+        while (ancestors.length > 0 && ancestors.at(-1) !== this) ancestors.pop();
+        if (ancestors.includes(nestedValue)) return "[Circular]";
+        ancestors.push(nestedValue);
       }
       return nestedValue;
     });

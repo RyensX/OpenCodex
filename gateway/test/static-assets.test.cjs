@@ -7,6 +7,19 @@ const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
 const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
 
 const WEB_SHELL_INDEX = path.resolve(__dirname, "..", "..", "web-shell", "index.html");
+const CODEX_BRIDGE_POLYFILL = path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js");
+
+function loadBridgeStringifyForIpc() {
+  const source = fs.readFileSync(CODEX_BRIDGE_POLYFILL, "utf-8");
+  const match = source.match(
+    /  function stringifyForIpc\(value\) \{[\s\S]*?\r?\n  \}\r?\n\r?\n  const ipcErrorToastState/
+  );
+  assert.ok(match, "stringifyForIpc source should remain testable");
+  const functionSource = match[0]
+    .replace(/\r?\n\r?\n  const ipcErrorToastState$/, "")
+    .replace(/^  /gm, "");
+  return Function(`"use strict"; ${functionSource}; return stringifyForIpc;`)();
+}
 
 function makeTempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-static-assets-test-"));
@@ -54,6 +67,62 @@ test("web shell manifest requests credentials for protected origins", () => {
   const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
 
   assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest" crossorigin="use-credentials" \/>/);
+});
+
+test("IPC serialization preserves repeated arrays and only replaces real cycles", () => {
+  const stringifyForIpc = loadBridgeStringifyForIpc();
+  const roots = ["C:\\workspace"];
+  const sandboxPolicy = { type: "workspaceWrite", writableRoots: roots };
+  const payload = {
+    currentPermissions: { runtimeWorkspaceRoots: roots, sandboxPolicy },
+    latestThreadSettings: { runtimeWorkspaceRoots: roots, sandboxPolicy },
+  };
+  const parsed = JSON.parse(stringifyForIpc(payload));
+
+  assert.deepEqual(parsed.currentPermissions.runtimeWorkspaceRoots, roots);
+  assert.deepEqual(parsed.latestThreadSettings.runtimeWorkspaceRoots, roots);
+  assert.deepEqual(parsed.currentPermissions.sandboxPolicy, sandboxPolicy);
+  assert.deepEqual(parsed.latestThreadSettings.sandboxPolicy, sandboxPolicy);
+
+  const cyclic = { kind: "cycle" };
+  cyclic.self = cyclic;
+  assert.deepEqual(JSON.parse(stringifyForIpc(cyclic)), { kind: "cycle", self: "[Circular]" });
+});
+
+test("enables only the GPT-5.6 Harbor model picker in official chunks", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assetName = "composer-test.js";
+  fs.writeFileSync(
+    path.join(assetsDir, assetName),
+    'const picker={harborEnabled:_r(`824038554`),isElectron:!0,otherGate:_r(`123456789`)};'
+  );
+  const service = createService(webviewDir);
+  const reqPath = `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`;
+
+  const source = serveOfficialAsset(service, reqPath, "localhost:3737");
+
+  assert.match(source, /harborEnabled:!0,isElectron:!0/);
+  assert.match(source, /otherGate:_r\(`123456789`\)/);
+});
+
+test("uses visible catalog models instead of the stale model allowlist", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assetName = "model-list-filter-test.js";
+  fs.writeFileSync(
+    path.join(assetsDir, assetName),
+    "function filter({availableModels:n,useHiddenModels:s,models:o}){return o.forEach(r=>{if(s?n.has(r.model):!r.hidden){show(r)}if(r.pinned){pin(r)}})}"
+  );
+  const service = createService(webviewDir);
+  const reqPath = `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`;
+
+  const source = serveOfficialAsset(service, reqPath, "localhost:3737");
+
+  assert.match(source, /if\(!r\.hidden\)\{show\(r\)\}/);
+  assert.doesNotMatch(source, /s\?n\.has\(r\.model\):!r\.hidden/);
 });
 
 test("patched official renderer CSP allows the injected PWA manifest", (t) => {

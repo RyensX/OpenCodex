@@ -35,6 +35,59 @@ test("recognizes platform file manager spawn targets", () => {
   assert.equal(__test.fileManagerPathFromSpawn("node", ["script.js"]), "");
 });
 
+test("recognizes official app-server arguments after global config flags", () => {
+  assert.equal(__test.isHiddenOfficialAppServerArgs(["app-server", "--analytics-default-enabled"]), true);
+  assert.equal(
+    __test.isHiddenOfficialAppServerArgs([
+      "-c",
+      "features.code_mode_host=true",
+      "app-server",
+      "--analytics-default-enabled",
+    ]),
+    true
+  );
+  assert.equal(__test.isHiddenOfficialAppServerArgs(["-c", "app-server"]), false);
+  assert.equal(__test.isHiddenOfficialAppServerArgs(["exec", "app-server"]), false);
+});
+
+test("shares the official live IPC bus unless isolation is explicitly requested", () => {
+  assert.equal(__test.shouldIsolateOfficialLiveIpc({}), false);
+  assert.equal(__test.shouldIsolateOfficialLiveIpc({ CODEX_WEB_ISOLATE_OFFICIAL_LIVE_IPC: "0" }), false);
+  assert.equal(__test.shouldIsolateOfficialLiveIpc({ CODEX_WEB_ISOLATE_OFFICIAL_LIVE_IPC: "1" }), true);
+});
+
+test("drops corrupted thread stream snapshots from stale browser clients", () => {
+  const channel = "codex_desktop:message-from-view";
+  assert.equal(
+    __test.shouldDropCorruptedThreadStreamStateChange(channel, [
+      {
+        type: "thread-stream-state-changed",
+        conversationId: "thread-1",
+        change: {
+          type: "snapshot",
+          conversationState: {
+            currentPermissions: { runtimeWorkspaceRoots: ["C:\\workspace"] },
+            latestThreadSettings: { runtimeWorkspaceRoots: "[Circular]" },
+          },
+        },
+      },
+    ]),
+    true
+  );
+  assert.equal(
+    __test.shouldDropCorruptedThreadStreamStateChange(channel, [
+      {
+        type: "thread-stream-state-changed",
+        change: {
+          type: "snapshot",
+          conversationState: { runtimeWorkspaceRoots: ["C:\\workspace"], title: "[Circular]" },
+        },
+      },
+    ]),
+    false
+  );
+});
+
 test("vscode fetch open-file payloads feed the same interception condition", () => {
   const openFileTarget = openFileTargetFromIpc("codex_desktop:message-from-view", {
     type: "fetch",

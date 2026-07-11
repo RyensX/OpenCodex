@@ -367,6 +367,20 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   }
 
   /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
+  function patchGpt56ModelPickerChunk(source) {
+    return source.replace(
+      /(harborEnabled:)[A-Za-z_$][\w$]*\((["'`])824038554\2\)(,isElectron:!0)/,
+      "$1!0$3"
+    );
+  }
+
+  function patchCatalogModelFilterChunk(source) {
+    if (!source.includes("availableModels") || !source.includes("useHiddenModels")) return source;
+    const allowlistFilter =
+      /if\s*\(\s*([A-Za-z_$][\w$]*)\s*\?\s*([A-Za-z_$][\w$]*)\.has\(\s*([A-Za-z_$][\w$]*)\.model\s*\)\s*:\s*!\s*\3\.hidden\s*\)/;
+    return source.replace(allowlistFilter, (_match, _flag, _set, item) => `if(!${item}.hidden)`);
+  }
+
   function patchOfficialAsset(reqPath, data, req) {
     if (!shouldPatchOfficialAsset(reqPath)) return data;
     const source = data.toString("utf-8");
@@ -376,6 +390,8 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (!isLoopbackHostHeader(req && req.headers && req.headers.host)) {
       patched = patchOpenInFolderLocaleMessage(patched);
     }
+    patched = patchGpt56ModelPickerChunk(patched);
+    patched = patchCatalogModelFilterChunk(patched);
     return Buffer.from(patched, "utf-8");
   }
 

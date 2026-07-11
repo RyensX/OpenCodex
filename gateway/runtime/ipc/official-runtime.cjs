@@ -316,11 +316,15 @@ function looksLikeOfficialCodexBinary(command, bundle, spawnOptions) {
 
 function isHiddenOfficialAppServerArgs(args) {
   /**
-   * 只识别官方 codex app-server 入口，不理解后续子命令或业务参数。
+   * 官方新版会在子命令前追加 `-c <配置>`；跳过成对的全局配置参数后再识别 app-server。
    * 参数保持原样透传给官方 Desktop 的 codex 二进制，保证官方新增/修改 app-server 参数时自动兼容。
    */
-  if (!Array.isArray(args) || args[0] !== "app-server") return false;
-  return true;
+  if (!Array.isArray(args)) return false;
+  let commandIndex = 0;
+  while ((args[commandIndex] === "-c" || args[commandIndex] === "--config") && commandIndex + 1 < args.length) {
+    commandIndex += 2;
+  }
+  return args[commandIndex] === "app-server";
 }
 
 function looksLikeComputerUseInstaller(command) {
@@ -532,26 +536,34 @@ function setOfficialPackagedMode() {
   } catch {}
 }
 
+function shouldIsolateOfficialLiveIpc(env = process.env) {
+  return env.CODEX_WEB_ISOLATE_OFFICIAL_LIVE_IPC === "1";
+}
+
 function alignOfficialElectronEnvironment(bundle) {
   /**
    * 官方 main 认为自己运行在已打包桌面应用中。
    * gateway 需要把 app path、resourcesPath、userData 和 build flavor 都伪装成官方生产环境，
    * 否则官方 bootstrap 会尝试连接开发服务器或找不到内置 codex 二进制。
-   */
+  */
   const runtimeUserDataDir = officialRuntimeUserDataDir();
-  const runtimeTempDir = officialRuntimeTempDir();
+  const isolateLiveIpc = shouldIsolateOfficialLiveIpc();
+  const runtimeTempDir = isolateLiveIpc ? officialRuntimeTempDir() : os.tmpdir();
   // CODEX_HOME 才是需要共享的核心数据；Electron profile 只保存运行态缓存，不能和官方桌面端抢同一把锁。
   ensureDir(runtimeUserDataDir);
-  // 官方跨进程 live IPC bus 基于 os.tmpdir() 建 socket；这里必须和官方 Desktop 隔离，避免抢会话 owner。
-  ensureDir(runtimeTempDir);
-  try {
-    fs.chmodSync(runtimeTempDir, 0o700);
-  } catch {}
+  if (isolateLiveIpc) {
+    ensureDir(runtimeTempDir);
+    try {
+      fs.chmodSync(runtimeTempDir, 0o700);
+    } catch {}
+  }
   process.env.CODEX_ELECTRON_USER_DATA_PATH = process.env.CODEX_ELECTRON_USER_DATA_PATH || runtimeUserDataDir;
   process.env.CODEX_HOME = process.env.CODEX_HOME || CODEX_HOME;
-  process.env.TMPDIR = runtimeTempDir;
-  process.env.TMP = runtimeTempDir;
-  process.env.TEMP = runtimeTempDir;
+  if (isolateLiveIpc) {
+    process.env.TMPDIR = runtimeTempDir;
+    process.env.TMP = runtimeTempDir;
+    process.env.TEMP = runtimeTempDir;
+  }
   process.env.NODE_ENV = process.env.NODE_ENV || "production";
   // 官方 main 在开发态会从环境/package metadata 推导 build flavor；gateway 明确按 prod 对齐。
   process.env.BUILD_FLAVOR = process.env.BUILD_FLAVOR || "prod";
@@ -576,7 +588,10 @@ function alignOfficialElectronEnvironment(bundle) {
   } catch {}
   diagnosticLog("official-runtime", "official_runtime_temp_dir_configured", {
     runtimeTempDir,
-    reason: "isolate official live ipc bus from Codex Desktop",
+    mode: isolateLiveIpc ? "isolated" : "shared",
+    reason: isolateLiveIpc
+      ? "isolate official live ipc bus from Codex Desktop"
+      : "share official live ipc bus with Codex Desktop",
   });
   diagnosticLog("official-runtime", "official_runtime_resources_configured", {
     resourcesPath: officialResourcesPath,
@@ -917,6 +932,35 @@ function payloadFromArgs(args) {
 
 function normalizeIpcArgs(args) {
   return Array.isArray(args) ? args : [args];
+}
+
+const CORRUPTED_THREAD_STREAM_REFERENCE_KEYS = new Set([
+  "activePermissionProfile",
+  "attachments",
+  "collaborationMode",
+  "input",
+  "items",
+  "requests",
+  "runtimeWorkspaceRoots",
+  "sandboxPolicy",
+  "turns",
+  "writableRoots",
+]);
+
+function containsCircularSentinel(value, key = "", seen = new WeakSet()) {
+  if (value === "[Circular]") return CORRUPTED_THREAD_STREAM_REFERENCE_KEYS.has(key);
+  if (value == null || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => containsCircularSentinel(item, key, seen));
+  return Object.entries(value).some(([nestedKey, item]) => containsCircularSentinel(item, nestedKey, seen));
+}
+
+function shouldDropCorruptedThreadStreamStateChange(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return false;
+  const message = payloadFromArgs(normalizeIpcArgs(args));
+  if (!message || typeof message !== "object" || message.type !== "thread-stream-state-changed") return false;
+  return containsCircularSentinel(message);
 }
 
 function stringRouteId(value) {
@@ -1438,6 +1482,13 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   await waitForOfficialBridgeReady();
   const event = createOfficialIpcEvent(context);
   const invokeArgs = normalizeIpcArgs(args);
+  if (shouldDropCorruptedThreadStreamStateChange(channel, invokeArgs)) {
+    const message = payloadFromArgs(invokeArgs);
+    diagnosticWarn("official-ipc-route", "corrupted_thread_stream_snapshot_dropped", {
+      conversationId: message && typeof message.conversationId === "string" ? message.conversationId : "",
+    });
+    return true;
+  }
   // 先记录请求归属，再调用官方 handler，这样同步和异步回包都能找到目标 client。
   rememberRequestRoute(channel, invokeArgs, context.clientId || "");
   // Computer Use 锁屏授权由官方 Installer 决定；这里额外记录同进程直接 status，方便和官方回包对照。
@@ -1735,6 +1786,9 @@ module.exports = {
   webConfigScript,
   __test: {
     fileManagerPathFromSpawn,
+    isHiddenOfficialAppServerArgs,
+    shouldDropCorruptedThreadStreamStateChange,
+    shouldIsolateOfficialLiveIpc,
     shouldInterceptRemoteFileManagerStore,
   },
 };
