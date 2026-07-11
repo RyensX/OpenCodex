@@ -56,6 +56,91 @@ test("shares the official live IPC bus unless isolation is explicitly requested"
   assert.equal(__test.shouldIsolateOfficialLiveIpc({ CODEX_WEB_ISOLATE_OFFICIAL_LIVE_IPC: "1" }), true);
 });
 
+test("bridges official thread list changes to recent conversation metadata invalidation", () => {
+  const channel = "codex_desktop:message-for-view";
+  const expected = { type: "query-cache-invalidate", queryKey: ["recent-conversations-meta"] };
+  const startedArgs = [
+    {
+      type: "mcp-notification",
+      hostId: "local",
+      method: "thread/started",
+      params: { thread: { id: "thread-1" } },
+    },
+  ];
+
+  assert.deepEqual(__test.threadListInvalidationForOfficialMessage(channel, startedArgs, {}), expected);
+  for (const method of [
+    "thread/name",
+    "thread/name/updated",
+    "thread/archived",
+    "thread/unarchived",
+    "thread/deleted",
+  ]) {
+    assert.deepEqual(
+      __test.threadListInvalidationForOfficialMessage(channel, [
+        { type: "mcp-notification", method, params: { threadId: "thread-1" } },
+      ]),
+      expected
+    );
+  }
+  assert.deepEqual(
+    __test.threadListInvalidationForOfficialMessage(channel, [
+      {
+        type: "ipc-broadcast",
+        method: "thread-stream-state-changed",
+        params: { conversationId: "thread-2", change: { type: "snapshot" } },
+      },
+    ]),
+    expected
+  );
+  assert.equal(
+    __test.threadListInvalidationForOfficialMessage(channel, [
+      {
+        type: "ipc-broadcast",
+        method: "thread-stream-state-changed",
+        params: { conversationId: "thread-2", change: { type: "delta" } },
+      },
+    ]),
+    null
+  );
+  assert.deepEqual(
+    __test.threadListInvalidationForOfficialMessage(channel, [
+      { type: "ipc-broadcast", method: "thread-archived", params: { conversationId: "thread-2" } },
+    ]),
+    expected
+  );
+  assert.equal(
+    __test.threadListInvalidationForOfficialMessage(channel, startedArgs, {
+      CODEX_WEB_THREAD_LIST_EVENT_SYNC: "0",
+    }),
+    null
+  );
+  assert.equal(
+    __test.threadListInvalidationForOfficialMessage(
+      channel,
+      [{ type: "mcp-notification", method: "turn/completed", params: {} }]
+    ),
+    null
+  );
+});
+
+test("uses the renderer-specific invalidation shape for each client", () => {
+  const payload = {
+    type: "ipc-broadcast",
+    method: "query-cache-invalidate",
+    params: { queryKey: ["recent-conversations-meta"] },
+  };
+  assert.deepEqual(__test.threadListInvalidationEnvelope(), {
+    channel: "codex_desktop:message-for-view",
+    payload,
+    args: [payload],
+  });
+  assert.deepEqual(__test.threadListInvalidationRequest(), {
+    type: "query-cache-invalidate",
+    queryKey: ["recent-conversations-meta"],
+  });
+});
+
 test("drops corrupted thread stream snapshots from stale browser clients", () => {
   const channel = "codex_desktop:message-from-view";
   assert.equal(

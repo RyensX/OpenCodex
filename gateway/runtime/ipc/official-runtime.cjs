@@ -1248,12 +1248,104 @@ function logUnknownIpc(kind, details) {
   } catch {}
 }
 
+const THREAD_LIST_INVALIDATION_METHODS = new Set([
+  "thread/started",
+  "thread/name",
+  "thread/name/updated",
+  "thread/archived",
+  "thread/unarchived",
+  "thread/deleted",
+]);
+const THREAD_LIST_BROADCAST_INVALIDATION_METHODS = new Set(["thread-archived", "thread-unarchived"]);
+
+function threadListInvalidationForOfficialMessage(channel, args, env = process.env) {
+  if (env.CODEX_WEB_THREAD_LIST_EVENT_SYNC === "0" || channel !== MESSAGE_FOR_VIEW_CHANNEL) return null;
+  const payload = payloadFromArgs(args);
+  if (!payload || typeof payload !== "object") return null;
+  const isAppServerListChange =
+    payload.type === "mcp-notification" && THREAD_LIST_INVALIDATION_METHODS.has(payload.method);
+  const isPeerListChange =
+    payload.type === "ipc-broadcast" && THREAD_LIST_BROADCAST_INVALIDATION_METHODS.has(payload.method);
+  const isPeerThreadSnapshot =
+    payload.type === "ipc-broadcast" &&
+    payload.method === "thread-stream-state-changed" &&
+    payload.params &&
+    payload.params.change &&
+    payload.params.change.type === "snapshot";
+  if (!isAppServerListChange && !isPeerListChange && !isPeerThreadSnapshot) return null;
+  return { type: "query-cache-invalidate", queryKey: ["recent-conversations-meta"] };
+}
+
+function threadListInvalidationEnvelope() {
+  const payload = {
+    type: "ipc-broadcast",
+    method: "query-cache-invalidate",
+    params: { queryKey: ["recent-conversations-meta"] },
+  };
+  return { channel: MESSAGE_FOR_VIEW_CHANNEL, payload, args: [payload] };
+}
+
+function threadListInvalidationRequest() {
+  return { type: "query-cache-invalidate", queryKey: ["recent-conversations-meta"] };
+}
+
+let threadListEventSyncScheduled = false;
+let threadListSyncInFlight = false;
+
+function runThreadListInvalidation(logEvent, details = {}) {
+  if (threadListSyncInFlight || !wsHub) return false;
+  threadListSyncInFlight = true;
+  try {
+    const recipientCount = wsHub.broadcast(threadListInvalidationEnvelope(), { suppressDiagnostic: true });
+    Promise.resolve(invokeOfficialIpc(MESSAGE_FROM_VIEW_CHANNEL, [threadListInvalidationRequest()])).catch((error) => {
+      diagnosticWarn("official-thread-list-sync", "recent_conversations_meta_native_invalidation_failed", {
+        error: error instanceof Error ? error.message : String(error || ""),
+        source: logEvent,
+      });
+    });
+    diagnosticLog("official-thread-list-sync", logEvent, { ...details, recipientCount });
+    return recipientCount > 0;
+  } catch (error) {
+    diagnosticWarn("official-thread-list-sync", "recent_conversations_meta_invalidation_failed", {
+      error: error instanceof Error ? error.message : String(error || ""),
+      source: logEvent,
+    });
+    return false;
+  } finally {
+    threadListSyncInFlight = false;
+  }
+}
+
+function scheduleThreadListEventSync(channel, args) {
+  const invalidation = threadListInvalidationForOfficialMessage(channel, args);
+  if (!invalidation || threadListEventSyncScheduled) return;
+  threadListEventSyncScheduled = true;
+  const notification = payloadFromArgs(args);
+  setImmediate(() => {
+    threadListEventSyncScheduled = false;
+    runThreadListInvalidation("recent_conversations_meta_invalidation_broadcast", {
+      hostId: typeof notification.hostId === "string" ? notification.hostId : "",
+      threadId:
+        notification.params &&
+        notification.params.thread &&
+        typeof notification.params.thread.id === "string"
+          ? notification.params.thread.id
+          : notification.params && typeof notification.params.conversationId === "string"
+            ? notification.params.conversationId
+            : notification.params && typeof notification.params.threadId === "string"
+              ? notification.params.threadId
+              : "",
+    });
+  });
+}
+
 function routeOfficialWebContentsSend(channel, args) {
   /**
    * 官方代码以为自己在给 Electron renderer 发消息。
    * gateway 需要把这些 webContents.send 拦下来，并转换成浏览器 WebSocket 消息。
-   */
+  */
   const payload = payloadFromArgs(args);
+  scheduleThreadListEventSync(channel, args);
   if (!wsHub) {
     diagnosticWarn("official-ipc-route", "before_ws_ready", outgoingIpcDiagnosticSummary(channel, args));
     logUnknownIpc("webcontents-send-before-ws-ready", {
@@ -1790,5 +1882,8 @@ module.exports = {
     shouldDropCorruptedThreadStreamStateChange,
     shouldIsolateOfficialLiveIpc,
     shouldInterceptRemoteFileManagerStore,
+    threadListInvalidationEnvelope,
+    threadListInvalidationRequest,
+    threadListInvalidationForOfficialMessage,
   },
 };
