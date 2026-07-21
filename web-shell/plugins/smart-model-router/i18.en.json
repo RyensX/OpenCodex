@@ -1,6 +1,6 @@
 {
   "plugin.smartModelRouter.label": "Smart scheduling",
-  "plugin.smartModelRouter.desc": "Adds Auto to the model picker and automatically schedules a model and reasoning effort for every turn.",
+  "plugin.smartModelRouter.desc": "When enabled, Auto appears in the model picker. Selecting Auto automatically chooses the model and reasoning effort for each turn.",
   "plugin.smartModelRouter.settings.description": "Configure the classifier, model, and reasoning effort for each tier. auto effort follows the classifier recommendation.",
   "plugin.smartModelRouter.settings.disabled": "Smart scheduling is off. Enable it from Settings → Plugins on the OpenCodex sign-in page.",
   "plugin.smartModelRouter.settings.loading": "Loading smart scheduling configuration…",

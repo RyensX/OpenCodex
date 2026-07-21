@@ -1,6 +1,6 @@
 {
   "plugin.smartModelRouter.label": "智能调度",
-  "plugin.smartModelRouter.desc": "为模型列表加入 Auto，并根据每轮任务自动调度模型和推理强度。",
+  "plugin.smartModelRouter.desc": "启用后，模型列表会出现 Auto；选择 Auto 时，将为每轮任务自动选择模型和推理强度。",
   "plugin.smartModelRouter.settings.description": "配置 Auto 每轮分类时使用的分类器，以及各复杂度档位调度的模型和推理强度；强度选择 auto 时采用分类器建议。",
   "plugin.smartModelRouter.settings.disabled": "智能调度当前已关闭。可在 OpenCodex 登录页的“设置 → 插件”中开启。",
   "plugin.smartModelRouter.settings.loading": "正在读取智能调度配置…",

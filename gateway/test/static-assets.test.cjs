@@ -212,6 +212,9 @@ test("smart scheduling settings localize tier and field labels", () => {
   assert.equal(en["plugin.smartModelRouter.group.balanced"], "Balanced");
   assert.equal(zh["plugin.smartModelRouter.setting.model"], "模型");
   assert.equal(en["plugin.smartModelRouter.setting.effort"], "Reasoning effort");
+  // 认证前插件页必须明确说明选择 Auto 后会同时自动选择模型与推理强度。
+  assert.match(zh["plugin.smartModelRouter.desc"], /选择 Auto.*自动选择模型和推理强度/);
+  assert.match(en["plugin.smartModelRouter.desc"], /Selecting Auto.*model and reasoning effort/);
   assert.equal(zh["plugin.smartModelRouter.group.display"], "显示");
   assert.equal(zh["plugin.smartModelRouter.summary.title"], "智能调度");
   assert.equal(zh["plugin.smartModelRouter.summary.model"], "模型");
