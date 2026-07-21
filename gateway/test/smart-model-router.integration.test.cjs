@@ -167,7 +167,17 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
       fake.serverOutput.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
       return;
     }
-    if (message.method === "turn/start") forwardedTurns.push(message);
+    if (message.method === "turn/start") {
+      forwardedTurns.push(message);
+      const turnId = `public-${message.id}`;
+      fake.serverOutput.write(
+        `${JSON.stringify({ id: message.id, result: { turn: { id: turnId, status: "inProgress" } } })}\n${JSON.stringify({
+          method: "turn/started",
+          params: { threadId: message.params.threadId, turn: { id: turnId, status: "inProgress" } },
+        })}\n`
+      );
+      return;
+    }
     fake.serverOutput.write(
       `${JSON.stringify({ id: message.id, result: message.method === "thread/settings/update" ? { model: message.params.model } : { ok: true } })}\n`
     );
@@ -202,6 +212,35 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
   assert.equal(firstTurn.params.effort, "high");
   assert.equal(JSON.stringify(firstTurn).includes('"auto"'), false);
   await waitFor(() => publicMessages.find((message) => message.id === "user-turn-1"));
+  const firstStarted = await waitFor(() =>
+    publicMessages.find(
+      (message) => message.method === "turn/started" && message.params?.turn?.id === "public-user-turn-1"
+    )
+  );
+  assert.deepEqual(firstStarted.params._meta["opencodex/smart-scheduling"], {
+    tier: "balanced",
+    model: "gpt-5.6-luna",
+    effort: "high",
+    fallback: false,
+  });
+  assert.equal(service.activeRoute("user-thread").turnId, "public-user-turn-1");
+  configStore.update("opencodex.smart-model-router", {
+    expectedRevision: 1,
+    values: { showRouteInSummary: false },
+  });
+  assert.equal(service.activeRoute("user-thread"), null);
+  configStore.update("opencodex.smart-model-router", {
+    expectedRevision: 2,
+    values: { showRouteInSummary: true },
+  });
+  assert.equal(service.activeRoute("user-thread").turnId, "public-user-turn-1");
+  fake.serverOutput.write(
+    `${JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "user-thread", turn: { id: "public-user-turn-1", status: "completed" } },
+    })}\n`
+  );
+  await waitFor(() => service.activeRoute("user-thread") === null);
 
   classifierText = JSON.stringify({
     route: {
@@ -226,6 +265,15 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
   );
   assert.equal(missingEffortTurn.params.model, "gpt-5.3-codex-spark");
   assert.equal(missingEffortTurn.params.effort, "low");
+  fake.serverOutput.write(
+    `${JSON.stringify({
+      method: "turn/completed",
+      params: {
+        threadId: "user-thread",
+        turn: { id: "public-user-turn-missing-effort", status: "completed" },
+      },
+    })}\n`
+  );
 
   classifierText = "invalid-json";
   await writeRequest(fake.child.stdin, {
@@ -242,6 +290,13 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
   assert.equal(fallbackTurn.params.model, "gpt-5.3-codex-spark");
   assert.equal(fallbackTurn.params.effort, "low");
   await waitFor(() => publicMessages.find((message) => message.id === "user-turn-2"));
+  fake.serverOutput.write(
+    `${JSON.stringify({
+      method: "turn/interrupted",
+      params: { threadId: "user-thread", turn: { id: "public-user-turn-2", status: "interrupted" } },
+    })}\n`
+  );
+  await waitFor(() => service.activeRoute("user-thread") === null);
 
   assert.equal(publicMessages.some((message) => String(message.id || "").startsWith("opencodex.router:")), false);
   assert.equal(publicMessages.some((message) => String(message.params?.threadId || "").startsWith("classifier-")), false);

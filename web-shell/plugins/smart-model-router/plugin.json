@@ -11,6 +11,7 @@
   "defaultEnabled": false,
   "order": 5,
   "settings": [
+    { "id": "showRouteInSummary", "type": "boolean", "defaultValue": true, "labelKey": "plugin.smartModelRouter.setting.showRouteInSummary", "descriptionKey": "plugin.smartModelRouter.setting.showRouteInSummary.description", "order": 1 },
     { "id": "classifierModel", "type": "model", "defaultValue": "gpt-5.3-codex-spark", "labelKey": "plugin.smartModelRouter.setting.model", "order": 10 },
     { "id": "classifierEffort", "type": "reasoning-effort", "defaultValue": "low", "labelKey": "plugin.smartModelRouter.setting.effort", "order": 11 },
     { "id": "economyModel", "type": "model", "defaultValue": "gpt-5.3-codex-spark", "labelKey": "plugin.smartModelRouter.setting.model", "order": 20 },

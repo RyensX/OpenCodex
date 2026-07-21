@@ -54,6 +54,7 @@ test("gateway plugin config validates types, writes atomically and detects revis
   assert.equal(plugin.enabled, false);
   assert.equal(plugin.values.classifierModel, "gpt-5.3-codex-spark");
   assert.equal(plugin.values.classifierEffort, "low");
+  assert.equal(plugin.values.showRouteInSummary, true);
   assert.equal(
     ["economy", "balanced", "complex", "frontier", "fallback"].every(
       (tier) => plugin.values[`${tier}Effort`] === "auto"
@@ -240,6 +241,8 @@ test("plugin HTTP API exposes revisioned config and reports conflicts", async (t
   const pluginService = {
     configStore: store,
     modelRouter: {
+      activeRoute: (threadId) =>
+        threadId === "thread-running" ? { threadId, turnId: "turn-1", model: "spark", effort: "low" } : null,
       diagnostics: () => ({ enabled: false }),
       listModels: async () => [{ id: "spark", model: "spark" }],
     },
@@ -271,4 +274,19 @@ test("plugin HTTP API exposes revisioned config and reports conflicts", async (t
   assert.equal(conflictResponse.status, 409);
   assert.equal(conflict.errorKey, "plugin_config_revision_conflict");
   assert.equal(conflict.current.revision, 1);
+
+  const activeRouteResponse = responseRecorder();
+  const activeRouteRequest = new EventEmitter();
+  activeRouteRequest.method = "GET";
+  assert.equal(
+    await handleOpenCodexPluginApi(
+      activeRouteRequest,
+      activeRouteResponse,
+      new URL("http://localhost/api/opencodex/model-router/active-route?threadId=thread-running"),
+      pluginService
+    ),
+    true
+  );
+  assert.equal(activeRouteResponse.status, 200);
+  assert.equal(JSON.parse(activeRouteResponse.body).route.turnId, "turn-1");
 });

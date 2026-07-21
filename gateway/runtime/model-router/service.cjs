@@ -18,6 +18,7 @@ const {
 } = require("./resolver.cjs");
 const { createAutoStateStore } = require("./state-store.cjs");
 const { createAppServerTransport } = require("./transport.cjs");
+const { createTurnRouteStatus } = require("./turn-route-status.cjs");
 const { createVirtualModelController, isAuto, requestKey } = require("./virtual-model.cjs");
 
 function createSmartModelRouterService({ configStore, stateFilePath, classifierOptions = {} }) {
@@ -27,7 +28,18 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
   const usageByThread = new Map();
   const externalRequests = new Map();
   const threadRoutingChains = new Map();
+  const turnRouteStatus = createTurnRouteStatus();
+  const routeStatusListeners = new Set();
   let catalogRefreshPromise = null;
+
+  function emitRouteStatus(event) {
+    for (const listener of Array.from(routeStatusListeners)) {
+      try {
+        // 展示事件只携带状态和安全路由摘要，不能把分类 rationale 或用户输入带出核心。
+        listener(event);
+      } catch {}
+    }
+  }
 
   function pluginConfig() {
     return configStore.plugin(SMART_ROUTER_PLUGIN_ID) || { enabled: false, values: {} };
@@ -41,6 +53,16 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     return resolveFallbackRoute({ configValues: pluginConfig().values, models: catalog.models() });
   }
 
+  function modelDisplayName(modelId) {
+    const normalizedModelId = String(modelId || "");
+    if (!normalizedModelId) return "";
+    const model = catalog
+      .models()
+      .find((candidate) => String(candidate?.model || candidate?.id || "") === normalizedModelId);
+    // 展示名称来自当前账号的真实模型目录；目录尚未就绪时保守回退到协议 ID。
+    return String(model?.displayName || normalizedModelId).trim() || normalizedModelId;
+  }
+
   let virtualModel;
   let classifier;
   const transport = createAppServerTransport({
@@ -49,6 +71,8 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     onClosed() {
       catalog.clear();
       catalogRefreshPromise = null;
+      // App Server 连接断开即表示没有仍可确认的真实执行，防止任务摘要显示过期状态。
+      turnRouteStatus.clearAll();
     },
   });
   virtualModel = createVirtualModelController({ stateStore, isEnabled, fallbackRoute, catalog });
@@ -211,6 +235,12 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       route = fallbackRoute();
     }
     rewriteTurn(message, route);
+    turnRouteStatus.select({
+      requestKey: requestKey(message.id),
+      threadId,
+      route,
+    });
+    emitRouteStatus({ status: "selected", threadId, route });
     // 分类期间用户可能已经切回手动模型；此时仍完成已开始的当前回合，但不能覆盖新的手动状态。
     if (stateStore.isThreadAuto(threadId)) stateStore.recordRoute(threadId, route);
     diagnosticLog("model-router", "route_selected", {
@@ -239,6 +269,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     if (original?.id != null && typeof original.method === "string") {
       externalRequests.set(requestKey(original.id), {
         method: original.method,
+        requestKey: requestKey(original.id),
         threadId: String(original.params?.threadId || ""),
       });
     }
@@ -247,7 +278,12 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     if (message?.method === "turn/start") {
       const threadId = String(message.params?.threadId || "");
       // 同一线程严格按 turn 顺序路由，不同线程仍可并发占用两个分类 permit。
-      if (prepared.autoTurn) await routeAutoTurnInThreadOrder(message, threadId);
+      if (prepared.autoTurn) {
+        emitRouteStatus({ status: "classifying", threadId });
+        await routeAutoTurnInThreadOrder(message, threadId);
+      } else {
+        emitRouteStatus({ status: "cleared", threadId });
+      }
       appendUserInput(threadId, message.params?.input);
     }
     return concreteGuard(message);
@@ -288,7 +324,19 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       const history = userInputsFromTurns([...filtered.result.data].reverse());
       historyByThread.set(meta.threadId, history);
     }
-    return virtualModel.processServerMessage(filtered);
+    const withRouteStatus = turnRouteStatus.processServerMessage(filtered, meta);
+    const threadId = String(withRouteStatus?.params?.threadId || withRouteStatus?.params?.thread?.id || meta?.threadId || "");
+    if (withRouteStatus?.method === "turn/started" && threadId) {
+      const route = turnRouteStatus.activeRoute(threadId);
+      if (route) emitRouteStatus({ status: "started", threadId, route });
+    } else if (["turn/completed", "turn/failed", "turn/interrupted"].includes(withRouteStatus?.method) && threadId) {
+      emitRouteStatus({ status: "cleared", threadId });
+    } else if (withRouteStatus?.id != null && meta?.method === "turn/start" && withRouteStatus.error && threadId) {
+      emitRouteStatus({ status: "cleared", threadId });
+    } else if (["thread/deleted", "thread/unsubscribed"].includes(withRouteStatus?.method) && threadId) {
+      emitRouteStatus({ status: withRouteStatus.method === "thread/deleted" ? "deleted" : "unsubscribed", threadId });
+    }
+    return virtualModel.processServerMessage(withRouteStatus);
   }
 
   return {
@@ -304,23 +352,39 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
         classifier: classifier.status(),
         defaultAuto: state.default.auto === true,
         autoThreadCount: Object.values(state.threads).filter((thread) => thread.auto).length,
+        activeRouteCount: Object.keys(turnRouteStatus.snapshot().active).length,
       };
     },
     dispose(error = new Error("smart model router disposed")) {
       stopConfigListener();
+      routeStatusListeners.clear();
+      turnRouteStatus.clearAll();
       transport.rejectPending(error);
     },
     isEnabled,
+    onRouteStatus(listener) {
+      if (typeof listener !== "function") return () => {};
+      routeStatusListeners.add(listener);
+      return () => routeStatusListeners.delete(listener);
+    },
+    activeRoute(threadId) {
+      const config = pluginConfig();
+      if (!config.enabled || config.values?.showRouteInSummary === false) return null;
+      const route = turnRouteStatus.activeRoute(threadId);
+      return route ? { ...route, displayName: modelDisplayName(route.model) } : null;
+    },
     async listModels() {
       if (catalog.models().length === 0) await refreshCatalog();
       return catalog.models();
     },
     modelCatalog: catalog,
+    modelDisplayName,
     processClientMessage,
     processServerMessage,
     refreshCatalog,
     stateStore,
     transport,
+    turnRouteStatus,
     virtualModel,
   };
 }

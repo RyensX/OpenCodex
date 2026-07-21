@@ -22,6 +22,20 @@ const SMART_SCHEDULING_COMPOSER = path.resolve(
   "web-shell",
   "codex-smart-model-router-composer.js"
 );
+const SMART_SCHEDULING_SUMMARY = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "web-shell",
+  "codex-smart-scheduling-summary.js"
+);
+const SMART_SCHEDULING_SUMMARY_CSS = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "web-shell",
+  "codex-smart-scheduling-summary.css"
+);
 const SMART_SCHEDULING_PLUGIN_DIR = path.resolve(
   __dirname,
   "..",
@@ -144,7 +158,7 @@ test("injects remote file actions after the bridge polyfill", (t) => {
   );
 });
 
-test("injects smart scheduling into the authenticated Codex settings page", (t) => {
+test("injects smart scheduling settings and summary into the authenticated renderer", (t) => {
   const webviewDir = makeOfficialWebviewDir(t);
   const service = createService(webviewDir);
   const html = service.createRendererResponse();
@@ -152,9 +166,15 @@ test("injects smart scheduling into the authenticated Codex settings page", (t) 
   assert.match(html, /codex-smart-model-router-settings\.css/);
   assert.match(html, /codex-smart-model-router-settings\.js/);
   assert.match(html, /codex-smart-model-router-composer\.js/);
+  assert.match(html, /codex-smart-scheduling-summary\.css/);
+  assert.match(html, /codex-smart-scheduling-summary\.js/);
   assert.equal(
     service.staticFile("/codex-smart-model-router-settings.js"),
     path.resolve(__dirname, "..", "..", "web-shell", "codex-smart-model-router-settings.js")
+  );
+  assert.equal(
+    service.staticFile("/codex-smart-scheduling-summary.js"),
+    path.resolve(__dirname, "..", "..", "web-shell", "codex-smart-scheduling-summary.js")
   );
 });
 
@@ -166,6 +186,7 @@ test("smart scheduling hides placeholder effort only while the composer model is
   assert.match(source, /data-model-picker-model-row/);
   assert.match(source, /removeAttribute\("data-opencodex-auto-model"\)/);
   assert.match(source, /opencodexAutoEffortItem/);
+  assert.match(source, /get autoSelected\(\)/);
 });
 
 test("smart scheduling reuses Codex picker styling without repeated model identities", () => {
@@ -189,8 +210,55 @@ test("smart scheduling settings localize tier and field labels", () => {
   assert.equal(en["plugin.smartModelRouter.group.balanced"], "Balanced");
   assert.equal(zh["plugin.smartModelRouter.setting.model"], "模型");
   assert.equal(en["plugin.smartModelRouter.setting.effort"], "Reasoning effort");
+  assert.equal(zh["plugin.smartModelRouter.group.display"], "显示");
+  assert.equal(zh["plugin.smartModelRouter.summary.title"], "智能调度");
+  assert.equal(zh["plugin.smartModelRouter.summary.model"], "模型");
+  assert.equal(zh["plugin.smartModelRouter.summary.effort"], "推理强度");
+  assert.equal(zh["plugin.smartModelRouter.summary.determining"], "正在判断…");
+  assert.equal(en["plugin.smartModelRouter.summary.title"], "Smart scheduling");
+  assert.equal(en["plugin.smartModelRouter.summary.model"], "Model");
+  assert.equal(en["plugin.smartModelRouter.summary.effort"], "Reasoning effort");
+  assert.equal(en["plugin.smartModelRouter.summary.determining"], "Determining…");
+  assert.equal(manifest.settings.find((setting) => setting.id === "showRouteInSummary").defaultValue, true);
   assert.equal(manifest.settings.find((setting) => setting.id === "balancedModel").labelKey, "plugin.smartModelRouter.setting.model");
   assert.match(fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8"), /label: effort/);
+});
+
+test("smart scheduling summary follows root-path task context and only active Auto turns", () => {
+  const source = fs.readFileSync(SMART_SCHEDULING_SUMMARY, "utf-8");
+  const styles = fs.readFileSync(SMART_SCHEDULING_SUMMARY_CSS, "utf-8");
+  const bridge = fs.readFileSync(path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js"), "utf-8");
+
+  // 独立分类复用官方摘要面板结构，所有文案读取插件 i18n，并覆盖三类终止路径。
+  assert.match(source, /data-pip-obstacle="thread-summary-panel/);
+  assert.match(source, /plugin\.smartModelRouter\.summary\.title/);
+  assert.match(source, /plugin\.smartModelRouter\.summary\.model/);
+  assert.match(source, /plugin\.smartModelRouter\.summary\.effort/);
+  assert.match(source, /plugin\.smartModelRouter\.summary\.determining/);
+  assert.match(source, /thread-summary-panel-item-label/);
+  assert.match(source, /opencodex\/smart-scheduling/);
+  assert.match(source, /turn\/started/);
+  assert.match(source, /turn\/completed/);
+  assert.match(source, /turn\/failed/);
+  assert.match(source, /turn\/interrupted/);
+  assert.match(source, /VISIBLE_THREAD_METHODS/);
+  assert.match(source, /direction === "client"/);
+  assert.match(source, /visibleThreadId/);
+  assert.match(source, /isAutoTurn/);
+  assert.match(source, /PROTOCOL_ENVELOPE_KEYS/);
+  assert.match(source, /selectVisibleThread\(threadId\)/);
+  assert.match(source, /pending\?\.pending \|\| autoSelected/);
+  assert.match(source, /active-route\?threadId=/);
+  assert.match(source, /get diagnostics\(\)/);
+  assert.doesNotMatch(source, /environmentTitles|findEnvironment/);
+  assert.doesNotMatch(source, /rationale/);
+  assert.match(bridge, /OpenCodexSmartSchedulingBridgeDiagnostics/);
+  assert.match(bridge, /protocolFrames/);
+  assert.match(bridge, /handleSmartSchedulingGatewayMessage/);
+  assert.match(source, /handleRouteEvent/);
+  assert.match(source, /value\.displayName \|\| modelId/);
+  assert.match(styles, /max-width: 75% !important/);
+  assert.doesNotMatch(styles, /flex: 1 1 auto/);
 });
 
 test("web shell exposes only the smart router gateway switch before authentication", () => {

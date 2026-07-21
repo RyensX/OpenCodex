@@ -16,6 +16,7 @@ const {
   resolveTierRoute,
 } = require("../runtime/model-router/resolver.cjs");
 const { createAutoStateStore } = require("../runtime/model-router/state-store.cjs");
+const { ROUTE_METADATA_KEY, createTurnRouteStatus } = require("../runtime/model-router/turn-route-status.cjs");
 
 function tempFile(t, name) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-router-test-"));
@@ -167,4 +168,50 @@ test("auto state survives restart and clear keeps the last concrete route", (t) 
   assert.equal(second.isDefaultAuto(), false);
   assert.equal(second.isThreadAuto("thread-1"), false);
   assert.equal(second.threadState("thread-1").lastModel, "terra");
+});
+
+test("turn route status is visible only between real turn start and termination", () => {
+  const status = createTurnRouteStatus();
+  status.select({
+    requestKey: "string:user-turn",
+    threadId: "thread-1",
+    route: { tier: "balanced", model: "luna", effort: "high", fallback: false, rationale: "private" },
+  });
+
+  const started = status.processServerMessage({
+    method: "turn/started",
+    params: { threadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } },
+  });
+  const metadata = started.params._meta[ROUTE_METADATA_KEY];
+  assert.deepEqual(metadata, { tier: "balanced", model: "luna", effort: "high", fallback: false });
+  assert.equal(JSON.stringify(metadata).includes("private"), false);
+  assert.equal(status.activeRoute("thread-1").turnId, "turn-1");
+
+  status.processServerMessage({
+    method: "turn/completed",
+    params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } },
+  });
+  assert.equal(status.activeRoute("thread-1"), null);
+
+  // 手动模型回合没有调度元数据，也不能沿用已结束的展示状态。
+  const manual = status.processServerMessage({
+    method: "turn/started",
+    params: { threadId: "thread-1", turn: { id: "turn-2", status: "inProgress" } },
+  });
+  assert.equal(manual.params._meta, undefined);
+  assert.equal(status.activeRoute("thread-1"), null);
+});
+
+test("failed external turn start cancels its pending route", () => {
+  const status = createTurnRouteStatus();
+  status.select({
+    requestKey: "string:user-turn",
+    threadId: "thread-1",
+    route: { tier: "economy", model: "spark", effort: "low" },
+  });
+  status.processServerMessage(
+    { id: "user-turn", error: { message: "rejected" } },
+    { method: "turn/start", requestKey: "string:user-turn", threadId: "thread-1" }
+  );
+  assert.equal(status.snapshot().pendingCount, 0);
 });

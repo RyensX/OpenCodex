@@ -25,6 +25,8 @@ const OPENCODEX_GATEWAY_PLUGIN_SWITCHES_PATH = "/opencodex-gateway-plugin-switch
 const CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH = "/codex-smart-model-router-settings.css";
 const CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH = "/codex-smart-model-router-settings.js";
 const CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH = "/codex-smart-model-router-composer.js";
+const CODEX_SMART_SCHEDULING_SUMMARY_CSS_PATH = "/codex-smart-scheduling-summary.css";
+const CODEX_SMART_SCHEDULING_SUMMARY_PATH = "/codex-smart-scheduling-summary.js";
 const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overlay.css";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
@@ -61,6 +63,11 @@ const WEB_SHELL_STATIC_FILES = new Map([
   ],
   [CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH, path.join(WEB_SHELL_DIR, "codex-smart-model-router-settings.js")],
   [CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH, path.join(WEB_SHELL_DIR, "codex-smart-model-router-composer.js")],
+  [
+    CODEX_SMART_SCHEDULING_SUMMARY_CSS_PATH,
+    path.join(WEB_SHELL_DIR, "codex-smart-scheduling-summary.css"),
+  ],
+  [CODEX_SMART_SCHEDULING_SUMMARY_PATH, path.join(WEB_SHELL_DIR, "codex-smart-scheduling-summary.js")],
   [OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH, path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
@@ -134,12 +141,14 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<meta name="apple-mobile-web-app-status-bar-style" content="default">',
       `<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH}">`,
       `<link id="codex-smart-model-router-settings-styles" rel="stylesheet" href="${CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH}">`,
+      `<link id="codex-smart-scheduling-summary-styles" rel="stylesheet" href="${CODEX_SMART_SCHEDULING_SUMMARY_CSS_PATH}">`,
       `<link id="codex-web-workspace-root-picker-styles" rel="stylesheet" href="${CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH}">`,
       '<script src="/codex-web-config.js"></script>',
       `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
       `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
       `<script src="${CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH}"></script>`,
       `<script src="${CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH}"></script>`,
+      `<script src="${CODEX_SMART_SCHEDULING_SUMMARY_PATH}"></script>`,
       `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
       `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
       `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,

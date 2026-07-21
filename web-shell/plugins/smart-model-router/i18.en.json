@@ -10,6 +10,11 @@
   "plugin.smartModelRouter.settings.saved": "Saved",
   "plugin.smartModelRouter.settings.conflict": "Another page changed this configuration. The latest revision was loaded; please retry.",
   "plugin.smartModelRouter.settings.failed": "Could not save",
+  "plugin.smartModelRouter.summary.title": "Smart scheduling",
+  "plugin.smartModelRouter.summary.model": "Model",
+  "plugin.smartModelRouter.summary.effort": "Reasoning effort",
+  "plugin.smartModelRouter.summary.determining": "Determining…",
+  "plugin.smartModelRouter.group.display": "Display",
   "plugin.smartModelRouter.group.classifier": "Classifier",
   "plugin.smartModelRouter.group.economy": "Economy",
   "plugin.smartModelRouter.group.balanced": "Balanced",
@@ -17,5 +22,7 @@
   "plugin.smartModelRouter.group.frontier": "Frontier",
   "plugin.smartModelRouter.group.fallback": "Fallback",
   "plugin.smartModelRouter.setting.model": "Model",
-  "plugin.smartModelRouter.setting.effort": "Reasoning effort"
+  "plugin.smartModelRouter.setting.effort": "Reasoning effort",
+  "plugin.smartModelRouter.setting.showRouteInSummary": "Show scheduling result",
+  "plugin.smartModelRouter.setting.showRouteInSummary.description": "Show the actual model and reasoning effort in the task summary only while an Auto turn is running."
 }

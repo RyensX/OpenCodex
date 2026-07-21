@@ -10,6 +10,11 @@
   "plugin.smartModelRouter.settings.saved": "已保存",
   "plugin.smartModelRouter.settings.conflict": "配置已被其他页面修改，已加载最新版本，请重试。",
   "plugin.smartModelRouter.settings.failed": "保存失败",
+  "plugin.smartModelRouter.summary.title": "智能调度",
+  "plugin.smartModelRouter.summary.model": "模型",
+  "plugin.smartModelRouter.summary.effort": "推理强度",
+  "plugin.smartModelRouter.summary.determining": "正在判断…",
+  "plugin.smartModelRouter.group.display": "显示",
   "plugin.smartModelRouter.group.classifier": "分类器",
   "plugin.smartModelRouter.group.economy": "经济",
   "plugin.smartModelRouter.group.balanced": "均衡",
@@ -17,5 +22,7 @@
   "plugin.smartModelRouter.group.frontier": "前沿",
   "plugin.smartModelRouter.group.fallback": "失败回退",
   "plugin.smartModelRouter.setting.model": "模型",
-  "plugin.smartModelRouter.setting.effort": "推理强度"
+  "plugin.smartModelRouter.setting.effort": "推理强度",
+  "plugin.smartModelRouter.setting.showRouteInSummary": "显示调度结果",
+  "plugin.smartModelRouter.setting.showRouteInSummary.description": "仅在 Auto 回合执行期间，在任务摘要中显示实际采用的模型和推理强度。"
 }

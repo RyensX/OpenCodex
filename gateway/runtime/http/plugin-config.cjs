@@ -63,6 +63,25 @@ async function handleOpenCodexPluginApi(req, res, url, pluginService) {
     );
     return true;
   }
+  if (pathname === "/api/opencodex/model-router/active-route") {
+    if (req.method !== "GET") {
+      sendJson(res, 405, { ok: false, error: "Method Not Allowed" }, { allow: "GET" });
+      return true;
+    }
+    const threadId = String(url.searchParams.get("threadId") || "").trim();
+    if (!threadId) {
+      sendJson(res, 400, { ok: false, error: "threadId is required" }, { "cache-control": "no-store" });
+      return true;
+    }
+    // 只返回仍在执行的安全路由摘要；完成后的历史结果不会由该接口暴露。
+    sendJson(
+      res,
+      200,
+      { ok: true, route: pluginService.modelRouter.activeRoute(threadId) },
+      { "cache-control": "no-store" }
+    );
+    return true;
+  }
   const pluginId = pluginIdFromPath(pathname);
   if (!pluginId) return false;
   if (req.method !== "PATCH") {

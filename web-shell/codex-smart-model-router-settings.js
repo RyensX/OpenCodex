@@ -6,7 +6,7 @@
   const FEATURE = "smart-model-router";
   const NAV_SLUG = "opencodex-smart-model-router";
   const EFFORTS = ["auto", "low", "medium", "high", "xhigh", "max", "ultra"];
-  const GROUPS = ["classifier", "economy", "balanced", "complex", "frontier", "fallback"];
+  const GROUPS = ["display", "classifier", "economy", "balanced", "complex", "frontier", "fallback"];
   // 官方 React 组件没有向注入脚本导出构造入口，因此复用其实际 trigger/menu DOM 约定和 Tailwind 样式类。
   const NATIVE_PICKER_TRIGGER_FALLBACK_CLASS = [
     "border-token-border no-drag cursor-interaction items-center gap-1 border whitespace-nowrap select-none",
@@ -30,7 +30,7 @@
       title: "智能调度",
       navLabel: "智能调度",
       accountNavLabel: "账户",
-      description: "配置 Auto 每轮分类时使用的分类器，以及各复杂度档位调度的模型和推理强度；强度选择 Auto 时采用分类器建议。",
+      description: "配置 Auto 每轮分类时使用的分类器，以及各复杂度档位调度的模型和推理强度；强度选择 auto 时采用分类器建议。",
       disabled: "智能调度当前已关闭。可在 OpenCodex 登录页的“设置 → 插件”中开启。",
       loading: "正在读取智能调度配置…",
       missing: "未发现智能调度配置。",
@@ -40,6 +40,7 @@
       conflict: "配置已被其他页面修改，已加载最新版本，请重试。",
       failed: "保存失败",
       groups: {
+        display: "显示",
         classifier: "分类器",
         economy: "经济",
         balanced: "均衡",
@@ -52,7 +53,7 @@
       title: "Smart scheduling",
       navLabel: "Smart scheduling",
       accountNavLabel: "Account",
-      description: "Configure the classifier, model, and reasoning effort for each tier. Auto effort follows the classifier recommendation.",
+      description: "Configure the classifier, model, and reasoning effort for each tier. auto effort follows the classifier recommendation.",
       disabled: "Smart scheduling is off. Enable it from Settings → Plugins on the OpenCodex sign-in page.",
       loading: "Loading smart scheduling configuration…",
       missing: "Smart scheduling configuration was not found.",
@@ -62,6 +63,7 @@
       conflict: "Another page changed this configuration. The latest revision was loaded; please retry.",
       failed: "Could not save",
       groups: {
+        display: "Display",
         classifier: "Classifier",
         economy: "Economy",
         balanced: "Balanced",
@@ -384,10 +386,39 @@
     );
   }
 
+  function setBooleanControlState(control, enabled) {
+    const checked = enabled === true;
+    control.setAttribute("aria-checked", checked ? "true" : "false");
+    control.dataset.state = checked ? "checked" : "unchecked";
+  }
+
+  function createBooleanControl(setting, configuredValue) {
+    const control = createElement("button", "opencodex-router-setting-control opencodex-router-switch");
+    control.type = "button";
+    control.setAttribute("role", "switch");
+    control.setAttribute("aria-label", localized(setting.labelKey, setting.label || setting.id));
+    control.appendChild(createElement("span", "opencodex-router-switch-thumb"));
+    setBooleanControlState(control, configuredValue === true);
+    control.addEventListener("click", () => {
+      const next = control.getAttribute("aria-checked") !== "true";
+      setBooleanControlState(control, next);
+      control.dispatchEvent(
+        new CustomEvent("opencodex-setting-change", {
+          bubbles: true,
+          detail: { settingId: setting.id, value: next },
+        })
+      );
+    });
+    return control;
+  }
+
   function createControl(setting, configuredValue) {
     let control;
     let unavailable = false;
-    if (["model", "reasoning-effort", "select"].includes(setting.type)) {
+    if (setting.type === "boolean") {
+      // 布尔配置使用与 Codex token 一致的 switch，不退化成文本输入框。
+      control = createBooleanControl(setting, configuredValue);
+    } else if (["model", "reasoning-effort", "select"].includes(setting.type)) {
       const choices = [];
       if (setting.type === "model") {
         const available = realModels();
@@ -448,7 +479,22 @@
 
   function settingGroup(settingId) {
     const normalized = String(settingId || "").toLowerCase();
+    if (normalized === "showrouteinsummary") return "display";
     return GROUPS.find((group) => normalized.startsWith(group)) || "fallback";
+  }
+
+  function notifySummaryConfiguration() {
+    const plugin = routerPlugin();
+    try {
+      w.dispatchEvent(
+        new CustomEvent("opencodex:smart-scheduling-config-changed", {
+          detail: {
+            enabled: plugin?.enabled === true,
+            showRouteInSummary: plugin?.values?.showRouteInSummary !== false,
+          },
+        })
+      );
+    } catch {}
   }
 
   function setStatus(text, error = false) {
@@ -470,6 +516,7 @@
     notice.hidden = !plugin || plugin.enabled === true;
     if (!plugin) {
       content.appendChild(createElement("p", "opencodex-router-settings-empty", c.missing));
+      notifySummaryConfiguration();
       return;
     }
 
@@ -499,6 +546,7 @@
       section.appendChild(rows);
       content.appendChild(section);
     }
+    notifySummaryConfiguration();
   }
 
   async function loadConfiguration() {

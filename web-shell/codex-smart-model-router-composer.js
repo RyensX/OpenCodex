@@ -13,6 +13,19 @@
     return Array.from(root.querySelectorAll(selector)).find((node) => !node.closest('[aria-hidden="true"]')) || null;
   }
 
+  function modelTextForTrigger(trigger) {
+    const officialText = visibleNode(trigger, MODEL_TEXT_SELECTOR)?.textContent?.trim();
+    if (officialText) return officialText;
+    // 官方样式类名可能随 bundle 更新；触发器自身的可见文本仍是稳定、语言无关的模型名兜底。
+    return String(trigger?.innerText || trigger?.textContent || "").trim();
+  }
+
+  function isAutoSelected() {
+    return Array.from(document.querySelectorAll(TRIGGER_SELECTOR)).some((trigger) => {
+      return modelTextForTrigger(trigger).toLowerCase() === AUTO_MODEL;
+    });
+  }
+
   function linkedMenu(trigger) {
     const menuId = trigger.getAttribute("aria-controls");
     return menuId ? document.getElementById(menuId) : null;
@@ -39,7 +52,7 @@
     const activeEffortItems = new Set();
 
     for (const trigger of document.querySelectorAll(TRIGGER_SELECTOR)) {
-      const modelText = visibleNode(trigger, MODEL_TEXT_SELECTOR)?.textContent?.trim() || "";
+      const modelText = modelTextForTrigger(trigger);
       const isAuto = modelText.toLowerCase() === AUTO_MODEL;
       if (isAuto) trigger.dataset.opencodexAutoModel = "true";
       else trigger.removeAttribute("data-opencodex-auto-model");
@@ -79,5 +92,11 @@
   });
   scheduleSync();
 
-  w.__OpenCodexSmartModelRouterComposer = Object.freeze({ sync: syncComposer });
+  w.__OpenCodexSmartModelRouterComposer = Object.freeze({
+    get autoSelected() {
+      // 供同一标签页内的展示模块判断分类阶段；真实路由结果仍以后端通知为准。
+      return isAutoSelected();
+    },
+    sync: syncComposer,
+  });
 })();

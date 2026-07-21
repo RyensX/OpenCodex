@@ -406,7 +406,7 @@ function createRequestHandler({ localFiles, pickedFiles, pluginService, staticAs
     }
 
     if (pathname === "/api/ipc/invoke" && req.method === "POST") {
-      return handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots);
+      return handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots, pluginService);
     }
 
     if (pathname === "/api/client-log" && req.method === "POST") {
@@ -440,7 +440,7 @@ function createRequestHandler({ localFiles, pickedFiles, pluginService, staticAs
   };
 }
 
-async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots) {
+async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots, pluginService) {
   /**
    * 浏览器把 Electron ipcRenderer.invoke/send 折叠成 HTTP POST。
    * gateway 在这里恢复 channel/args，并伪造 IpcMainEvent 交给官方 handler。
@@ -476,6 +476,8 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
     remoteAddress,
   };
   const suppressRoutineLog = shouldSuppressRoutineIpcLog(payload);
+  // 在请求进入官方 Main 前关联浏览器 client 与 thread，确保分类状态能定向回到发起页面。
+  pluginService?.smartSchedulingPresentation?.observeIpcInvoke({ channel, clientId, args });
   // 成功 IPC start/end 会跟随前端渲染频率放大；默认保留慢调用和失败日志，DEBUG 时再展开完整链路。
   if (DEBUG_LOGS && !suppressRoutineLog) diagnosticLog("gateway-ipc", "invoke_start", diagnosticBase);
   try {
@@ -591,7 +593,11 @@ async function createGateway() {
     createAppHostRelay: createOfficialAppHostRelay,
     handleNotificationEvent: handleOfficialNotificationEvent,
     isAuthed,
+    observeAppHostFrame(frame) {
+      pluginService.smartSchedulingPresentation?.observeAppHostFrame(frame);
+    },
   });
+  pluginService.bindSmartSchedulingPresentation({ sendTo: webSocketHub.sendTo });
   // official-runtime 通过这个 hub 把官方 renderer 的异步消息转发给浏览器。
   setWsHub(webSocketHub);
   installShutdownHandlers(server, localFiles, pickedFiles, pluginService);

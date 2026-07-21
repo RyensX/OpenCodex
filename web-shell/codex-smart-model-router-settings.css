@@ -160,6 +160,43 @@
   margin-top: 2px;
 }
 
+.opencodex-router-switch {
+  position: relative;
+  justify-self: end;
+  width: 36px;
+  height: 20px;
+  padding: 2px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-token-control-background, rgba(26, 28, 31, 0.18));
+  cursor: pointer;
+  transition: background-color 140ms ease;
+}
+
+.opencodex-router-switch[data-state="checked"] {
+  background: var(--color-token-accent-primary, #0a84ff);
+}
+
+.opencodex-router-switch:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-token-focus-border, #0a84ff) 36%, transparent);
+  outline-offset: 2px;
+}
+
+.opencodex-router-switch-thumb {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+  transform: translateX(0);
+  transition: transform 140ms ease;
+}
+
+.opencodex-router-switch[data-state="checked"] .opencodex-router-switch-thumb {
+  transform: translateX(16px);
+}
+
 [data-settings-panel-slug="opencodex-smart-model-router"][data-opencodex-active="true"] {
   background: var(--color-token-list-hover-background, rgba(0, 0, 0, 0.06));
   color: var(--color-token-text-primary, #111827);

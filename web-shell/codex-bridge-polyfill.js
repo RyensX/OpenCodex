@@ -99,6 +99,31 @@
     tokenUsageCapability?.handleGatewayPayload?.(payload);
   }
 
+  const smartSchedulingBridgeStats = { clientFrames: 0, serverFrames: 0, protocolFrames: 0 };
+
+  function handleSmartSchedulingAppHostData(data, direction) {
+    // 智能调度的展示状态由独立模块维护，bridge 只标记帧方向并保持原始内容透明转发。
+    if (direction === "client") smartSchedulingBridgeStats.clientFrames += 1;
+    else smartSchedulingBridgeStats.serverFrames += 1;
+    if (typeof data === "string" && (data.includes("turn/") || data.includes("thread/"))) {
+      smartSchedulingBridgeStats.protocolFrames += 1;
+    }
+    w.__OpenCodexSmartSchedulingSummary?.handleAppHostData?.(data, direction);
+  }
+
+  function handleSmartSchedulingGatewayMessage(message) {
+    if (!message || message.type !== "opencodex:smart-scheduling-route") return false;
+    w.__OpenCodexSmartSchedulingSummary?.handleRouteEvent?.(message.event);
+    return true;
+  }
+
+  w.__OpenCodexSmartSchedulingBridgeDiagnostics = Object.freeze({
+    snapshot() {
+      // 只返回方向计数，不保留 RPC 内容、任务 ID 或用户输入。
+      return { ...smartSchedulingBridgeStats };
+    },
+  });
+
   function gatewayAuthToken() {
     try {
       return String(w.__OPEN_CODEX_RUNTIME_AUTH_TOKEN__ || "").trim();
@@ -1831,6 +1856,7 @@
       return true;
     }
     handleTokenUsageAppHostData(data);
+    handleSmartSchedulingAppHostData(data, "server");
     try {
       state.port.postMessage(data);
       if (data === null) closeAppHostRelay(state, "official_closed", false);
@@ -1879,6 +1905,8 @@
           });
           return;
         }
+        // 当前官方 Web 路由固定为根路径；展示模块需从本标签页发出的 RPC 识别正在查看的 thread。
+        handleSmartSchedulingAppHostData(portData, "client");
         queueAppHostRelayPayload(state, { type: "app-host-port-message", data: portData });
         if (portData === null) closeAppHostRelay(state, "browser_closed", false);
       });
@@ -2872,6 +2900,7 @@
           }
           return;
         }
+        if (handleSmartSchedulingGatewayMessage(msg)) return;
         if (handleOpenCodexNotificationMessage(msg)) {
           if (WS_DEBUG_ENABLED) {
             maybeLogLargeOrSlowWsInbound({
