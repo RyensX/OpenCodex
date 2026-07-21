@@ -21,7 +21,7 @@ const { createAppServerTransport } = require("./transport.cjs");
 const { createTurnRouteStatus } = require("./turn-route-status.cjs");
 const { createVirtualModelController, isAuto, requestKey } = require("./virtual-model.cjs");
 
-function createSmartModelRouterService({ configStore, stateFilePath, classifierOptions = {} }) {
+function createSmartModelRouterService({ configStore, stateFilePath, classifierOptions = {}, injectionHealth = null }) {
   const stateStore = createAutoStateStore({ filePath: stateFilePath });
   const catalog = createModelCatalog();
   const historyByThread = new Map();
@@ -74,8 +74,19 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       // App Server 连接断开即表示没有仍可确认的真实执行，防止任务摘要显示过期状态。
       turnRouteStatus.clearAll();
     },
+    onAttached() {
+      injectionHealth?.reportGateway("app-server-router");
+    },
   });
-  virtualModel = createVirtualModelController({ stateStore, isEnabled, fallbackRoute, catalog });
+  virtualModel = createVirtualModelController({
+    stateStore,
+    isEnabled,
+    fallbackRoute,
+    catalog,
+    onAutoModelInjected() {
+      injectionHealth?.reportGateway("auto-model-catalog");
+    },
+  });
   classifier = createClassifier({ transport, ...classifierOptions });
 
   if (!isEnabled()) stateStore.clearAllAuto();

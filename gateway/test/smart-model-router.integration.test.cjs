@@ -79,13 +79,16 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
     enabled: true,
     values: { balancedEffort: "auto" },
   });
+  const injectionPoints = [];
   const service = createSmartModelRouterService({
     configStore,
     stateFilePath: path.join(runtimeDir, "router-state.json"),
     classifierOptions: { timeoutMs: 1_000 },
+    injectionHealth: { reportGateway: (point) => injectionPoints.push(point) },
   });
   const fake = fakeChild();
   service.decorateAppServerChild(fake.child);
+  assert.equal(injectionPoints.includes("app-server-router"), true);
   t.after(() => {
     service.dispose();
     fake.child.emit("close");
@@ -186,6 +189,7 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
   await writeRequest(fake.child.stdin, { id: "models", method: "model/list", params: { cursor: null } });
   const modelResponse = await waitFor(() => publicMessages.find((message) => message.id === "models"));
   assert.equal(modelResponse.result.data[0].model, "auto");
+  assert.equal(injectionPoints.includes("auto-model-catalog"), true);
 
   await writeRequest(fake.child.stdin, {
     id: "select-auto",

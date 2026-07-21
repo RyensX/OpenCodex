@@ -453,6 +453,8 @@
     w.addEventListener("opencodex:smart-scheduling-config-changed", (event) => applyConfiguration(event.detail));
     syncCurrentThread();
     void loadConfiguration();
+    // 协议观察和 DOM 观察均已安装后再回执，避免把单纯脚本下载当成摘要适配器注入成功。
+    void w.__OpenCodexSmartSchedulingInjectionHealth?.report("summary-adapter");
   }
 
   // bridge 只负责把原始 App Server 帧送入此独立展示模块，不承载任何路由或 DOM 逻辑。

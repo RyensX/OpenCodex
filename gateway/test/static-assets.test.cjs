@@ -15,6 +15,13 @@ const SMART_SCHEDULING_SETTINGS = path.resolve(
   "web-shell",
   "codex-smart-model-router-settings.js"
 );
+const SMART_SCHEDULING_INJECTION_HEALTH = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "web-shell",
+  "codex-smart-scheduling-injection-health.js"
+);
 const SMART_SCHEDULING_COMPOSER = path.resolve(
   __dirname,
   "..",
@@ -164,10 +171,19 @@ test("injects smart scheduling settings and summary into the authenticated rende
   const html = service.createRendererResponse();
 
   assert.match(html, /codex-smart-model-router-settings\.css/);
+  assert.match(html, /codex-smart-scheduling-injection-health\.js/);
   assert.match(html, /codex-smart-model-router-settings\.js/);
   assert.match(html, /codex-smart-model-router-composer\.js/);
   assert.match(html, /codex-smart-scheduling-summary\.css/);
   assert.match(html, /codex-smart-scheduling-summary\.js/);
+  assert.equal(
+    html.indexOf("codex-smart-scheduling-injection-health.js") < html.indexOf("codex-smart-model-router-settings.js"),
+    true
+  );
+  assert.equal(
+    service.staticFile("/codex-smart-scheduling-injection-health.js"),
+    SMART_SCHEDULING_INJECTION_HEALTH
+  );
   assert.equal(
     service.staticFile("/codex-smart-model-router-settings.js"),
     path.resolve(__dirname, "..", "..", "web-shell", "codex-smart-model-router-settings.js")
@@ -202,6 +218,19 @@ test("smart scheduling reuses Codex picker styling without repeated model identi
   assert.doesNotMatch(source, /createElement\("select"/);
 });
 
+test("smart scheduling injection health reports every renderer injection point", () => {
+  const health = fs.readFileSync(SMART_SCHEDULING_INJECTION_HEALTH, "utf-8");
+  const settings = fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8");
+  const composer = fs.readFileSync(SMART_SCHEDULING_COMPOSER, "utf-8");
+  const summary = fs.readFileSync(SMART_SCHEDULING_SUMMARY, "utf-8");
+
+  assert.match(health, /api\/opencodex\/model-router\/injections/);
+  assert.match(health, /data-opencodex-smart-scheduling-injection-health/);
+  assert.match(settings, /report\("settings-page"\)/);
+  assert.match(composer, /report\("composer-adapter"\)/);
+  assert.match(summary, /report\("summary-adapter"\)/);
+});
+
 test("smart scheduling settings localize tier and field labels", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(SMART_SCHEDULING_PLUGIN_DIR, "plugin.json"), "utf-8"));
   const zh = JSON.parse(fs.readFileSync(path.join(SMART_SCHEDULING_PLUGIN_DIR, "i18.zh.json"), "utf-8"));
@@ -224,6 +253,19 @@ test("smart scheduling settings localize tier and field labels", () => {
   assert.equal(en["plugin.smartModelRouter.summary.model"], "Model");
   assert.equal(en["plugin.smartModelRouter.summary.effort"], "Reasoning effort");
   assert.equal(en["plugin.smartModelRouter.summary.determining"], "Determining…");
+  assert.equal(zh["plugin.smartModelRouter.health.title"], "功能健康");
+  assert.equal(zh["plugin.smartModelRouter.health.point.app-server-router"], "路由装饰器");
+  assert.equal(zh["plugin.smartModelRouter.health.point.auto-model-catalog"], "模型注入");
+  assert.equal(zh["plugin.smartModelRouter.health.point.settings-page"], "智能调度设置注入");
+  assert.equal(zh["plugin.smartModelRouter.health.point.composer-adapter"], "适配器注入");
+  assert.equal(zh["plugin.smartModelRouter.health.point.summary-adapter"], "摘要适配器注入");
+  assert.equal(zh["plugin.smartModelRouter.health.point.route-presentation"], "路由状态展示桥绑定");
+  assert.equal(en["plugin.smartModelRouter.health.summary.ok"], "All injection points are healthy");
+  const injectionHealthSource = fs.readFileSync(SMART_SCHEDULING_INJECTION_HEALTH, "utf-8");
+  assert.doesNotMatch(injectionHealthSource, /health-detail/);
+  // 健康标题必须保留在卡片内部，并与其他设置卡片处于同一层级。
+  assert.match(injectionHealthSource, /card\.appendChild\(header\)/);
+  assert.match(injectionHealthSource, /root\.appendChild\(card\)/);
   assert.equal(manifest.settings.find((setting) => setting.id === "showRouteInSummary").defaultValue, true);
   assert.equal(manifest.settings.find((setting) => setting.id === "balancedModel").labelKey, "plugin.smartModelRouter.setting.model");
   assert.match(fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8"), /label: effort/);

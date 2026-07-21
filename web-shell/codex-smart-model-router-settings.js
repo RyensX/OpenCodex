@@ -149,6 +149,11 @@
     return (snapshot.plugins || []).find((plugin) => plugin.feature === FEATURE) || null;
   }
 
+  function reportInjection() {
+    // 只回执设置入口已真正插入官方导航；上报失败不能影响设置页本身。
+    void w.__OpenCodexSmartSchedulingInjectionHealth?.report("settings-page");
+  }
+
   function modelValue(model) {
     return String(model?.model || model?.id || "");
   }
@@ -599,9 +604,12 @@
     );
     const disabled = createElement("p", "opencodex-router-settings-disabled", c.disabled);
     disabled.hidden = true;
+    const injectionHealth = createElement("div", "opencodex-router-injection-health");
+    injectionHealth.dataset.opencodexSmartSchedulingInjectionHealth = "true";
     content.append(
       header,
       disabled,
+      injectionHealth,
       createElement("p", "opencodex-router-settings-status", ""),
       createElement("div", "opencodex-router-settings-groups")
     );
@@ -696,6 +704,7 @@
     if (existing) {
       navigationItem = existing;
       applyAccountNavigationIcon(existing);
+      reportInjection();
       return existing;
     }
     const anchorRoot = navigationRoot(anchorButton);
@@ -719,6 +728,7 @@
     });
     anchorRoot.parentElement?.insertBefore(cloneRoot, anchorRoot.nextSibling);
     navigationItem = button;
+    if (button.isConnected) reportInjection();
     return button;
   }
 

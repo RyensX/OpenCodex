@@ -68,6 +68,94 @@
   color: var(--color-token-error-foreground, #b42318);
 }
 
+.opencodex-router-injection-health {
+  /* 健康卡片与其他配置卡片使用同一 22px 间距。 */
+  margin-bottom: 22px;
+}
+
+.opencodex-router-injection-health + .opencodex-router-settings-status:empty {
+  display: none;
+}
+
+.opencodex-router-health-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--color-token-border-default, rgba(26, 28, 31, 0.1));
+  background: var(--color-token-main-surface-secondary, #fafafa);
+  padding-right: 14px;
+}
+
+.opencodex-router-health-header .opencodex-router-settings-group-title {
+  flex: 1;
+  border-bottom: 0;
+  background: transparent;
+}
+
+.opencodex-router-health-summary {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  color: var(--color-token-text-secondary, #4b5563);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.opencodex-router-health-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-token-text-tertiary, #9ca3af);
+}
+
+.opencodex-router-health-summary[data-status="ok"] .opencodex-router-health-dot,
+.opencodex-router-health-row[data-status="ok"] .opencodex-router-health-dot {
+  background: var(--color-token-success-foreground, #16a34a);
+}
+
+.opencodex-router-health-summary[data-status="error"] .opencodex-router-health-dot,
+.opencodex-router-health-row[data-status="missing"] .opencodex-router-health-dot {
+  background: var(--color-token-error-foreground, #dc2626);
+}
+
+.opencodex-router-health-version {
+  margin: 0;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--color-token-border-default, rgba(26, 28, 31, 0.08));
+  color: var(--color-token-text-tertiary, #6b7280);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.opencodex-router-health-rows {
+  display: grid;
+}
+
+.opencodex-router-health-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 8px;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 14px;
+  border-top: 1px solid var(--color-token-border-default, rgba(26, 28, 31, 0.08));
+}
+
+.opencodex-router-health-row:first-child {
+  border-top: 0;
+}
+
+.opencodex-router-health-label {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
 .opencodex-router-settings-groups {
   display: grid;
   gap: 22px;
@@ -221,6 +309,12 @@
   .opencodex-router-setting-row {
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+
+  .opencodex-router-health-row {
+    grid-template-columns: minmax(0, 1fr) 8px;
+    padding-top: 9px;
+    padding-bottom: 9px;
   }
 }
 

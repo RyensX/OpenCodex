@@ -568,7 +568,12 @@ async function createGateway() {
    */
   ensureDir(REPORTS_DIR);
   // 插件配置和路由服务必须先创建，才能在官方 bootstrap 拉起 App Server 的瞬间装饰其 stdio。
-  const pluginService = createGatewayPluginService();
+  const pluginService = createGatewayPluginService({
+    getRuntimeIdentity() {
+      const bundle = getOfficialBundle();
+      return { version: bundle?.version, build: bundle?.build };
+    },
+  });
   // 先启动官方 runtime，确保后续 health/IPC 路由能看到官方 handler 注册状态。
   await startOfficialRuntime({ decorateAppServerChild: pluginService.modelRouter.decorateAppServerChild });
 

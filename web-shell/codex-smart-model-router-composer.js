@@ -91,6 +91,8 @@
     subtree: true,
   });
   scheduleSync();
+  // observer 安装完成才代表 Composer 适配器已注入；回执请求保持旁路，不参与 DOM 同步。
+  void w.__OpenCodexSmartSchedulingInjectionHealth?.report("composer-adapter");
 
   w.__OpenCodexSmartModelRouterComposer = Object.freeze({
     get autoSelected() {

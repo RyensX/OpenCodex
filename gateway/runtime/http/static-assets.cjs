@@ -23,6 +23,7 @@ const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
 const OPENCODEX_PLUGIN_SYSTEM_PATH = "/opencodex-plugin-system.js";
 const OPENCODEX_GATEWAY_PLUGIN_SWITCHES_PATH = "/opencodex-gateway-plugin-switches.js";
 const CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH = "/codex-smart-model-router-settings.css";
+const CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH = "/codex-smart-scheduling-injection-health.js";
 const CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH = "/codex-smart-model-router-settings.js";
 const CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH = "/codex-smart-model-router-composer.js";
 const CODEX_SMART_SCHEDULING_SUMMARY_CSS_PATH = "/codex-smart-scheduling-summary.css";
@@ -60,6 +61,10 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [
     CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH,
     path.join(WEB_SHELL_DIR, "codex-smart-model-router-settings.css"),
+  ],
+  [
+    CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH,
+    path.join(WEB_SHELL_DIR, "codex-smart-scheduling-injection-health.js"),
   ],
   [CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH, path.join(WEB_SHELL_DIR, "codex-smart-model-router-settings.js")],
   [CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH, path.join(WEB_SHELL_DIR, "codex-smart-model-router-composer.js")],
@@ -146,6 +151,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<script src="/codex-web-config.js"></script>',
       `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
       `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
+      `<script src="${CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH}"></script>`,
       `<script src="${CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH}"></script>`,
       `<script src="${CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH}"></script>`,
       `<script src="${CODEX_SMART_SCHEDULING_SUMMARY_PATH}"></script>`,

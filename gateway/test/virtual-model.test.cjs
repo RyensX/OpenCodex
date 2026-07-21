@@ -7,7 +7,7 @@ const { createModelCatalog } = require("../runtime/model-router/catalog.cjs");
 const { createAutoStateStore } = require("../runtime/model-router/state-store.cjs");
 const { createVirtualModelController } = require("../runtime/model-router/virtual-model.cjs");
 
-function setup(t) {
+function setup(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-virtual-model-test-"));
   t.after(() => fs.rmSync(dir, { force: true, recursive: true }));
   const filePath = path.join(dir, "state.json");
@@ -19,6 +19,7 @@ function setup(t) {
     catalog,
     isEnabled: () => enabled,
     fallbackRoute: () => ({ model: "spark", effort: "low", tier: "economy" }),
+    onAutoModelInjected: options.onAutoModelInjected,
   });
   return { catalog, controller, filePath, setEnabled: (value) => (enabled = value), stateStore };
 }
@@ -28,20 +29,24 @@ function realModel(id = "spark") {
 }
 
 test("Auto is injected once on the first model page only while enabled", (t) => {
-  const value = setup(t);
+  let injectionCount = 0;
+  const value = setup(t, { onAutoModelInjected: () => (injectionCount += 1) });
   value.controller.prepareClientMessage({ id: 1, method: "model/list", params: { cursor: null } });
   let response = value.controller.processServerMessage({ id: 1, result: { data: [realModel()], nextCursor: "next" } });
   assert.deepEqual(response.result.data.map((model) => model.model), ["spark"]);
+  assert.equal(injectionCount, 0);
 
   value.setEnabled(true);
   value.controller.prepareClientMessage({ id: 2, method: "model/list", params: { cursor: null } });
   response = value.controller.processServerMessage({ id: 2, result: { data: [realModel()], nextCursor: "next" } });
   assert.deepEqual(response.result.data.map((model) => model.model), ["auto", "spark"]);
   assert.deepEqual(response.result.data[0].supportedReasoningEfforts, []);
+  assert.equal(injectionCount, 1);
 
   value.controller.prepareClientMessage({ id: 3, method: "model/list", params: { cursor: "next" } });
   response = value.controller.processServerMessage({ id: 3, result: { data: [realModel("other")], nextCursor: null } });
   assert.deepEqual(response.result.data.map((model) => model.model), ["other"]);
+  assert.equal(injectionCount, 1);
 });
 
 test("config and thread protocol virtualize Auto without sending it to App Server", (t) => {

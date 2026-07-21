@@ -7,6 +7,11 @@ const vm = require("node:vm");
 const { EventEmitter } = require("node:events");
 const { listPluginEntries, listPluginManifests } = require("../runtime/core/plugin-assets.cjs");
 const { handleOpenCodexPluginApi, pluginIdFromPath } = require("../runtime/http/plugin-config.cjs");
+const {
+  BROWSER_INJECTION_POINTS,
+  GLOBAL_INJECTION_POINTS,
+  createInjectionHealthRegistry,
+} = require("../runtime/model-router/injection-health.cjs");
 const { PluginConfigError, createPluginConfigStore } = require("../runtime/plugins/config-store.cjs");
 const { normalizePluginManifest } = require("../runtime/plugins/manifest.cjs");
 
@@ -226,14 +231,18 @@ function responseRecorder() {
   };
 }
 
-function patchRequest(body) {
+function jsonRequest(method, body) {
   const request = new EventEmitter();
-  request.method = "PATCH";
+  request.method = method;
   process.nextTick(() => {
     request.emit("data", Buffer.from(JSON.stringify(body)));
     request.emit("end");
   });
   return request;
+}
+
+function patchRequest(body) {
+  return jsonRequest("PATCH", body);
 }
 
 test("plugin HTTP API exposes revisioned config and reports conflicts", async (t) => {
@@ -289,4 +298,47 @@ test("plugin HTTP API exposes revisioned config and reports conflicts", async (t
   );
   assert.equal(activeRouteResponse.status, 200);
   assert.equal(JSON.parse(activeRouteResponse.body).route.turnId, "turn-1");
+});
+
+test("plugin HTTP API records browser injection receipts without allowing gateway spoofing", async (t) => {
+  const store = createPluginConfigStore({ filePath: tempFile(t), manifests: listPluginManifests() });
+  store.update("opencodex.smart-model-router", { expectedRevision: 0, enabled: true });
+  const injectionHealth = createInjectionHealthRegistry({
+    getRuntimeIdentity: () => ({ version: "26.7", build: "52143" }),
+  });
+  for (const point of GLOBAL_INJECTION_POINTS) injectionHealth.reportGateway(point);
+  const pluginService = {
+    configStore: store,
+    injectionHealth,
+    modelRouter: { isEnabled: () => true },
+  };
+  const clientId = "browser_page_123";
+  const endpoint = new URL("http://localhost/api/opencodex/model-router/injections");
+
+  for (const point of BROWSER_INJECTION_POINTS) {
+    const response = responseRecorder();
+    await handleOpenCodexPluginApi(jsonRequest("POST", { point, clientId }), response, endpoint, pluginService);
+    assert.equal(response.status, 200);
+  }
+
+  const getRequest = new EventEmitter();
+  getRequest.method = "GET";
+  const getResponse = responseRecorder();
+  await handleOpenCodexPluginApi(
+    getRequest,
+    getResponse,
+    new URL(`${endpoint.href}?clientId=${clientId}`),
+    pluginService
+  );
+  assert.equal(getResponse.status, 200);
+  assert.equal(JSON.parse(getResponse.body).health.status, "ok");
+
+  const spoofedResponse = responseRecorder();
+  await handleOpenCodexPluginApi(
+    jsonRequest("POST", { point: "app-server-router", clientId }),
+    spoofedResponse,
+    endpoint,
+    pluginService
+  );
+  assert.equal(spoofedResponse.status, 400);
 });

@@ -93,7 +93,7 @@ function virtualizeModelFields(value) {
   return result;
 }
 
-function createVirtualModelController({ stateStore, isEnabled, fallbackRoute, catalog }) {
+function createVirtualModelController({ stateStore, isEnabled, fallbackRoute, catalog, onAutoModelInjected }) {
   const pending = new Map();
 
   function concreteForDefault() {
@@ -277,7 +277,10 @@ function createVirtualModelController({ stateStore, isEnabled, fallbackRoute, ca
   function injectAutoModel(result, cursor) {
     if (!isEnabled() || cursor || !result || !Array.isArray(result.data)) return result;
     if (result.data.some((model) => isAuto(model?.id) || isAuto(model?.model))) return result;
-    return { ...result, data: [autoCatalogModel(), ...result.data] };
+    const injected = { ...result, data: [autoCatalogModel(), ...result.data] };
+    // 只在 Auto 实际写入官方 model/list 首页面时回执，不能把脚本加载误报成协议注入成功。
+    if (typeof onAutoModelInjected === "function") onAutoModelInjected();
+    return injected;
   }
 
   function virtualizeConfigRead(result) {

@@ -2,7 +2,9 @@ const { isRequestBodyTooLargeError, readBody, sendJson } = require("./http-utils
 const { PluginConfigError } = require("../plugins/config-store.cjs");
 
 const PLUGIN_CONFIG_BODY_MAX_BYTES = 128 * 1024;
+const INJECTION_HEALTH_BODY_MAX_BYTES = 8 * 1024;
 const PLUGIN_CONFIG_PREFIX = "/api/opencodex/plugins/";
+const INJECTION_HEALTH_PATH = "/api/opencodex/model-router/injections";
 
 function pluginIdFromPath(pathname) {
   if (!pathname.startsWith(PLUGIN_CONFIG_PREFIX) || !pathname.endsWith("/config")) return "";
@@ -38,9 +40,52 @@ async function handlePluginConfigPatch(req, res, pluginService, pluginId) {
   }
 }
 
+async function handleInjectionHealth(req, res, url, pluginService) {
+  const registry = pluginService.injectionHealth;
+  if (!registry) {
+    sendJson(res, 503, { ok: false, error: "Injection health is unavailable" }, { "cache-control": "no-store" });
+    return;
+  }
+  if (req.method === "GET") {
+    const health = registry.snapshot({
+      clientId: url.searchParams.get("clientId"),
+      enabled: pluginService.modelRouter.isEnabled(),
+    });
+    sendJson(res, 200, { ok: true, health }, { "cache-control": "no-store" });
+    return;
+  }
+  if (req.method !== "POST") {
+    sendJson(res, 405, { ok: false, error: "Method Not Allowed" }, { allow: "GET, POST" });
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse((await readBody(req, { maxBytes: INJECTION_HEALTH_BODY_MAX_BYTES })) || "{}");
+  } catch (error) {
+    const status = isRequestBodyTooLargeError(error) ? 413 : 400;
+    sendJson(
+      res,
+      status,
+      { ok: false, error: status === 413 ? "Request body is too large" : "Invalid JSON body" },
+      { "cache-control": "no-store" }
+    );
+    return;
+  }
+  // 浏览器只能回执固定的 renderer 注入点，不能伪造 Gateway 内部注入状态。
+  if (!registry.reportBrowser(String(parsed.point || ""), parsed.clientId)) {
+    sendJson(res, 400, { ok: false, error: "Invalid injection report" }, { "cache-control": "no-store" });
+    return;
+  }
+  sendJson(res, 200, { ok: true }, { "cache-control": "no-store" });
+}
+
 async function handleOpenCodexPluginApi(req, res, url, pluginService) {
   if (!pluginService) return false;
   const pathname = url.pathname;
+  if (pathname === INJECTION_HEALTH_PATH) {
+    await handleInjectionHealth(req, res, url, pluginService);
+    return true;
+  }
   if (pathname === "/api/opencodex/plugins/config") {
     if (req.method !== "GET") {
       sendJson(res, 405, { ok: false, error: "Method Not Allowed" }, { allow: "GET" });
@@ -93,8 +138,11 @@ async function handleOpenCodexPluginApi(req, res, url, pluginService) {
 }
 
 module.exports = {
+  INJECTION_HEALTH_BODY_MAX_BYTES,
+  INJECTION_HEALTH_PATH,
   PLUGIN_CONFIG_BODY_MAX_BYTES,
   handleOpenCodexPluginApi,
+  handleInjectionHealth,
   handlePluginConfigPatch,
   pluginIdFromPath,
 };
