@@ -8,6 +8,28 @@ const { createStaticAssetService } = require("../runtime/http/static-assets.cjs"
 
 const WEB_SHELL_INDEX = path.resolve(__dirname, "..", "..", "web-shell", "index.html");
 const BRIDGE_POLYFILL = path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js");
+const SMART_SCHEDULING_SETTINGS = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "web-shell",
+  "codex-smart-model-router-settings.js"
+);
+const SMART_SCHEDULING_COMPOSER = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "web-shell",
+  "codex-smart-model-router-composer.js"
+);
+const SMART_SCHEDULING_PLUGIN_DIR = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "web-shell",
+  "plugins",
+  "smart-model-router"
+);
 
 function makeTempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-static-assets-test-"));
@@ -120,6 +142,75 @@ test("injects remote file actions after the bridge polyfill", (t) => {
     service.staticFile("/codex-remote-file-actions.js"),
     path.resolve(__dirname, "..", "..", "web-shell", "codex-remote-file-actions.js")
   );
+});
+
+test("injects smart scheduling into the authenticated Codex settings page", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const service = createService(webviewDir);
+  const html = service.createRendererResponse();
+
+  assert.match(html, /codex-smart-model-router-settings\.css/);
+  assert.match(html, /codex-smart-model-router-settings\.js/);
+  assert.match(html, /codex-smart-model-router-composer\.js/);
+  assert.equal(
+    service.staticFile("/codex-smart-model-router-settings.js"),
+    path.resolve(__dirname, "..", "..", "web-shell", "codex-smart-model-router-settings.js")
+  );
+});
+
+test("smart scheduling hides placeholder effort only while the composer model is Auto", () => {
+  const source = fs.readFileSync(SMART_SCHEDULING_COMPOSER, "utf-8");
+
+  // 适配器依赖官方模型触发器和模型行标记，并在切回具体模型时主动移除自己的状态。
+  assert.match(source, /data-codex-intelligence-trigger/);
+  assert.match(source, /data-model-picker-model-row/);
+  assert.match(source, /removeAttribute\("data-opencodex-auto-model"\)/);
+  assert.match(source, /opencodexAutoEffortItem/);
+});
+
+test("smart scheduling reuses Codex picker styling without repeated model identities", () => {
+  const source = fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8");
+
+  // 锁定官方选择器样式复用和账户图标来源，避免后续回退成原生 select 或重复拼接名称与 ID。
+  assert.match(source, /NATIVE_PICKER_TRIGGER_FALLBACK_CLASS/);
+  assert.match(source, /aria-haspopup\", \"menu/);
+  assert.match(source, /normalizedModelIdentity/);
+  assert.match(source, /opencodexIconSource = "account"/);
+  assert.doesNotMatch(source, /createElement\("select"/);
+});
+
+test("smart scheduling settings localize tier and field labels", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(SMART_SCHEDULING_PLUGIN_DIR, "plugin.json"), "utf-8"));
+  const zh = JSON.parse(fs.readFileSync(path.join(SMART_SCHEDULING_PLUGIN_DIR, "i18.zh.json"), "utf-8"));
+  const en = JSON.parse(fs.readFileSync(path.join(SMART_SCHEDULING_PLUGIN_DIR, "i18.en.json"), "utf-8"));
+
+  // 档位标题和字段名分别翻译，字段不再重复档位名称；auto 保持协议中的小写形式。
+  assert.equal(zh["plugin.smartModelRouter.group.balanced"], "均衡");
+  assert.equal(en["plugin.smartModelRouter.group.balanced"], "Balanced");
+  assert.equal(zh["plugin.smartModelRouter.setting.model"], "模型");
+  assert.equal(en["plugin.smartModelRouter.setting.effort"], "Reasoning effort");
+  assert.equal(manifest.settings.find((setting) => setting.id === "balancedModel").labelKey, "plugin.smartModelRouter.setting.model");
+  assert.match(fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8"), /label: effort/);
+});
+
+test("web shell exposes only the smart router gateway switch before authentication", () => {
+  const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
+
+  assert.match(html, /plugin\.feature === "smart-model-router"/);
+  assert.match(html, /opencodex-gateway-plugin-switches\.js/);
+  assert.match(html, /gatewayPluginSwitches\?\.sync/);
+});
+
+test("plugin loader registers manifest-only plugins without inventing an index script", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const service = createService(webviewDir);
+  const response = makeResponseRecorder();
+  service.servePluginLoader(response);
+  const source = response.body.toString("utf-8");
+
+  assert.match(source, /opencodex\.smart-model-router/);
+  assert.doesNotMatch(source, /smart-model-router\/index\.js/);
+  assert.match(source, /registerPlugin\(manifest\)/);
 });
 
 test("renames official open-in-folder locale message only for remote browser hosts", (t) => {

@@ -49,6 +49,7 @@ const requestRoutes = new Map();
 const requestRouteSummaries = new Map();
 let officialBundle = null;
 let wsHub = null;
+let appServerChildDecorator = null;
 
 const officialIpc = {
   // 官方 main 调 ipcMain.handle/on 注册的 handler 会被这里记录，再由 HTTP IPC invoke 复用。
@@ -67,6 +68,8 @@ const appServerSpawnHook = {
   lastCommand: null,
   lastArgs: null,
   replacementBinaryPath: null,
+  decoratedCount: 0,
+  decoratorError: null,
   lastError: null,
 };
 
@@ -321,11 +324,10 @@ function looksLikeOfficialCodexBinary(command, bundle, spawnOptions) {
 
 function isHiddenOfficialAppServerArgs(args) {
   /**
-   * 只识别官方 codex app-server 入口，不理解后续子命令或业务参数。
-   * 参数保持原样透传给官方 Desktop 的 codex 二进制，保证官方新增/修改 app-server 参数时自动兼容。
+   * 官方新版会在子命令前追加 `-c key=value` 等全局配置，因此不能假设 app-server 固定在第一个参数。
+   * 命令本身已经通过官方 codex 二进制校验，这里只定位独立参数，避免配置值中的普通文本误命中。
    */
-  if (!Array.isArray(args) || args[0] !== "app-server") return false;
-  return true;
+  return Array.isArray(args) && args.some((argument) => argument === "app-server");
 }
 
 function looksLikeComputerUseInstaller(command) {
@@ -376,12 +378,27 @@ function recordHiddenAppServerRedirect(launcher, command, normalizedArgs, replac
   });
 }
 
+function decorateHiddenAppServerChild(child) {
+  if (typeof appServerChildDecorator !== "function") return child;
+  try {
+    const decorated = appServerChildDecorator(child) || child;
+    appServerSpawnHook.decoratedCount += 1;
+    appServerSpawnHook.decoratorError = null;
+    return decorated;
+  } catch (error) {
+    // 装饰失败时保留官方原始连接，避免可选 Auto 能力影响 Codex 的基础可用性。
+    appServerSpawnHook.decoratorError = error instanceof Error ? error.message : String(error);
+    diagnosticWarn("official-runtime", "app_server_decorator_failed", { error: appServerSpawnHook.decoratorError });
+    return child;
+  }
+}
+
 function redirectHiddenAppServerSpawn(originalSpawn, bundle, self, command, args, options, rawArguments) {
   const spawnOptions = spawnOptionsFromArgs(args, options);
   const normalizedArgs = spawnArgList(args);
   if (looksLikeOfficialCodexBinary(command, bundle, spawnOptions) && isHiddenOfficialAppServerArgs(normalizedArgs)) {
     recordHiddenAppServerRedirect("spawn", command, normalizedArgs, bundle.codexBinaryPath);
-    return originalSpawn.call(self, bundle.codexBinaryPath, normalizedArgs, spawnOptions);
+    return decorateHiddenAppServerChild(originalSpawn.call(self, bundle.codexBinaryPath, normalizedArgs, spawnOptions));
   }
   const fileManagerPath = fileManagerPathFromSpawn(command, normalizedArgs);
   if (fileManagerPath && maybeInterceptRemoteFileManagerOpen(fileManagerPath)) {
@@ -396,7 +413,9 @@ function redirectHiddenAppServerExecFile(originalExecFile, bundle, self, command
   if (looksLikeOfficialCodexBinary(command, bundle, execOptions) && isHiddenOfficialAppServerArgs(normalizedArgs)) {
     const execCallback = execFileCallbackFromArgs(args, options, callback);
     recordHiddenAppServerRedirect("execFile", command, normalizedArgs, bundle.codexBinaryPath);
-    return originalExecFile.call(self, bundle.codexBinaryPath, normalizedArgs, execOptions, execCallback);
+    return decorateHiddenAppServerChild(
+      originalExecFile.call(self, bundle.codexBinaryPath, normalizedArgs, execOptions, execCallback)
+    );
   }
   if (looksLikeComputerUseInstaller(command)) {
     const execCallback = execFileCallbackFromArgs(args, options, callback);
@@ -483,6 +502,8 @@ function appServerSpawnHookStatus() {
     lastCommand: appServerSpawnHook.lastCommand,
     lastArgs: appServerSpawnHook.lastArgs,
     replacementBinaryPath: appServerSpawnHook.replacementBinaryPath,
+    decoratedCount: appServerSpawnHook.decoratedCount,
+    decoratorError: appServerSpawnHook.decoratorError,
     lastError: appServerSpawnHook.lastError,
   };
 }
@@ -1946,7 +1967,7 @@ async function initialSidebarBootstrapForRenderer() {
   }
 }
 
-function startOfficialRuntime() {
+function startOfficialRuntime(options = {}) {
   /**
    * 官方 runtime 启动点：
    * - ensureOfficialBundle 负责从已安装 Codex/ChatGPT Desktop 抽取白名单资源。
@@ -1954,6 +1975,8 @@ function startOfficialRuntime() {
    * - hook 必须先安装，才能捕获 bootstrap 注册的 IPC handler、官方 app-server 子进程，并隐藏官方 UI。
    */
   const { ensureOfficialBundle } = requireOfficialBundleProvider();
+  appServerChildDecorator =
+    typeof options.decorateAppServerChild === "function" ? options.decorateAppServerChild : null;
   officialBundle = ensureOfficialBundle({ projectRoot: PROJECT_ROOT });
   alignOfficialElectronEnvironment(officialBundle);
   installAppServerSpawnHook(officialBundle);
@@ -2000,6 +2023,7 @@ module.exports = {
     fileManagerPathFromSpawn,
     normalizeInitialSidebarBootstrap,
     OfficialChunkedMessageReceiver,
+    isHiddenOfficialAppServerArgs,
     shouldInterceptRemoteFileManagerStore,
   },
 };

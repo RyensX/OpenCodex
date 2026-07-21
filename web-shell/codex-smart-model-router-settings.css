@@ -1,0 +1,194 @@
+.opencodex-router-settings-page {
+  position: fixed;
+  z-index: 40;
+  display: none;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--color-token-main-surface-primary, #fff);
+  color: var(--color-token-text-primary, #111827);
+}
+
+.opencodex-router-settings-page[data-active="true"] {
+  display: block;
+}
+
+.opencodex-router-settings-scroll {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.opencodex-router-settings-content {
+  box-sizing: border-box;
+  width: min(760px, 100%);
+  margin: 0 auto;
+  padding: 54px 36px max(48px, env(safe-area-inset-bottom));
+}
+
+.opencodex-router-settings-header {
+  margin-bottom: 28px;
+}
+
+.opencodex-router-settings-title {
+  margin: 0;
+  color: var(--color-token-text-primary, #111827);
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 32px;
+}
+
+.opencodex-router-settings-description,
+.opencodex-router-settings-disabled,
+.opencodex-router-settings-status,
+.opencodex-router-settings-empty {
+  margin: 7px 0 0;
+  color: var(--color-token-text-tertiary, #6b7280);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.opencodex-router-settings-disabled {
+  margin-bottom: 18px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-token-warning-foreground, #a15c00) 24%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-token-warning-foreground, #a15c00) 7%, transparent);
+  color: var(--color-token-warning-foreground, #8a4b00);
+}
+
+.opencodex-router-settings-status {
+  min-height: 19px;
+  margin-bottom: 8px;
+}
+
+.opencodex-router-settings-status[data-error="true"] {
+  color: var(--color-token-error-foreground, #b42318);
+}
+
+.opencodex-router-settings-groups {
+  display: grid;
+  gap: 22px;
+}
+
+.opencodex-router-settings-card {
+  overflow: hidden;
+  border: 1px solid var(--color-token-border-default, rgba(26, 28, 31, 0.12));
+  border-radius: 12px;
+  background: var(--color-token-main-surface-primary, #fff);
+}
+
+.opencodex-router-settings-group-title {
+  margin: 0;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--color-token-border-default, rgba(26, 28, 31, 0.1));
+  background: var(--color-token-main-surface-secondary, #fafafa);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.opencodex-router-settings-rows {
+  display: grid;
+}
+
+.opencodex-router-setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 46%);
+  align-items: center;
+  gap: 18px;
+  padding: 13px 14px;
+  border-top: 1px solid var(--color-token-border-default, rgba(26, 28, 31, 0.08));
+}
+
+.opencodex-router-setting-row:first-child {
+  border-top: 0;
+}
+
+.opencodex-router-setting-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.opencodex-router-setting-description,
+.opencodex-router-setting-warning {
+  display: block;
+  margin-top: 3px;
+  color: var(--color-token-text-tertiary, #6b7280);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.opencodex-router-setting-warning {
+  color: var(--color-token-warning-foreground, #a15c00);
+}
+
+.opencodex-router-setting-control[type="text"] {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--color-token-input-border, rgba(26, 28, 31, 0.16));
+  border-radius: 8px;
+  background: var(--color-token-input-background, #fff);
+  color: var(--color-token-input-foreground, #111827);
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.opencodex-router-setting-control[type="text"]:focus {
+  border-color: var(--color-token-focus-border, #0a84ff);
+  outline: 2px solid color-mix(in srgb, var(--color-token-focus-border, #0a84ff) 18%, transparent);
+}
+
+.opencodex-router-choice-trigger {
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+
+.opencodex-router-choice-popover {
+  box-sizing: border-box;
+  overscroll-behavior: contain;
+}
+
+.opencodex-router-choice-detail {
+  margin-top: 2px;
+}
+
+[data-settings-panel-slug="opencodex-smart-model-router"][data-opencodex-active="true"] {
+  background: var(--color-token-list-hover-background, rgba(0, 0, 0, 0.06));
+  color: var(--color-token-text-primary, #111827);
+}
+
+[data-settings-panel-slug][data-opencodex-suppressed-active="true"] {
+  background: transparent;
+}
+
+/* Auto 由网关逐轮选择强度，官方 composer 中不再展示或允许修改占位强度。 */
+[data-codex-intelligence-trigger="true"][data-opencodex-auto-model="true"]
+  [class*="_ModelPickerTriggerEffortLabel_"],
+[data-opencodex-auto-model-menu="true"] [data-opencodex-auto-effort-item="true"] {
+  display: none !important;
+}
+
+@media (max-width: 680px) {
+  .opencodex-router-settings-content {
+    padding: 32px 18px max(34px, env(safe-area-inset-bottom));
+  }
+
+  .opencodex-router-setting-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .opencodex-router-choice-popover {
+    scroll-behavior: auto;
+  }
+}

@@ -35,6 +35,21 @@ test("recognizes platform file manager spawn targets", () => {
   assert.equal(__test.fileManagerPathFromSpawn("node", ["script.js"]), "");
 });
 
+test("recognizes app-server after official Codex global options", () => {
+  // 官方 Desktop 会按版本在子命令前插入全局配置，hook 需要兼容两种参数布局。
+  assert.equal(__test.isHiddenOfficialAppServerArgs(["app-server", "--analytics-default-enabled"]), true);
+  assert.equal(
+    __test.isHiddenOfficialAppServerArgs([
+      "-c",
+      "features.code_mode_host=true",
+      "app-server",
+      "--analytics-default-enabled",
+    ]),
+    true
+  );
+  assert.equal(__test.isHiddenOfficialAppServerArgs(["exec", "app-server-like-value"]), false);
+});
+
 test("vscode fetch open-file payloads feed the same interception condition", () => {
   const openFileTarget = openFileTargetFromIpc("codex_desktop:message-from-view", {
     type: "fetch",

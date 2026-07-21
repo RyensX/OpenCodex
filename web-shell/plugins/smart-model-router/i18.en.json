@@ -1,0 +1,21 @@
+{
+  "plugin.smartModelRouter.label": "Smart scheduling",
+  "plugin.smartModelRouter.desc": "Adds Auto to the model picker and automatically schedules a model and reasoning effort for every turn.",
+  "plugin.smartModelRouter.settings.description": "Configure the classifier, model, and reasoning effort for each tier. auto effort follows the classifier recommendation.",
+  "plugin.smartModelRouter.settings.disabled": "Smart scheduling is off. Enable it from Settings → Plugins on the OpenCodex sign-in page.",
+  "plugin.smartModelRouter.settings.loading": "Loading smart scheduling configuration…",
+  "plugin.smartModelRouter.settings.missing": "Smart scheduling configuration was not found.",
+  "plugin.smartModelRouter.settings.unavailable": "Temporarily unavailable for this account; routing will fall back automatically.",
+  "plugin.smartModelRouter.settings.unavailableSuffix": " (unavailable)",
+  "plugin.smartModelRouter.settings.saved": "Saved",
+  "plugin.smartModelRouter.settings.conflict": "Another page changed this configuration. The latest revision was loaded; please retry.",
+  "plugin.smartModelRouter.settings.failed": "Could not save",
+  "plugin.smartModelRouter.group.classifier": "Classifier",
+  "plugin.smartModelRouter.group.economy": "Economy",
+  "plugin.smartModelRouter.group.balanced": "Balanced",
+  "plugin.smartModelRouter.group.complex": "Complex",
+  "plugin.smartModelRouter.group.frontier": "Frontier",
+  "plugin.smartModelRouter.group.fallback": "Fallback",
+  "plugin.smartModelRouter.setting.model": "Model",
+  "plugin.smartModelRouter.setting.effort": "Reasoning effort"
+}

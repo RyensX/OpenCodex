@@ -1,0 +1,21 @@
+{
+  "plugin.smartModelRouter.label": "智能调度",
+  "plugin.smartModelRouter.desc": "为模型列表加入 Auto，并根据每轮任务自动调度模型和推理强度。",
+  "plugin.smartModelRouter.settings.description": "配置 Auto 每轮分类时使用的分类器，以及各复杂度档位调度的模型和推理强度；强度选择 auto 时采用分类器建议。",
+  "plugin.smartModelRouter.settings.disabled": "智能调度当前已关闭。可在 OpenCodex 登录页的“设置 → 插件”中开启。",
+  "plugin.smartModelRouter.settings.loading": "正在读取智能调度配置…",
+  "plugin.smartModelRouter.settings.missing": "未发现智能调度配置。",
+  "plugin.smartModelRouter.settings.unavailable": "当前账号暂时不可用，实际路由时会自动回退。",
+  "plugin.smartModelRouter.settings.unavailableSuffix": "（暂不可用）",
+  "plugin.smartModelRouter.settings.saved": "已保存",
+  "plugin.smartModelRouter.settings.conflict": "配置已被其他页面修改，已加载最新版本，请重试。",
+  "plugin.smartModelRouter.settings.failed": "保存失败",
+  "plugin.smartModelRouter.group.classifier": "分类器",
+  "plugin.smartModelRouter.group.economy": "经济",
+  "plugin.smartModelRouter.group.balanced": "均衡",
+  "plugin.smartModelRouter.group.complex": "复杂",
+  "plugin.smartModelRouter.group.frontier": "前沿",
+  "plugin.smartModelRouter.group.fallback": "失败回退",
+  "plugin.smartModelRouter.setting.model": "模型",
+  "plugin.smartModelRouter.setting.effort": "推理强度"
+}
