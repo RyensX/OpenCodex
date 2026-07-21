@@ -29,7 +29,6 @@
     "zh-CN": {
       title: "智能调度",
       navLabel: "智能调度",
-      accountNavLabel: "账户",
       description: "配置 Auto 每轮分类时使用的分类器，以及各复杂度档位调度的模型和推理强度；强度选择 auto 时采用分类器建议。",
       disabled: "智能调度当前已关闭。可在 OpenCodex 登录页的“设置 → 插件”中开启。",
       loading: "正在读取智能调度配置…",
@@ -52,7 +51,6 @@
     "en-US": {
       title: "Smart scheduling",
       navLabel: "Smart scheduling",
-      accountNavLabel: "Account",
       description: "Configure the classifier, model, and reasoning effort for each tier. auto effort follows the classifier recommendation.",
       disabled: "Smart scheduling is off. Enable it from Settings → Plugins on the OpenCodex sign-in page.",
       loading: "Loading smart scheduling configuration…",
@@ -664,9 +662,26 @@
 
   function applyAccountNavigationIcon(button) {
     const nav = button.closest("nav") || document;
-    const accountButton = Array.from(nav.querySelectorAll("button")).find(
-      (candidate) => candidate !== button && candidate.getAttribute("aria-label") === c.accountNavLabel
-    );
+    const personalAnchor =
+      nav.querySelector('[data-settings-panel-slug="personalization"]') ||
+      nav.querySelector('[data-settings-panel-slug="agent"]');
+    let scope = personalAnchor?.parentElement || null;
+    let accountButton = null;
+
+    // 官方账户入口追加在“个人”设置组末尾且没有 panel slug；逐层收窄在该组内定位，避免依赖本地化名称。
+    while (scope && scope !== nav) {
+      const candidates = Array.from(scope.querySelectorAll("button")).filter((candidate) => {
+        if (candidate === button || candidate.hasAttribute("data-settings-panel-slug")) return false;
+        if (!candidate.querySelector("svg")) return false;
+        return Boolean(personalAnchor.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+      if (candidates.length > 0) {
+        // 普通设置项始终先于账户入口渲染；取组内最后一个无 slug 按钮可兼容其中的外部设置项。
+        accountButton = candidates[candidates.length - 1];
+        break;
+      }
+      scope = scope.parentElement;
+    }
     const sourceIcon = accountButton?.querySelector("svg");
     const targetIcon = button.querySelector("svg");
     if (!sourceIcon || !targetIcon) return;

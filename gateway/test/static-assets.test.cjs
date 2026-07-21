@@ -197,6 +197,8 @@ test("smart scheduling reuses Codex picker styling without repeated model identi
   assert.match(source, /aria-haspopup\", \"menu/);
   assert.match(source, /normalizedModelIdentity/);
   assert.match(source, /opencodexIconSource = "account"/);
+  assert.match(source, /data-settings-panel-slug=\"personalization\"/);
+  assert.doesNotMatch(source, /accountNavLabel/);
   assert.doesNotMatch(source, /createElement\("select"/);
 });
 
