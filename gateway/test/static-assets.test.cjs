@@ -7,6 +7,7 @@ const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
 const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
 
 const WEB_SHELL_INDEX = path.resolve(__dirname, "..", "..", "web-shell", "index.html");
+const BRIDGE_POLYFILL = path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js");
 
 function makeTempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-static-assets-test-"));
@@ -54,6 +55,17 @@ test("web shell manifest requests credentials for protected origins", () => {
   const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
 
   assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest" crossorigin="use-credentials" \/>/);
+});
+
+test("bridge keeps synchronous official preload methods out of the adaptive IPC fallback", () => {
+  const source = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
+
+  // 这两个官方 preload 方法必须同步返回基础值；一旦返回 Promise，最新版 renderer 会在首屏直接崩溃。
+  assert.match(source, /target\.getPreloadStartedAtMs = \(\) => preloadStartedAtMs;/);
+  assert.match(source, /target\.getInitialSidebarBootstrap = \(\) => cfg\.initialSidebarBootstrap \?\? null;/);
+  assert.match(source, /target\.isDeviceCheckSupported = \(\) => false;/);
+  assert.match(source, /target\.startFileDrag = \(\) => false;/);
+  assert.ok(source.indexOf("target.getInitialSidebarBootstrap") < source.indexOf("createAdaptiveBridgeProxy"));
 });
 
 test("patched official renderer CSP allows the injected PWA manifest", (t) => {

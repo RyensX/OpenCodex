@@ -49,3 +49,89 @@ test("vscode fetch open-file payloads feed the same interception condition", () 
     true
   );
 });
+
+test("sidebar bootstrap accepts only the synchronous renderer-safe shape", () => {
+  const bootstrap = {
+    catalogSnapshot: { revision: 7, isComplete: true, hosts: [], entries: [] },
+    globalStateEntries: [{ key: "pinned-thread-ids", value: [] }],
+    projectlessWorkspaceRoot: { workspaceRoot: null },
+    workspaceRootOptions: [],
+  };
+
+  // 合法快照必须原样保留；Promise 或缺失数组字段都不能交给 renderer 同步遍历。
+  assert.equal(__test.normalizeInitialSidebarBootstrap(bootstrap), bootstrap);
+  assert.equal(__test.normalizeInitialSidebarBootstrap(Promise.resolve(bootstrap)), null);
+  assert.equal(__test.normalizeInitialSidebarBootstrap({ globalStateEntries: {} }), null);
+  assert.equal(__test.normalizeInitialSidebarBootstrap(null), null);
+});
+
+test("official chunked messages are acknowledged and restored before browser routing", () => {
+  const receiver = new __test.OfficialChunkedMessageReceiver();
+  const marker = "codex-host-chunked-message-v1";
+
+  const started = receiver.receive({
+    marker,
+    transferId: "transfer-1",
+    sequence: 4,
+    kind: "start",
+  });
+  assert.deepEqual(started, {
+    type: "pending",
+    acknowledgement: { transferId: "transfer-1", sequence: 4 },
+  });
+
+  const chunked = receiver.receive({
+    marker,
+    transferId: "transfer-1",
+    sequence: 5,
+    kind: "chunk",
+    tokens: [
+      { type: "object-start" },
+      { type: "key", value: "type" },
+      { type: "value", value: "fetch-response" },
+      { type: "key", value: "body" },
+      { type: "string-start", target: "value" },
+      { type: "string-chunk", value: "large-" },
+      { type: "string-chunk", value: "payload" },
+      { type: "string-end" },
+      { type: "key", value: "optional" },
+      // 官方协议用缺失 value 字段表示 undefined，接收器必须保留而不是拒绝整个分块。
+      { type: "value" },
+      { type: "container-end" },
+    ],
+  });
+  assert.deepEqual(chunked, {
+    type: "pending",
+    acknowledgement: { transferId: "transfer-1", sequence: 5 },
+  });
+
+  const completed = receiver.receive({
+    marker,
+    transferId: "transfer-1",
+    sequence: 6,
+    kind: "end",
+  });
+  assert.deepEqual(completed, {
+    type: "complete",
+    acknowledgement: { transferId: "transfer-1", sequence: 6 },
+    message: { type: "fetch-response", body: "large-payload", optional: undefined },
+  });
+});
+
+test("official chunk receiver rejects an out-of-order continuation without acknowledging it", () => {
+  const receiver = new __test.OfficialChunkedMessageReceiver();
+  const marker = "codex-host-chunked-message-v1";
+  receiver.receive({ marker, transferId: "transfer-2", sequence: 0, kind: "start" });
+
+  // 序号不连续时必须和官方 preload 一样停止确认，避免把已损坏的消息误组装后交给 renderer。
+  assert.deepEqual(
+    receiver.receive({
+      marker,
+      transferId: "transfer-2",
+      sequence: 2,
+      kind: "chunk",
+      tokens: [{ type: "value", value: null }],
+    }),
+    { type: "pending", acknowledgement: null }
+  );
+});

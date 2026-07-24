@@ -2405,6 +2405,10 @@
 
   initializePersistedAtomSnapshot();
 
+  // 官方 preload 在 renderer 执行前同步记录该时间；Web 侧同样固定为页面 timeOrigin，不能落入异步 IPC。
+  const preloadStartedAtMs =
+    w.performance && Number.isFinite(w.performance.timeOrigin) ? w.performance.timeOrigin : Date.now();
+
   /** 把 Electron/Codex bridge API 挂到多个官方可能访问的全局对象上。 */
   function attachBridge(target) {
     target.invoke = invoke;
@@ -2457,6 +2461,8 @@
       if (file && typeof file === "object" && typeof file.path === "string") return file.path;
       return null;
     };
+    // 浏览器无法发起 Electron 原生文件拖拽，按官方同步布尔返回值契约明确降级。
+    target.startFileDrag = () => false;
     target.sendMessageFromView = async (payload) =>
       Promise.resolve().then(() => {
         if (payload && typeof payload === "object" && payload.type === "persisted-atom-sync-request") {
@@ -2509,6 +2515,11 @@
       subscribe(`codex_desktop:worker:${workerId}:for-view`, handler);
     target.getBuildFlavor = () => "prod";
     // 这些方法是当前官方 preload 明确暴露的能力；Web 侧给出等价或保守结果，避免 renderer 走缺失 IPC。
+    target.getPreloadStartedAtMs = () => preloadStartedAtMs;
+    // 侧栏快照必须同步返回；刷新时官方启动广播不会重放，不能再固定返回 null。
+    target.getInitialSidebarBootstrap = () => cfg.initialSidebarBootstrap ?? null;
+    // DeviceCheck 依赖桌面原生能力，Web 壳必须同步报告不支持，不能让 Promise 被误判为 true。
+    target.isDeviceCheckSupported = () => false;
     target.isIntelMacBuild = () => /macintosh|mac os x/i.test(navigator.userAgent) && /intel/i.test(navigator.userAgent);
     target.usesOwlAppShell = () => false;
     target.getFastModeRolloutMetrics = (params) =>
