@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const {
   CodexAsarScanner,
@@ -17,6 +18,21 @@ const {
 } = require("../dist/official/OfficialRuntimeEntryResolver.js");
 const { __test: layoutTest } = require("../runner/official-layout.cjs");
 
+const BRIDGE_POLYFILL_PATH = path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js");
+
+function loadAttachBridge() {
+  const source = fs.readFileSync(BRIDGE_POLYFILL_PATH, "utf8");
+  const start = source.indexOf("  function attachBridge(target) {");
+  const end = source.indexOf("\n  const BRIDGE_FALLBACK_UNDEFINED_PROPS", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  // 直接执行生产代码中的 bridge 安装函数，避免复制实现后让测试与真实 polyfill 漂移。
+  return vm.runInNewContext(`${source.slice(start, end)}\nattachBridge`, {
+    invoke() {},
+    performance: { timeOrigin: 1234 },
+  });
+}
+
 function temporaryDirectory(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-desktop-compat-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -27,6 +43,17 @@ function writeFile(filePath, content = "fixture") {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
 }
+
+test("bridge exposes synchronous preload startup methods", () => {
+  const attachBridge = loadAttachBridge();
+  const bridge = {};
+
+  attachBridge(bridge);
+
+  assert.equal(bridge.getPreloadStartedAtMs(), 1234);
+  assert.equal(bridge.getInitialSidebarBootstrap(), null);
+  assert.equal(bridge.isDeviceCheckSupported(), false);
+});
 
 test("macOS default candidates prefer ChatGPT while retaining Codex paths", () => {
   const fileSystem = { normalizePath: (value) => value };

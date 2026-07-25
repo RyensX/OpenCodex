@@ -2431,6 +2431,10 @@
     };
     target.getPlatform = () => "web";
     target.getVersion = () => "web-poc";
+    // renderer 会同步读取这些 preload 能力，不能落到返回 Promise 的通用 IPC fallback。
+    target.getPreloadStartedAtMs = () => performance.timeOrigin;
+    target.getInitialSidebarBootstrap = () => null;
+    target.isDeviceCheckSupported = () => false;
     // 对齐官方 preload 暴露的基础字段，避免新版 renderer 走 fallback IPC 后报 missing handler。
     target.windowType = "electron";
     target.openExternal = (url) => openExternal(url);
