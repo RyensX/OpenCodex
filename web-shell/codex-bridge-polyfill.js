@@ -1622,7 +1622,16 @@
   function markGatewayWsReady() {
     wsReady = true;
     settleWsReadyWaiters(true);
-    // hello-ack 到达后服务端才知道当前 clientId，此时再冲刷 app-host 队列才能保证定向路由正确。
+    // 新 WS 没有旧 relay；先重发仍存活 port 的 connect，再冲刷断线期间积压的数据帧。
+    for (const state of appHostPortRelays.values()) {
+      if (
+        !state.closed &&
+        !state.connected &&
+        !state.pending.some((payload) => payload.type === "app-host-connect")
+      ) {
+        state.pending.unshift(appHostWsPayload(state, { type: "app-host-connect" }));
+      }
+    }
     flushAllAppHostRelayMessages();
   }
 
@@ -2989,7 +2998,11 @@
       }
     });
     socket.addEventListener("close", (event) => {
-      if (ws === socket) wsReady = false;
+      if (ws === socket) {
+        wsReady = false;
+        // MessagePort 属于页面而不是 WS；保留它，并在下一次 hello-ack 后重新接到官方 listener。
+        for (const state of appHostPortRelays.values()) state.connected = false;
+      }
       clientDiagnostic("ws-close", {
         status: event && typeof event.code === "number" ? event.code : 0,
         wsReady,
