@@ -416,7 +416,8 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (!isLoopbackHostHeader(req && req.headers && req.headers.host)) {
       patched = patchOpenInFolderLocaleMessage(patched);
     }
-    return Buffer.from(patched, "utf-8");
+    // 保留原 Buffer 身份，让缓存层能区分 content-hash 源文件与动态改写后的响应体。
+    return patched === source ? data : Buffer.from(patched, "utf-8");
   }
 
   /** 将 URL path 映射到 web-shell 或官方 asset 的真实文件。 */
@@ -445,10 +446,18 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   }
 
   /** 静态资源缓存策略：hash asset 长缓存，入口 HTML/no-store 保持可更新。 */
-  function cacheControlForRequestPath(reqPath) {
+  function cacheControlForRequestPath(reqPath, responsePatched = false) {
     if (process.env.CODEX_WEB_DISABLE_ASSET_CACHE === "1") return "no-store";
     if (patchedOfficialAssetName(reqPath)) {
-      // patched chunk 的内容由 gateway 响应期生成，旧前缀也必须 no-store，避免跨版本继续吃旧模块图。
+      // patched 前缀不包含官方 runtime 版本，只有 Vite content-hash 文件名能安全跨升级长期缓存。
+      if (
+        reqPath.startsWith(PATCHED_OFFICIAL_PREFIX) &&
+        !responsePatched &&
+        /-[A-Za-z0-9_-]{8}\.js$/.test(patchedOfficialAssetName(reqPath))
+      ) {
+        return "public, max-age=31536000, immutable";
+      }
+      // 旧前缀没有可靠版本位，只用于兼容浏览器残留的懒加载请求。
       return "no-store";
     }
     if (reqPath.startsWith("/official/assets/")) return "public, max-age=31536000, immutable";
@@ -459,10 +468,14 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
 
   /** 发送静态文件，并按路径套用合适的缓存策略。 */
   function serveFile(req, res, file, status = 200, reqPath = "") {
-    const data = patchOfficialAsset(reqPath, fs.readFileSync(file), req);
+    const sourceData = fs.readFileSync(file);
+    const data = patchOfficialAsset(reqPath, sourceData, req);
     const response = gzipIfUseful(
       req,
-      { "content-type": mimeType(file), "cache-control": cacheControlForRequestPath(reqPath) },
+      {
+        "content-type": mimeType(file),
+        "cache-control": cacheControlForRequestPath(reqPath, data !== sourceData),
+      },
       data
     );
     send(res, status, response.headers, response.body);
