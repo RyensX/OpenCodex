@@ -111,6 +111,13 @@ test("bridge keeps synchronous official preload methods out of the adaptive IPC 
   assert.ok(source.indexOf("target.getInitialSidebarBootstrap") < source.indexOf("createAdaptiveBridgeProxy"));
 });
 
+test("bridge reconnects active app-host ports after websocket hello", () => {
+  const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
+
+  assert.match(bridge, /state\.pending\.unshift\(appHostWsPayload\(state, \{ type: "app-host-connect" \}\)\)/);
+  assert.match(bridge, /for \(const state of appHostPortRelays\.values\(\)\) state\.connected = false/);
+});
+
 test("patched official renderer CSP allows the injected PWA manifest", (t) => {
   const webviewDir = makeTempDir(t);
   fs.writeFileSync(

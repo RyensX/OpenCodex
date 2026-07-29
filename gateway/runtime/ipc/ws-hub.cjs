@@ -101,6 +101,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   const clients = new Set();
   // clientsById 是定向回包索引；clients 是广播索引，二者都需要维护。
   const clientsById = new Map();
+  const clientReadyListeners = new Set();
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
   const appHostTraffic = new Map();
@@ -407,6 +408,12 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return !!socket && socket.readyState === socket.OPEN;
   }
 
+  function onClientReady(listener) {
+    if (typeof listener !== "function") return () => {};
+    clientReadyListeners.add(listener);
+    return () => clientReadyListeners.delete(listener);
+  }
+
   function normalizedWsClientId(ws, message) {
     // 控制帧允许带 clientId，但最终必须和 hello 注册到 socket 上的 clientId 一致。
     const messageClientId = message && typeof message.clientId === "string" ? message.clientId : "";
@@ -616,6 +623,16 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
                 error: error instanceof Error ? error.message : String(error),
               });
             }
+            for (const listener of clientReadyListeners) {
+              try {
+                listener({ clientId, socket: ws });
+              } catch (error) {
+                diagnosticWarn("ws-hub", "client_ready_listener_failed", {
+                  clientId: shortId(clientId),
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+            }
             return;
           }
           if (handleWsControlMessage(ws, req, message)) return;
@@ -652,7 +669,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     });
   });
 
-  return { broadcast, clients, sendTo, hasClient };
+  return { broadcast, clients, sendTo, hasClient, onClientReady };
 }
 
 module.exports = { createWsHub };

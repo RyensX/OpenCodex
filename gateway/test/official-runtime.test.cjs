@@ -1,6 +1,12 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { openFileTargetFromIpc } = require("../runtime/ipc/open-file-context.cjs");
+const {
+  createIpcFrameParser,
+  createOfficialLiveObserver,
+  encodeIpcFrame,
+  __test: observerTest,
+} = require("../runtime/ipc/official-live-observer.cjs");
 const { __test } = require("../runtime/ipc/official-runtime.cjs");
 
 test("remote file manager interception condition is target and host based", () => {
@@ -80,6 +86,75 @@ test("sidebar bootstrap accepts only the synchronous renderer-safe shape", () =>
   assert.equal(__test.normalizeInitialSidebarBootstrap(null), null);
 });
 
+test("uses the Desktop named pipe on Windows", () => {
+  assert.deepEqual(__test.officialDesktopIpcSocketPaths("win32"), ["\\\\.\\pipe\\codex-ipc"]);
+  assert.match(__test.officialDesktopIpcSocketPaths("darwin")[0], /ipc[\\/]ipc\.sock$/);
+});
+
+test("official IPC parser handles fragmented headers and payloads", () => {
+  const messages = [];
+  const errors = [];
+  const parser = createIpcFrameParser((message) => messages.push(message), (error) => errors.push(error));
+  const first = encodeIpcFrame({ type: "first", payload: "x".repeat(32) });
+  const second = encodeIpcFrame({ type: "second" });
+
+  parser.consume(first.subarray(0, 2));
+  parser.consume(first.subarray(2, 9));
+  parser.consume(Buffer.concat([first.subarray(9), second]));
+
+  assert.deepEqual(messages, [
+    { type: "first", payload: "x".repeat(32) },
+    { type: "second" },
+  ]);
+  assert.deepEqual(errors, []);
+});
+
+test("official observer caps reconnect backoff and treats an absent Desktop socket as expected", () => {
+  assert.deepEqual(
+    [0, 1, 2, 3, 4].map((attempt) => observerTest.reconnectDelayForAttempt(5_000, 30_000, attempt)),
+    [5_000, 10_000, 20_000, 30_000, 30_000]
+  );
+  assert.equal(observerTest.isExpectedSocketUnavailableError({ code: "ENOENT" }), true);
+  assert.equal(observerTest.isExpectedSocketUnavailableError({ code: "ECONNREFUSED" }), true);
+  assert.equal(observerTest.isExpectedSocketUnavailableError({ code: "EACCES" }), false);
+});
+
+test("official observer suppresses expected connection errors when Desktop is not running", () => {
+  const { EventEmitter } = require("node:events");
+  const errors = [];
+  const socket = new EventEmitter();
+  socket.writable = true;
+  socket.destroyed = false;
+  socket.destroy = () => {
+    socket.destroyed = true;
+  };
+  const observer = createOfficialLiveObserver({
+    socketPaths: ["/tmp/missing-codex.sock"],
+    socketFactory: () => socket,
+    onError: (error) => errors.push(error),
+    reconnectDelayMs: -1,
+  });
+
+  observer.start();
+  socket.emit("error", Object.assign(new Error("missing"), { code: "ENOENT" }));
+
+  assert.deepEqual(errors, []);
+  observer.stop();
+});
+
+test("sidebar bootstrap reconciles threads that are no longer visible", () => {
+  const observer = createOfficialLiveObserver({ reconnectDelayMs: -1 });
+  observer.observeSidebarBootstrap({
+    catalogSnapshot: { entries: [{ threadId: "thread-old" }, { threadId: "thread-kept" }] },
+  });
+  observer.observeSidebarBootstrap({
+    catalogSnapshot: { entries: [{ threadId: "thread-kept" }, { threadId: "thread-new" }] },
+  });
+
+  assert.deepEqual([...observer.__test.getKnownThreads().keys()], ["local\u0000thread-kept", "local\u0000thread-new"]);
+  observer.stop();
+});
+
 test("official chunked messages are acknowledged and restored before browser routing", () => {
   const receiver = new __test.OfficialChunkedMessageReceiver();
   const marker = "codex-host-chunked-message-v1";
@@ -149,4 +224,150 @@ test("official chunk receiver rejects an out-of-order continuation without ackno
     }),
     { type: "pending", acknowledgement: null }
   );
+});
+
+test("official live observer follows known threads without sending control requests", () => {
+  const { EventEmitter } = require("node:events");
+  const writes = [];
+  const published = [];
+  const socket = new EventEmitter();
+  socket.writable = true;
+  socket.destroyed = false;
+  socket.write = (frame) => writes.push(JSON.parse(frame.subarray(4).toString("utf8")));
+  socket.destroy = () => {
+    socket.destroyed = true;
+  };
+
+  const observer = createOfficialLiveObserver({
+    socketPaths: ["/tmp/original-codex.sock"],
+    socketFactory: () => socket,
+    publish: (payload) => published.push(payload),
+    reconnectDelayMs: -1,
+  });
+
+  observer.start();
+  observer.observeThread("thread-known");
+  socket.emit("connect");
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "response",
+      method: "initialize",
+      resultType: "success",
+      handledByClientId: "observer-client",
+    })
+  );
+
+  assert.deepEqual(
+    writes.map((message) => message.method),
+    ["initialize", "thread-stream-following-changed"]
+  );
+  assert.equal(writes.some((message) => String(message.method).startsWith("thread-follower-")), false);
+
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "broadcast",
+      method: "thread-stream-state-changed",
+      sourceClientId: "desktop-owner",
+      params: {
+        conversationId: "thread-known",
+        hostId: "local",
+        change: { type: "snapshot", revision: 1 },
+      },
+    })
+  );
+  assert.equal(published.at(-1).channel, "thread-stream-state-changed");
+  assert.equal(observer.__test.getActiveOwners().get("local\u0000thread-known"), "desktop-owner");
+
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "broadcast",
+      method: "thread-stream-following-status-requested",
+      sourceClientId: "desktop-owner",
+      params: { conversationId: "thread-second", hostId: "local" },
+    })
+  );
+  assert.equal(writes.at(-1).method, "thread-stream-following-changed");
+  assert.equal(writes.at(-1).params.conversationId, "thread-second");
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "broadcast",
+      method: "thread-stream-state-changed",
+      sourceClientId: "desktop-owner",
+      params: {
+        conversationId: "thread-second",
+        hostId: "local",
+        change: { type: "snapshot", revision: 1 },
+      },
+    })
+  );
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "broadcast",
+      method: "client-status-changed",
+      params: { clientId: "desktop-owner", status: "disconnected" },
+    })
+  );
+  assert.equal(observer.__test.getActiveOwners().size, 0);
+  assert.equal(published.at(-1).channel, "client-status-changed");
+  assert.equal(
+    published.filter((payload) => payload.channel === "client-status-changed").length,
+    1
+  );
+  observer.stop();
+});
+
+test("official live observer clears active state when the original IPC disconnects", () => {
+  const { EventEmitter } = require("node:events");
+  const published = [];
+  const socket = new EventEmitter();
+  socket.writable = true;
+  socket.destroyed = false;
+  socket.write = () => true;
+  socket.destroy = () => {
+    socket.destroyed = true;
+  };
+  const observer = createOfficialLiveObserver({
+    socketPaths: ["/tmp/original-codex.sock"],
+    socketFactory: () => socket,
+    publish: (payload) => published.push(payload),
+    reconnectDelayMs: -1,
+  });
+
+  observer.start();
+  observer.observeThread("thread-known");
+  socket.emit("connect");
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "response",
+      method: "initialize",
+      resultType: "success",
+      handledByClientId: "observer-client",
+    })
+  );
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "broadcast",
+      method: "thread-stream-state-changed",
+      sourceClientId: "desktop-owner",
+      params: {
+        conversationId: "thread-known",
+        hostId: "local",
+        change: { type: "snapshot", revision: 1 },
+      },
+    })
+  );
+
+  socket.emit("close");
+
+  assert.equal(observer.__test.getActiveOwners().size, 0);
+  assert.equal(published.at(-1).channel, "client-status-changed");
+  assert.equal(published.some((payload) => payload.channel === "ipc-connection-reset"), false);
+  observer.stop();
 });
