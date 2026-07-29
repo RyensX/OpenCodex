@@ -36,6 +36,7 @@ const {
   invokeOfficialIpc,
   listOfficialIpcChannels,
   rejectPendingInternalResponses,
+  releaseOfficialRendererClient,
   requestContext,
   setWsHub,
   startOfficialRuntime,
@@ -598,6 +599,9 @@ async function createGateway() {
     createAppHostRelay: createOfficialAppHostRelay,
     handleNotificationEvent: handleOfficialNotificationEvent,
     isAuthed,
+    onClientDisconnected({ clientId }) {
+      releaseOfficialRendererClient(clientId);
+    },
     observeAppHostFrame(frame) {
       pluginService.smartSchedulingPresentation?.observeAppHostFrame(frame);
     },

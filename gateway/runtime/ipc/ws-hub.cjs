@@ -81,7 +81,17 @@ function wsCompressionOptions() {
 
 // ws-hub 不理解官方 IPC 协议，只负责维护连接和按 clientId 投递 JSON 消息。
 /** 创建 WebSocket hub，负责浏览器连接管理和 gateway 事件分发。 */
-function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAuthed, observeAppHostFrame }) {
+function createWsHub(
+  server,
+  {
+    clientDisconnectGraceMs = 5_000,
+    createAppHostRelay,
+    handleNotificationEvent,
+    isAuthed,
+    observeAppHostFrame,
+    onClientDisconnected,
+  }
+) {
   if (!WebSocketServer) {
     throw new Error("The ws package is required for gateway websocket support.");
   }
@@ -102,6 +112,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   // clientsById 是定向回包索引；clients 是广播索引，二者都需要维护。
   const clientsById = new Map();
   const clientReadyListeners = new Set();
+  const pendingClientDisconnects = new Map();
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
   const appHostTraffic = new Map();
@@ -328,13 +339,45 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     }
   }
 
+  function notifyClientDisconnected(clientId) {
+    if (!clientId || typeof onClientDisconnected !== "function") return;
+    try {
+      onClientDisconnected({ clientId });
+    } catch (error) {
+      diagnosticWarn("ws-hub", "client_disconnect_handler_failed", {
+        clientId: shortId(clientId),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  function cancelClientDisconnect(clientId) {
+    const timer = pendingClientDisconnects.get(clientId);
+    if (!timer) return;
+    clearTimeout(timer);
+    pendingClientDisconnects.delete(clientId);
+  }
+
+  function scheduleClientDisconnect(clientId) {
+    if (!clientId || pendingClientDisconnects.has(clientId)) return;
+    const timer = setTimeout(() => {
+      pendingClientDisconnects.delete(clientId);
+      notifyClientDisconnected(clientId);
+    }, Math.max(0, clientDisconnectGraceMs));
+    timer.unref?.();
+    pendingClientDisconnects.set(clientId, timer);
+  }
+
   function removeClient(ws) {
-    flushAppHostTrafficForClient(socketClientId(ws));
+    const clientId = socketClientId(ws);
     closeAppHostRelays(ws, "client_disconnected");
     clients.delete(ws);
-    if (ws.__codexWebClientId && clientsById.get(ws.__codexWebClientId) === ws) {
-      clientsById.delete(ws.__codexWebClientId);
+    const wasMapped = !!clientId && clientsById.get(clientId) === ws;
+    if (wasMapped) {
+      clientsById.delete(clientId);
     }
+    if (wasMapped) flushAppHostTrafficForClient(clientId);
+    if (wasMapped) scheduleClientDisconnect(clientId);
   }
 
   function logAuthRejected(url) {
@@ -604,10 +647,16 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
           // hello 是浏览器接入 IPC 的握手消息，拿到 clientId 后才能定向投递事件。
           if (message && message.type === "hello" && clientId) {
             const previousClientId = ws.__codexWebClientId;
-            if (previousClientId && previousClientId !== clientId && clientsById.get(previousClientId) === ws) {
-              clientsById.delete(previousClientId);
+            if (previousClientId && previousClientId !== clientId) {
+              ws.close(1008, "clientId cannot change");
+              return;
             }
+            cancelClientDisconnect(clientId);
             // 后来重复 hello 时直接覆盖映射，保证同一 clientId 指向最新连接。
+            const previousSocket = clientsById.get(clientId);
+            if (previousSocket && previousSocket !== ws) {
+              closeAppHostRelays(previousSocket, "client_replaced");
+            }
             ws.__codexWebClientId = clientId;
             clientsById.set(clientId, ws);
             if (DEBUG_LOGS) {

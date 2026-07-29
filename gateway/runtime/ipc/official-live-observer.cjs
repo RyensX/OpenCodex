@@ -295,14 +295,36 @@ function createOfficialLiveObserver(options = {}) {
     if (typeof conversationId !== "string" || conversationId.length === 0) return false;
     const normalizedHostId = typeof hostId === "string" && hostId ? hostId : DEFAULT_HOST_ID;
     const key = threadKey(conversationId, normalizedHostId);
+    if (knownThreads.has(key)) return true;
     knownThreads.set(key, { conversationId, hostId: normalizedHostId });
     if (clientId) sendFollowing(conversationId, normalizedHostId, true);
+    return true;
+  }
+
+  function forgetThread(conversationId, hostId = DEFAULT_HOST_ID) {
+    if (typeof conversationId !== "string" || conversationId.length === 0) return false;
+    const normalizedHostId = typeof hostId === "string" && hostId ? hostId : DEFAULT_HOST_ID;
+    const key = threadKey(conversationId, normalizedHostId);
+    if (!knownThreads.delete(key)) return false;
+    activeOwners.delete(key);
+    activeRevisions.delete(key);
+    if (clientId) sendFollowing(conversationId, normalizedHostId, false);
     return true;
   }
 
   function observeSidebarBootstrap(bootstrap) {
     const entries = bootstrap?.catalogSnapshot?.entries;
     if (!Array.isArray(entries)) return 0;
+    const currentKeys = new Set();
+    for (const entry of entries) {
+      const conversationId = entry?.threadId || entry?.conversationId;
+      if (typeof conversationId !== "string" || conversationId.length === 0) continue;
+      const hostId = entry?.hostId || DEFAULT_HOST_ID;
+      currentKeys.add(threadKey(conversationId, hostId));
+    }
+    for (const { conversationId, hostId } of [...knownThreads.values()]) {
+      if (!currentKeys.has(threadKey(conversationId, hostId))) forgetThread(conversationId, hostId);
+    }
     let observed = 0;
     for (const entry of entries) {
       const conversationId = entry?.threadId || entry?.conversationId;
@@ -334,6 +356,7 @@ function createOfficialLiveObserver(options = {}) {
   return {
     observeSidebarBootstrap,
     observeThread,
+    forgetThread,
     refresh,
     start,
     stop,

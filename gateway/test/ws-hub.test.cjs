@@ -98,3 +98,45 @@ test("recreates an app-host relay when the browser WebSocket reconnects", async 
   assert.equal(relays.length, 2);
   assert.deepEqual(relays[1].messages, ["thread/list"]);
 });
+
+test("closes the replaced socket app-host relays before the old socket closes", async (t) => {
+  const server = http.createServer();
+  const relays = [];
+  createWsHub(server, {
+    createAppHostRelay() {
+      const relay = {
+        closed: false,
+        close() {
+          this.closed = true;
+        },
+        postMessage() {},
+      };
+      relays.push(relay);
+      return relay;
+    },
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  const url = `ws://127.0.0.1:${server.address().port}/ws`;
+  const first = new WebSocket(url);
+  const second = new WebSocket(url);
+  t.after(async () => {
+    first.close();
+    second.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  await Promise.all([waitForOpen(first), waitForOpen(second)]);
+  first.send(JSON.stringify({ type: "hello", clientId: "replacement-client" }));
+  await waitForMessage(first, (message) => message.type === "hello-ack");
+  first.send(JSON.stringify({ type: "app-host-connect", clientId: "replacement-client", portId: "port-1" }));
+  await waitForMessage(first, (message) => message.type === "app-host-port-connected");
+
+  second.send(JSON.stringify({ type: "hello", clientId: "replacement-client" }));
+  await waitForMessage(second, (message) => message.type === "hello-ack");
+
+  assert.equal(relays.length, 1);
+  assert.equal(relays[0].closed, true);
+  assert.equal(first.readyState, WebSocket.OPEN);
+});
