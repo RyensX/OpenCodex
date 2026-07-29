@@ -65,6 +65,8 @@ function createOfficialLiveObserver(options = {}) {
 
   const knownThreads = new Map();
   const activeOwners = new Map();
+  // 只保存可验证增量所需的 revision 元数据，不保存任何 snapshot/patch 内容。
+  const activeRevisions = new Map();
   let socket = null;
   let socketPathIndex = 0;
   let clientId = "";
@@ -97,6 +99,15 @@ function createOfficialLiveObserver(options = {}) {
       if (ownerClientId) emitOwnerDisconnected(ownerClientId);
     }
     activeOwners.clear();
+    activeRevisions.clear();
+  }
+
+  function emitConnectionReset(reason, sourceMessage = null) {
+    emit("ipc-connection-reset", sourceMessage || {
+      type: "broadcast",
+      method: "ipc-connection-reset",
+      params: { reason },
+    });
   }
 
   function writeMessage(message) {
@@ -147,9 +158,16 @@ function createOfficialLiveObserver(options = {}) {
       resubscribeKnownThreads();
       return;
     }
+    const method = String(message.method || (message.type === "ipc-connection-reset" ? message.type : ""));
+    if (method === "ipc-connection-reset") {
+      // reset 后只保留 knownThreads；旧 owner/revision 不能跨连接安全接收 patches。
+      clearActiveState();
+      emitConnectionReset("peer-reset", message);
+      resubscribeKnownThreads();
+      return;
+    }
     if (message.type !== "broadcast") return;
 
-    const method = String(message.method || "");
     const params = message.params && typeof message.params === "object" ? message.params : {};
     const conversationId = typeof params.conversationId === "string" ? params.conversationId : "";
     const hostId = typeof params.hostId === "string" && params.hostId ? params.hostId : DEFAULT_HOST_ID;
@@ -162,9 +180,28 @@ function createOfficialLiveObserver(options = {}) {
     }
 
     if (method === "thread-stream-state-changed") {
-      if (!key || !knownThreads.has(key)) return;
+      if (!key) return;
+      const change = params.change && typeof params.change === "object" ? params.change : null;
       const ownerClientId = typeof message.sourceClientId === "string" ? message.sourceClientId : "";
-      if (ownerClientId) activeOwners.set(key, ownerClientId);
+      // 首个 snapshot 可能早于 Web 首屏 catalog；patch 没有可用 baseRevision，不能跨 renderer 重放。
+      if (!knownThreads.has(key) && change?.type !== "snapshot") return;
+      if (change?.type === "snapshot") {
+        if (!knownThreads.has(key)) knownThreads.set(key, { conversationId, hostId });
+        if (ownerClientId) activeOwners.set(key, ownerClientId);
+        else activeOwners.delete(key);
+        if (change.revision !== undefined && change.revision !== null) {
+          activeRevisions.set(key, change.revision);
+        } else {
+          activeRevisions.delete(key);
+        }
+        emit(method, message);
+        return;
+      }
+      if (change?.type !== "patches") return;
+      if (activeOwners.get(key) !== ownerClientId) return;
+      if (!activeRevisions.has(key) || activeRevisions.get(key) !== change.baseRevision) return;
+      if (change.revision === undefined || change.revision === null) return;
+      activeRevisions.set(key, change.revision);
       emit(method, message);
       return;
     }
@@ -178,6 +215,7 @@ function createOfficialLiveObserver(options = {}) {
       for (const [thread, ownerClientId] of activeOwners.entries()) {
         if (ownerClientId !== params.clientId) continue;
         activeOwners.delete(thread);
+        activeRevisions.delete(thread);
         matched = true;
       }
       // client-status-changed 是 owner 级别的全局事件，多个 thread 只需向 renderer 转发一次。
@@ -214,6 +252,7 @@ function createOfficialLiveObserver(options = {}) {
     parser?.reset();
     parser = null;
     clearActiveState();
+    emitConnectionReset("socket-closed");
     scheduleReconnect();
   }
 
@@ -280,7 +319,7 @@ function createOfficialLiveObserver(options = {}) {
   }
 
   function refresh() {
-    if (clientId) resubscribeKnownThreads();
+    resubscribeKnownThreads();
   }
 
   function stop() {
