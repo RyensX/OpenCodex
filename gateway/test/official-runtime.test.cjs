@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { openFileTargetFromIpc } = require("../runtime/ipc/open-file-context.cjs");
+const { createOfficialLiveObserver, encodeIpcFrame } = require("../runtime/ipc/official-live-observer.cjs");
 const { __test } = require("../runtime/ipc/official-runtime.cjs");
 
 test("remote file manager interception condition is target and host based", () => {
@@ -149,4 +150,150 @@ test("official chunk receiver rejects an out-of-order continuation without ackno
     }),
     { type: "pending", acknowledgement: null }
   );
+});
+
+test("official live observer follows known threads without sending control requests", () => {
+  const { EventEmitter } = require("node:events");
+  const writes = [];
+  const published = [];
+  const socket = new EventEmitter();
+  socket.writable = true;
+  socket.destroyed = false;
+  socket.write = (frame) => writes.push(JSON.parse(frame.subarray(4).toString("utf8")));
+  socket.destroy = () => {
+    socket.destroyed = true;
+  };
+
+  const observer = createOfficialLiveObserver({
+    socketPaths: ["/tmp/original-codex.sock"],
+    socketFactory: () => socket,
+    publish: (payload) => published.push(payload),
+    reconnectDelayMs: -1,
+  });
+
+  observer.start();
+  observer.observeThread("thread-known");
+  socket.emit("connect");
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "response",
+      method: "initialize",
+      resultType: "success",
+      handledByClientId: "observer-client",
+    })
+  );
+
+  assert.deepEqual(
+    writes.map((message) => message.method),
+    ["initialize", "thread-stream-following-changed"]
+  );
+  assert.equal(writes.some((message) => String(message.method).startsWith("thread-follower-")), false);
+
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "broadcast",
+      method: "thread-stream-state-changed",
+      sourceClientId: "desktop-owner",
+      params: {
+        conversationId: "thread-known",
+        hostId: "local",
+        change: { type: "snapshot", revision: 1 },
+      },
+    })
+  );
+  assert.equal(published.at(-1).channel, "thread-stream-state-changed");
+  assert.equal(observer.__test.getActiveOwners().get("local\u0000thread-known"), "desktop-owner");
+
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "broadcast",
+      method: "thread-stream-following-status-requested",
+      sourceClientId: "desktop-owner",
+      params: { conversationId: "thread-second", hostId: "local" },
+    })
+  );
+  assert.equal(writes.at(-1).method, "thread-stream-following-changed");
+  assert.equal(writes.at(-1).params.conversationId, "thread-second");
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "broadcast",
+      method: "thread-stream-state-changed",
+      sourceClientId: "desktop-owner",
+      params: {
+        conversationId: "thread-second",
+        hostId: "local",
+        change: { type: "snapshot", revision: 1 },
+      },
+    })
+  );
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "broadcast",
+      method: "client-status-changed",
+      params: { clientId: "desktop-owner", status: "disconnected" },
+    })
+  );
+  assert.equal(observer.__test.getActiveOwners().size, 0);
+  assert.equal(published.at(-1).channel, "client-status-changed");
+  assert.equal(
+    published.filter((payload) => payload.channel === "client-status-changed").length,
+    1
+  );
+  observer.stop();
+});
+
+test("official live observer clears active state when the original IPC disconnects", () => {
+  const { EventEmitter } = require("node:events");
+  const published = [];
+  const socket = new EventEmitter();
+  socket.writable = true;
+  socket.destroyed = false;
+  socket.write = () => true;
+  socket.destroy = () => {
+    socket.destroyed = true;
+  };
+  const observer = createOfficialLiveObserver({
+    socketPaths: ["/tmp/original-codex.sock"],
+    socketFactory: () => socket,
+    publish: (payload) => published.push(payload),
+    reconnectDelayMs: -1,
+  });
+
+  observer.start();
+  observer.observeThread("thread-known");
+  socket.emit("connect");
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "response",
+      method: "initialize",
+      resultType: "success",
+      handledByClientId: "observer-client",
+    })
+  );
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "broadcast",
+      method: "thread-stream-state-changed",
+      sourceClientId: "desktop-owner",
+      params: {
+        conversationId: "thread-known",
+        hostId: "local",
+        change: { type: "snapshot", revision: 1 },
+      },
+    })
+  );
+
+  socket.emit("close");
+
+  assert.equal(observer.__test.getActiveOwners().size, 0);
+  assert.equal(published.at(-1).channel, "client-status-changed");
+  assert.equal(published.some((payload) => payload.channel === "ipc-connection-reset"), false);
+  observer.stop();
 });
