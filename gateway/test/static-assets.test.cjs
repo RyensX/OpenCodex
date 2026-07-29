@@ -94,6 +94,13 @@ function serveOfficialAsset(service, reqPath, host) {
   return res.body.toString("utf-8");
 }
 
+function serveOfficialAssetResponse(service, reqPath, host = "localhost:3737") {
+  const file = service.staticFile(reqPath);
+  const res = makeResponseRecorder();
+  service.serveFile({ headers: { host } }, res, file, 200, reqPath);
+  return res;
+}
+
 test("web shell manifest requests credentials for protected origins", () => {
   const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
 
@@ -352,4 +359,18 @@ test("renames official open-in-folder locale message only for remote browser hos
 
   const loopbackSource = serveOfficialAsset(service, reqPath, "localhost:3737");
   assert.match(loopbackSource, /"artifactTab\.preview\.openInFolder":`打开所在文件夹`/);
+});
+
+test("caches current patched assets without making the legacy prefix immutable", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  fs.writeFileSync(path.join(assetsDir, "app-test.js"), "export const ready = true;");
+  const service = createService(webviewDir);
+
+  const current = serveOfficialAssetResponse(service, `${PATCHED_OFFICIAL_PREFIX}assets/app-test.js`);
+  const legacy = serveOfficialAssetResponse(service, "/official-patched/assets/app-test.js");
+
+  assert.equal(current.headers["cache-control"], "public, max-age=31536000, immutable");
+  assert.equal(legacy.headers["cache-control"], "no-store");
 });

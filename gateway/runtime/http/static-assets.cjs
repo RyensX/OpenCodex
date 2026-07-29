@@ -448,7 +448,9 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   function cacheControlForRequestPath(reqPath) {
     if (process.env.CODEX_WEB_DISABLE_ASSET_CACHE === "1") return "no-store";
     if (patchedOfficialAssetName(reqPath)) {
-      // patched chunk 的内容由 gateway 响应期生成，旧前缀也必须 no-store，避免跨版本继续吃旧模块图。
+      // 当前前缀同时包含 patch 版本，官方文件名又带内容 hash；任一侧更新都会生成新 URL。
+      if (reqPath.startsWith(PATCHED_OFFICIAL_PREFIX)) return "public, max-age=31536000, immutable";
+      // 旧前缀没有可靠版本位，只用于兼容浏览器残留的懒加载请求。
       return "no-store";
     }
     if (reqPath.startsWith("/official/assets/")) return "public, max-age=31536000, immutable";
