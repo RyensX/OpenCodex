@@ -1,0 +1,4 @@
+{
+  "plugin.projectRecentSort.label": "Sort projects by recent activity",
+  "plugin.projectRecentSort.desc": "Makes Recent sort projects by their latest activity while preserving the saved Manual project order."
+}
