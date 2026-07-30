@@ -49,6 +49,10 @@ function escapeRegExp(value) {
 const OPEN_IN_FOLDER_LOCALE_VALUE_RE = new RegExp(
   `("${escapeRegExp(OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID)}"\\s*:\\s*)${JS_STRING_LITERAL}`
 );
+const APPLICATION_MENU_CAPABILITY_CHECK_RE =
+  /\b[A-Za-z_$][\w$]*\(\)\s*&&\s*[A-Za-z_$][\w$]*\??\.applicationMenu\s*!={1,2}\s*(?:null|void 0)\b/g;
+const APPLICATION_MENU_SERVICE_USAGE_RE =
+  /\b[A-Za-z_$][\w$]*\??\.applicationMenu\??\.(?:getSnapshot|invokeItem)\b/;
 // 固定 web-shell 资源只在这里登记一次，白名单和文件映射共用同一份配置。
 const WEB_SHELL_STATIC_FILES = new Map([
   [FAVICON_PATH, path.join(WEB_SHELL_ASSETS_DIR, "icon.png")],
@@ -86,8 +90,11 @@ const WEB_SHELL_STATIC_FILES = new Map([
 // 静态资源层把官方 renderer/web-shell 的路径差异统一隐藏起来，server 只需要按 URL 取文件。
 function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   let hasWarnedHistoryPatchMiss = false;
+  let hasWarnedApplicationMenuPatchMiss = false;
   // 旧版本曾经使用 /official-patched/；浏览器缓存的旧 chunk 可能还会懒加载这个前缀。
-  const patchedOfficialPrefixes = Array.from(new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched/"]));
+  const patchedOfficialPrefixes = Array.from(
+    new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched-v4/", "/official-patched/"])
+  );
 
   function matchedPatchedOfficialPrefix(reqPath) {
     return patchedOfficialPrefixes.find((prefix) => reqPath.startsWith(prefix)) || "";
@@ -406,6 +413,24 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return source.replace(OPEN_IN_FOLDER_LOCALE_VALUE_RE, (_match, prefix) => `${prefix}${JSON.stringify(downloadFileMessage())}`);
   }
 
+  function patchApplicationMenuCapabilityCheck(source) {
+    /**
+     * 旧版 renderer 通过 electronBridge.showApplicationMenu 判断是否展示菜单栏，polyfill 已不暴露该方法。
+     * 新版改为检查 app-host 的 applicationMenu 服务；Web 端仍需保留其它 app-host 能力，因此只关闭菜单展示判定。
+     */
+    const patched = source.replace(APPLICATION_MENU_CAPABILITY_CHECK_RE, "false");
+    if (
+      patched === source &&
+      source.includes("windowsMenuBar.") &&
+      APPLICATION_MENU_SERVICE_USAGE_RE.test(source) &&
+      !hasWarnedApplicationMenuPatchMiss
+    ) {
+      hasWarnedApplicationMenuPatchMiss = true;
+      console.warn("[gateway] application menu patch skipped: current bundle shape did not match");
+    }
+    return patched;
+  }
+
   /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
   function patchOfficialAsset(reqPath, data, req) {
     if (!shouldPatchOfficialAsset(reqPath)) return data;
@@ -413,6 +438,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     let patched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
       ? patchAppServerManagerSignalsChunk(source)
       : source;
+    patched = patchApplicationMenuCapabilityCheck(patched);
     if (!isLoopbackHostHeader(req && req.headers && req.headers.host)) {
       patched = patchOpenInFolderLocaleMessage(patched);
     }

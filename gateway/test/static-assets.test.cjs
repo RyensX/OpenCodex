@@ -118,6 +118,37 @@ test("bridge keeps synchronous official preload methods out of the adaptive IPC 
   assert.ok(source.indexOf("target.getInitialSidebarBootstrap") < source.indexOf("createAdaptiveBridgeProxy"));
 });
 
+test("bridge hides the legacy Electron application menu capability", () => {
+  const source = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
+
+  // 旧版 renderer 只要发现此方法存在就会展示“文件/编辑/视图/帮助”，两层兜底都必须保留。
+  assert.match(source, /delete target\.showApplicationMenu;/);
+  assert.match(source, /BRIDGE_FALLBACK_UNDEFINED_PROPS[\s\S]*"showApplicationMenu"/);
+});
+
+test("patched official renderer hides the app-host application menu capability", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assetName = "app-initial-menu-test.js";
+  fs.writeFileSync(
+    path.join(assetsDir, assetName),
+    [
+      'const labels={file:{id:"windowsMenuBar.file"}};',
+      "function isMenuEnabled(){return isWindows()&&services.applicationMenu!=null}",
+      "function getMenu(){return services.applicationMenu.getSnapshot()}",
+    ].join("")
+  );
+  const service = createService(webviewDir);
+
+  const source = serveOfficialAsset(service, `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`, "localhost:3737");
+
+  // 只关闭新版 renderer 的菜单展示判定，app-host 的其它服务和调用链保持原样。
+  assert.match(source, /function isMenuEnabled\(\)\{return false\}/);
+  assert.match(source, /services\.applicationMenu\.getSnapshot\(\)/);
+  assert.doesNotMatch(source, /isWindows\(\)&&services\.applicationMenu!=null/);
+});
+
 test("bridge reconnects active app-host ports after websocket hello", () => {
   const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
 
