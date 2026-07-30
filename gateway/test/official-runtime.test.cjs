@@ -163,6 +163,8 @@ test("falls back to read/write copy for WindowsApps encrypted runner executable"
     fs.copyFileSync = previousCopyFileSync;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
 test("sidebar bootstrap accepts only the synchronous renderer-safe shape", () => {
   const bootstrap = {
     catalogSnapshot: { revision: 7, isComplete: true, hosts: [], entries: [] },
