@@ -149,6 +149,65 @@ test("patched official renderer hides the app-host application menu capability",
   assert.doesNotMatch(source, /isWindows\(\)&&services\.applicationMenu!=null/);
 });
 
+test("patched official renderer prioritizes first-screen reads without delaying capability initialization", async (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assetName = "app-initial-request-scheduler-test.js";
+  fs.writeFileSync(
+    path.join(assetsDir, assetName),
+    [
+      "const criticalMethods=new Set([`thread/approveGuardianDeniedAction`,`thread/start`,`turn/interrupt`,`turn/start`,`turn/steer`]);",
+      "const backgroundMethods=new Set([`app/list`,`collaborationMode/list`,`config/read`,`configRequirements/read`,`experimentalFeature/list`,`hooks/list`,`mcpServerStatus/list`,`model/list`,`permissionProfile/list`,`plugin/list`,`skills/list`]);",
+      "class RequestClient{",
+      "dispatchMessage=()=>{};requestPromises=new Map;inFlightRequests=new Set;pendingConfigReadRequests=new Map;queuedRequests=[];",
+      "constructor(){this.calls=[];this.pending=[]}",
+      "sendConfigReadRequest(params,options){return this.enqueueRequest(`config/read`,params,options)}",
+      "enqueueRequest(method,params,options){this.calls.push({method,params,options});return new Promise((resolve,reject)=>this.pending.push({resolve,reject}))}",
+      "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,n)}",
+      "}",
+    ].join("")
+  );
+  const service = createService(webviewDir);
+  const patched = serveOfficialAsset(
+    service,
+    `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`,
+    "localhost:3737"
+  );
+  const { RequestClient, backgroundMethods, criticalMethods } = new Function(
+    `${patched};return {RequestClient,backgroundMethods,criticalMethods};`
+  )();
+
+  // 插件、MCP 与 Apps 的首个请求必须立即发出；只有参数相同且尚未完成的重复请求共享 Promise。
+  for (const method of ["plugin/list", "mcpServerStatus/list", "app/list"]) {
+    const client = new RequestClient();
+    const params = { cursor: null, limit: 100 };
+    const options = { priority: "background", source: method };
+    const first = client.sendRequest(method, params, options);
+    const duplicate = client.sendRequest(method, params, options);
+    assert.equal(client.calls.length, 1);
+    client.pending[0].resolve({ method });
+    assert.deepEqual(await first, { method });
+    assert.deepEqual(await duplicate, { method });
+
+    // 完成后映射立即删除；下一次请求必须重新访问 App Server，不能命中结果缓存。
+    const next = client.sendRequest(method, params, options);
+    assert.equal(client.calls.length, 2);
+    client.pending[1].resolve({ method, refreshed: true });
+    assert.deepEqual(await next, { method, refreshed: true });
+  }
+
+  // 首屏读取升为 interactive，但不占用 turn/start 的 critical 通道；能力清单保持 background。
+  for (const method of ["config/read", "model/list", "thread/list", "thread/read"]) {
+    assert.equal(backgroundMethods.has(method), false);
+    assert.equal(criticalMethods.has(method), false);
+  }
+  assert.equal(criticalMethods.has("turn/start"), true);
+  assert.equal(backgroundMethods.has("plugin/list"), true);
+  assert.equal(backgroundMethods.has("mcpServerStatus/list"), true);
+  assert.equal(backgroundMethods.has("app/list"), true);
+});
+
 test("bridge reconnects active app-host ports after websocket hello", () => {
   const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
 

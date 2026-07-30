@@ -53,6 +53,19 @@ const APPLICATION_MENU_CAPABILITY_CHECK_RE =
   /\b[A-Za-z_$][\w$]*\(\)\s*&&\s*[A-Za-z_$][\w$]*\??\.applicationMenu\s*!={1,2}\s*(?:null|void 0)\b/g;
 const APPLICATION_MENU_SERVICE_USAGE_RE =
   /\b[A-Za-z_$][\w$]*\??\.applicationMenu\??\.(?:getSnapshot|invokeItem)\b/;
+const APP_SERVER_REQUEST_CLIENT_FIELDS_RE =
+  /pendingConfigReadRequests=new Map;queuedRequests=\[\]/;
+const APP_SERVER_REQUEST_CLIENT_SEND_RE =
+  /async sendRequest\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{if\(this\.dispatchMessage==null\)throw Error\(`AppServerRequestClient is missing a message dispatcher`\);return \1===`config\/read`\?this\.sendConfigReadRequest\(\2,\3\):this\.enqueueRequest\(\1,\2,\3\)\}/;
+const APP_SERVER_BACKGROUND_METHODS_RE =
+  /new Set\(\[`app\/list`,`collaborationMode\/list`,`config\/read`,`configRequirements\/read`,`experimentalFeature\/list`,`hooks\/list`,`mcpServerStatus\/list`,`model\/list`,`permissionProfile\/list`,`plugin\/list`,`skills\/list`\]\)/;
+const APP_SERVER_BACKGROUND_METHODS = [
+  "app/list",
+  "hooks/list",
+  "mcpServerStatus/list",
+  "plugin/list",
+  "skills/list",
+];
 // 固定 web-shell 资源只在这里登记一次，白名单和文件映射共用同一份配置。
 const WEB_SHELL_STATIC_FILES = new Map([
   [FAVICON_PATH, path.join(WEB_SHELL_ASSETS_DIR, "icon.png")],
@@ -93,7 +106,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   let hasWarnedApplicationMenuPatchMiss = false;
   // 旧版本曾经使用 /official-patched/；浏览器缓存的旧 chunk 可能还会懒加载这个前缀。
   const patchedOfficialPrefixes = Array.from(
-    new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched-v4/", "/official-patched/"])
+    new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched-v5/", "/official-patched-v4/", "/official-patched/"])
   );
 
   function matchedPatchedOfficialPrefix(reqPath) {
@@ -431,6 +444,50 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     return patched;
   }
 
+  function patchAppServerRequestScheduling(source) {
+    /**
+     * 官方调度器会把部分首屏必需读取与耗时的能力清单一起放进 background 队列。
+     * 这里只提升首屏读取优先级，并合并仍在进行中的完全相同请求；Promise 完成后立即删除，
+     * 不保存返回值，也不延后 plugin/MCP/Apps 的首个初始化请求。
+     */
+    if (!source.includes("AppServerRequestClient is missing a message dispatcher")) return source;
+    const hasFields = APP_SERVER_REQUEST_CLIENT_FIELDS_RE.test(source);
+    const sendMatch = source.match(APP_SERVER_REQUEST_CLIENT_SEND_RE);
+    const backgroundMatch = source.match(APP_SERVER_BACKGROUND_METHODS_RE);
+    if (!hasFields || !sendMatch || !backgroundMatch) {
+      console.warn("[gateway] app-server request scheduling patch skipped: current bundle shape did not match");
+      return source;
+    }
+
+    const [, methodVar, paramsVar, optionsVar] = sendMatch;
+    const coalescedMethods = [
+      `${methodVar}===\`app/list\``,
+      `${methodVar}===\`mcpServerStatus/list\``,
+      `${methodVar}===\`plugin/list\``,
+    ].join("||");
+    const replacement = [
+      `async sendRequest(${methodVar},${paramsVar},${optionsVar}){`,
+      "if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);",
+      `if(${methodVar}===\`config/read\`)return this.sendConfigReadRequest(${paramsVar},${optionsVar});`,
+      `if(!(${coalescedMethods}))return this.enqueueRequest(${methodVar},${paramsVar},${optionsVar});`,
+      `let r=JSON.stringify({method:${methodVar},params:${paramsVar},priority:${optionsVar}?.priority??null,source:${optionsVar}?.source??null,timeoutMs:${optionsVar}?.timeoutMs??0}),`,
+      "i=this.opencodexInFlightCapabilityReads.get(r);",
+      "if(i!=null)return i;",
+      `let a=this.enqueueRequest(${methodVar},${paramsVar},${optionsVar});`,
+      "return this.opencodexInFlightCapabilityReads.set(r,a),",
+      "a.then(()=>this.opencodexInFlightCapabilityReads.delete(r),()=>this.opencodexInFlightCapabilityReads.delete(r)),a}",
+    ].join("");
+    const backgroundMethods = APP_SERVER_BACKGROUND_METHODS.map((method) => `\`${method}\``).join(",");
+
+    return source
+      .replace(
+        APP_SERVER_REQUEST_CLIENT_FIELDS_RE,
+        "pendingConfigReadRequests=new Map;opencodexInFlightCapabilityReads=new Map;queuedRequests=[]"
+      )
+      .replace(APP_SERVER_REQUEST_CLIENT_SEND_RE, replacement)
+      .replace(APP_SERVER_BACKGROUND_METHODS_RE, `new Set([${backgroundMethods}])`);
+  }
+
   /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
   function patchOfficialAsset(reqPath, data, req) {
     if (!shouldPatchOfficialAsset(reqPath)) return data;
@@ -439,6 +496,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       ? patchAppServerManagerSignalsChunk(source)
       : source;
     patched = patchApplicationMenuCapabilityCheck(patched);
+    patched = patchAppServerRequestScheduling(patched);
     if (!isLoopbackHostHeader(req && req.headers && req.headers.host)) {
       patched = patchOpenInFolderLocaleMessage(patched);
     }
