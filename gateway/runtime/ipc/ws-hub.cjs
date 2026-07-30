@@ -510,7 +510,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return true;
   }
 
-  function handleAppHostPortMessage(ws, message) {
+  function handleAppHostPortMessage(ws, req, message) {
     // 浏览器端 MessagePort 的后续字符串帧都从这里回写到官方 Electron port。
     const clientId = normalizedWsClientId(ws, message);
     const portId = message && typeof message.portId === "string" ? message.portId : "";
@@ -533,13 +533,18 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       return true;
     }
     const relays = appHostRelaysForSocket(ws);
-    const relay = relays.get(portId);
+    let relay = relays.get(portId);
     if (!relay) {
-      diagnosticWarn("ws-hub", "app_host_message_missing_relay", {
-        clientId: shortId(clientId),
-        portId: shortId(portId),
-      });
-      return true;
+      // WS 重连会释放旧 socket 上的 relay，但浏览器 MessagePort 仍会继续发送；按原身份懒重建后再转发首帧。
+      handleAppHostConnect(ws, req, { ...message, type: "app-host-connect" });
+      relay = relays.get(portId);
+      if (!relay) {
+        diagnosticWarn("ws-hub", "app_host_message_missing_relay", {
+          clientId: shortId(clientId),
+          portId: shortId(portId),
+        });
+        return true;
+      }
     }
     try {
       // 观察器属于独立展示层；hub 仍只负责透明转发，不解析 App Server 协议或路由语义。
@@ -559,7 +564,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       return typeof handleNotificationEvent === "function" ? handleNotificationEvent(message, ws, req) : true;
     }
     if (message.type === "app-host-connect") return handleAppHostConnect(ws, req, message);
-    if (message.type === "app-host-port-message") return handleAppHostPortMessage(ws, message);
+    if (message.type === "app-host-port-message") return handleAppHostPortMessage(ws, req, message);
     return false;
   }
 
