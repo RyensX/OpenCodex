@@ -200,6 +200,16 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
   const rawSettings = serverMessages.find((message) => message.id === "select-auto");
   assert.equal(rawSettings.params.model, "gpt-5.3-codex-spark");
   assert.equal(JSON.stringify(rawSettings).includes('"auto"'), false);
+  // Auto 刚开启且尚未分类时，摘要先沿用当前具体模型；分类完成后会更新为最近结果。
+  assert.deepEqual(service.activeRoute("user-thread"), {
+    threadId: "user-thread",
+    turnId: "",
+    tier: "",
+    model: "gpt-5.3-codex-spark",
+    effort: "low",
+    fallback: false,
+    displayName: "gpt-5.3-codex-spark",
+  });
 
   await writeRequest(fake.child.stdin, {
     id: "user-turn-1",
@@ -244,7 +254,12 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
       params: { threadId: "user-thread", turn: { id: "public-user-turn-1", status: "completed" } },
     })}\n`
   );
-  await waitFor(() => service.activeRoute("user-thread") === null);
+  const firstIdleRoute = await waitFor(() => {
+    const route = service.activeRoute("user-thread");
+    return route?.turnId === "" ? route : null;
+  });
+  assert.equal(firstIdleRoute.model, "gpt-5.6-luna");
+  assert.equal(firstIdleRoute.effort, "high");
 
   classifierText = JSON.stringify({
     route: {
@@ -300,7 +315,20 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
       params: { threadId: "user-thread", turn: { id: "public-user-turn-2", status: "interrupted" } },
     })}\n`
   );
-  await waitFor(() => service.activeRoute("user-thread") === null);
+  const interruptedIdleRoute = await waitFor(() => {
+    const route = service.activeRoute("user-thread");
+    return route?.turnId === "" ? route : null;
+  });
+  assert.equal(interruptedIdleRoute.model, "gpt-5.3-codex-spark");
+  assert.equal(interruptedIdleRoute.effort, "low");
+
+  await writeRequest(fake.child.stdin, {
+    id: "select-manual",
+    method: "thread/settings/update",
+    params: { threadId: "user-thread", model: "gpt-5.6-terra", effort: "high" },
+  });
+  await waitFor(() => publicMessages.find((message) => message.id === "select-manual"));
+  assert.equal(service.activeRoute("user-thread"), null);
 
   assert.equal(publicMessages.some((message) => String(message.id || "").startsWith("opencodex.router:")), false);
   assert.equal(publicMessages.some((message) => String(message.params?.threadId || "").startsWith("classifier-")), false);

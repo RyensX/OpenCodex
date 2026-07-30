@@ -118,7 +118,7 @@ async function handleOpenCodexPluginApi(req, res, url, pluginService) {
       sendJson(res, 400, { ok: false, error: "threadId is required" }, { "cache-control": "no-store" });
       return true;
     }
-    // 只返回仍在执行的安全路由摘要；完成后的历史结果不会由该接口暴露。
+    // Auto 开启时返回安全路由摘要；空闲状态回退到最近一次分类结果。
     sendJson(
       res,
       200,

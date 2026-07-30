@@ -23,6 +23,7 @@
   };
   const activeRoutes = new Map();
   const pendingTurnStarts = new Map();
+  const pendingModelSelections = new Map();
   const threadRevisions = new Map();
   let pluginEnabled = false;
   let displayEnabled = true;
@@ -83,14 +84,15 @@
   }
 
   function isAutoTurn(params) {
-    const directModel = String(params?.model || "").trim().toLowerCase();
-    const collaborationModel = String(params?.collaborationMode?.settings?.model || "").trim().toLowerCase();
+    const selectedModel = configuredModel(params).toLowerCase();
     // 官方可能把虚拟 Auto 映射成上一轮真实 model 再发请求，当前模型选择器是分类前的可靠兜底信号。
-    return (
-      directModel === "auto" ||
-      collaborationModel === "auto" ||
-      w.__OpenCodexSmartModelRouterComposer?.autoSelected === true
-    );
+    return selectedModel === "auto" || w.__OpenCodexSmartModelRouterComposer?.autoSelected === true;
+  }
+
+  function configuredModel(params) {
+    const directModel = String(params?.model || "").trim();
+    if (directModel) return directModel;
+    return String(params?.collaborationMode?.settings?.model || "").trim();
   }
 
   function bumpThreadRevision(threadId) {
@@ -287,8 +289,12 @@
     if (TERMINAL_METHODS.has(method)) {
       const active = activeRoutes.get(threadId);
       const turnId = normalizedId(params.turn?.id || params.turnId);
-      if (!active || !turnId || !active.turnId || active.turnId === turnId) activeRoutes.delete(threadId);
       bumpThreadRevision(threadId);
+      if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
+        // 回合结束只清除运行标记，具体路由继续作为 Auto 的最近一次分类结果展示。
+        activeRoutes.set(threadId, { ...active, turnId: "", pending: false });
+      }
+      void hydrateActiveRoute(threadId);
       scheduleRender();
       return;
     }
@@ -309,6 +315,22 @@
     const params = message.params && typeof message.params === "object" ? message.params : {};
     const threadId = normalizedId(params.threadId || params.thread?.id);
     if (threadId && VISIBLE_THREAD_METHODS.has(method)) selectVisibleThread(threadId, method !== "turn/start");
+    if (method === "thread/settings/update" && threadId) {
+      const model = configuredModel(params).toLowerCase();
+      if (!model) return;
+      selectVisibleThread(threadId);
+      const key = requestId(message.id);
+      if (key) pendingModelSelections.set(key, { auto: model === "auto", threadId });
+      bumpThreadRevision(threadId);
+      if (model === "auto") {
+        // 成功响应或网关状态事件会补取持久化结果；现有最近结果无需在切换时闪烁隐藏。
+        pluginEnabled = true;
+      } else {
+        activeRoutes.delete(threadId);
+      }
+      scheduleRender();
+      return;
+    }
     if (method !== "turn/start" || !threadId) return;
 
     const key = requestId(message.id);
@@ -340,12 +362,21 @@
       return;
     }
     const key = requestId(message.id);
+    if (key && pendingModelSelections.has(key)) {
+      const selection = pendingModelSelections.get(key);
+      pendingModelSelections.delete(key);
+      bumpThreadRevision(selection.threadId);
+      if (message.error || selection.auto) void hydrateActiveRoute(selection.threadId);
+      else activeRoutes.delete(selection.threadId);
+      scheduleRender();
+    }
     if (key && pendingTurnStarts.has(key)) {
       const threadId = pendingTurnStarts.get(key);
       pendingTurnStarts.delete(key);
       if (message.error) {
-        activeRoutes.delete(threadId);
         bumpThreadRevision(threadId);
+        // Auto 启动失败时仍展示最近分类；手动回合会由接口返回空结果。
+        void hydrateActiveRoute(threadId);
         scheduleRender();
       }
     }
@@ -369,7 +400,7 @@
         fallback: false,
         pending: true,
       });
-    } else if (["selected", "started"].includes(status)) {
+    } else if (["selected", "started", "idle"].includes(status)) {
       const route = normalizedRoute(event.route, threadId, event.route?.turnId);
       if (route) {
         pluginEnabled = true;
@@ -474,6 +505,7 @@
         activeRouteCount: activeRoutes.size,
         autoSelected: w.__OpenCodexSmartModelRouterComposer?.autoSelected === true,
         displayEnabled,
+        pendingModelSelectionCount: pendingModelSelections.size,
         pendingTurnCount: pendingTurnStarts.size,
         pluginEnabled,
         visibleThreadKnown: !!currentThreadId(),

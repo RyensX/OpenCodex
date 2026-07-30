@@ -294,6 +294,10 @@ test("smart scheduling settings localize tier and field labels", () => {
   assert.equal(zh["plugin.smartModelRouter.summary.model"], "模型");
   assert.equal(zh["plugin.smartModelRouter.summary.effort"], "推理强度");
   assert.equal(zh["plugin.smartModelRouter.summary.determining"], "正在判断…");
+  assert.equal(
+    zh["plugin.smartModelRouter.setting.showRouteInSummary.description"],
+    "开启 Auto 后，在任务摘要中持续显示最近一次调度采用的模型和推理强度。"
+  );
   assert.equal(en["plugin.smartModelRouter.summary.title"], "Smart scheduling");
   assert.equal(en["plugin.smartModelRouter.summary.model"], "Model");
   assert.equal(en["plugin.smartModelRouter.summary.effort"], "Reasoning effort");
@@ -316,7 +320,7 @@ test("smart scheduling settings localize tier and field labels", () => {
   assert.match(fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8"), /label: effort/);
 });
 
-test("smart scheduling summary follows root-path task context and only active Auto turns", () => {
+test("smart scheduling summary follows root-path task context while Auto remains enabled", () => {
   const source = fs.readFileSync(SMART_SCHEDULING_SUMMARY, "utf-8");
   const styles = fs.readFileSync(SMART_SCHEDULING_SUMMARY_CSS, "utf-8");
   const bridge = fs.readFileSync(path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js"), "utf-8");
@@ -340,6 +344,9 @@ test("smart scheduling summary follows root-path task context and only active Au
   assert.match(source, /PROTOCOL_ENVELOPE_KEYS/);
   assert.match(source, /selectVisibleThread\(threadId\)/);
   assert.match(source, /pending\?\.pending \|\| autoSelected/);
+  assert.match(source, /pendingModelSelections/);
+  assert.match(source, /\["selected", "started", "idle"\]/);
+  assert.match(source, /turnId: "", pending: false/);
   assert.match(source, /active-route\?threadId=/);
   assert.match(source, /get diagnostics\(\)/);
   assert.doesNotMatch(source, /environmentTitles|findEnvironment/);

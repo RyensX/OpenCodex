@@ -20,7 +20,7 @@ function fakeRouter() {
   };
 }
 
-test("presentation correlates IPC and App Host turns and sends safe route state only to their client", () => {
+test("presentation correlates turns and model selections and sends safe route state only to their client", () => {
   const router = fakeRouter();
   const sent = [];
   const presentation = createSmartSchedulingPresentation({
@@ -49,6 +49,13 @@ test("presentation correlates IPC and App Host turns and sends safe route state 
       },
     ],
   });
+  presentation.observeAppHostFrame({
+    clientId: "client-3",
+    data: JSON.stringify({
+      method: "thread/settings/update",
+      params: { threadId: "thread-3", model: "auto" },
+    }),
+  });
   router.emit({ status: "classifying", threadId: "thread-1" });
   router.emit({
     status: "selected",
@@ -57,8 +64,13 @@ test("presentation correlates IPC and App Host turns and sends safe route state 
   });
   router.emit({ status: "classifying", threadId: "thread-2" });
   router.emit({ status: "selected", threadId: "unmapped", route: { model: "spark", effort: "low" } });
+  router.emit({
+    status: "idle",
+    threadId: "thread-3",
+    route: { tier: "balanced", model: "luna", effort: "high", rationale: "private" },
+  });
 
-  assert.equal(sent.length, 3);
+  assert.equal(sent.length, 4);
   assert.equal(sent[0].clientId, "client-1");
   assert.equal(sent[0].payload.event.status, "classifying");
   assert.deepEqual(sent[1].payload.event.route, {
@@ -70,6 +82,9 @@ test("presentation correlates IPC and App Host turns and sends safe route state 
   });
   assert.equal(sent[2].clientId, "client-2");
   assert.equal(sent[2].payload.event.status, "classifying");
+  assert.equal(sent[3].clientId, "client-3");
+  assert.equal(sent[3].payload.event.status, "idle");
+  assert.equal(sent[3].payload.event.route.displayName, "GPT-5.6-Luna");
   assert.equal(JSON.stringify(sent).includes("private"), false);
   presentation.dispose();
 });

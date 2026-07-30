@@ -52,10 +52,16 @@ function createSmartSchedulingPresentation({ modelRouter, sendTo } = {}) {
   }
 
   function observeAppHostFrame({ clientId, data, direction = "client" } = {}) {
-    if (direction !== "client" || typeof data !== "string" || !data.includes("turn/")) return;
+    if (
+      direction !== "client" ||
+      typeof data !== "string" ||
+      (!data.includes("turn/") && !data.includes("thread/"))
+    ) {
+      return;
+    }
     try {
       visitProtocolMessages(JSON.parse(data), (message) => {
-        if (message?.method !== "turn/start") return;
+        if (!["turn/start", "thread/settings/update"].includes(message?.method)) return;
         rememberClient(message.params?.threadId || message.params?.thread?.id, clientId);
       });
     } catch {}
@@ -63,9 +69,9 @@ function createSmartSchedulingPresentation({ modelRouter, sendTo } = {}) {
 
   function observeIpcInvoke({ clientId, args } = {}) {
     if (!normalizedId(clientId) || !Array.isArray(args)) return;
-    // 当前官方 renderer 的 turn/start 主要走 HTTP IPC；沿已知协议包裹层读取，不保存输入正文。
+    // 沿已知协议包裹层关联回合和模型选择，不保存输入正文或设置内容。
     visitProtocolMessages(args, (message) => {
-      if (message?.method !== "turn/start") return;
+      if (!["turn/start", "thread/settings/update"].includes(message?.method)) return;
       rememberClient(message.params?.threadId || message.params?.thread?.id, clientId);
     });
   }
@@ -75,7 +81,7 @@ function createSmartSchedulingPresentation({ modelRouter, sendTo } = {}) {
     const status = normalizedId(event?.status);
     if (!threadId || !status) return null;
     const route = safeRoute(event.route, (model) => modelRouter?.modelDisplayName?.(model));
-    if (["selected", "started"].includes(status) && !route) return null;
+    if (["selected", "started", "idle"].includes(status) && !route) return null;
     return {
       type: PRESENTATION_MESSAGE_TYPE,
       event: {

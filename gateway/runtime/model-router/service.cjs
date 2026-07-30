@@ -63,6 +63,30 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     return String(model?.displayName || normalizedModelId).trim() || normalizedModelId;
   }
 
+  function currentAutoRoute(threadId) {
+    const normalizedThreadId = String(threadId || "");
+    if (!normalizedThreadId || !isEnabled() || !stateStore.isThreadAuto(normalizedThreadId)) return null;
+    const active = turnRouteStatus.activeRoute(normalizedThreadId);
+    if (active) return active;
+    const previous = stateStore.threadState(normalizedThreadId);
+    if (!previous?.lastModel || !previous.lastEffort) return null;
+    // 空闲时继续返回最近一次具体调度；turnId 留空，避免被调用方误判为仍在执行。
+    return {
+      threadId: normalizedThreadId,
+      turnId: "",
+      tier: previous.lastTier,
+      model: previous.lastModel,
+      effort: previous.lastEffort,
+      fallback: false,
+    };
+  }
+
+  function emitCurrentAutoRoute(threadId) {
+    const route = currentAutoRoute(threadId);
+    if (route) emitRouteStatus({ status: "idle", threadId: String(threadId || ""), route });
+    else emitRouteStatus({ status: "cleared", threadId: String(threadId || "") });
+  }
+
   let virtualModel;
   let classifier;
   const transport = createAppServerTransport({
@@ -286,7 +310,10 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     }
     const prepared = virtualModel.prepareClientMessage(original);
     const message = prepared.message;
-    if (message?.method === "turn/start") {
+    if (message?.method === "thread/settings/update" && prepared.meta?.threadId) {
+      // 模型选择一提交就同步摘要状态；若官方拒绝，响应处理会按回滚后的状态再次校正。
+      emitCurrentAutoRoute(prepared.meta.threadId);
+    } else if (message?.method === "turn/start") {
       const threadId = String(message.params?.threadId || "");
       // 同一线程严格按 turn 顺序路由，不同线程仍可并发占用两个分类 permit。
       if (prepared.autoTurn) {
@@ -337,17 +364,22 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     }
     const withRouteStatus = turnRouteStatus.processServerMessage(filtered, meta);
     const threadId = String(withRouteStatus?.params?.threadId || withRouteStatus?.params?.thread?.id || meta?.threadId || "");
+    const processed = virtualModel.processServerMessage(withRouteStatus);
     if (withRouteStatus?.method === "turn/started" && threadId) {
       const route = turnRouteStatus.activeRoute(threadId);
       if (route) emitRouteStatus({ status: "started", threadId, route });
     } else if (["turn/completed", "turn/failed", "turn/interrupted"].includes(withRouteStatus?.method) && threadId) {
-      emitRouteStatus({ status: "cleared", threadId });
+      // 回合结束只退出运行态；Auto 未关闭时，摘要继续展示刚完成的分类结果。
+      emitCurrentAutoRoute(threadId);
     } else if (withRouteStatus?.id != null && meta?.method === "turn/start" && withRouteStatus.error && threadId) {
-      emitRouteStatus({ status: "cleared", threadId });
+      emitCurrentAutoRoute(threadId);
+    } else if (withRouteStatus?.id != null && meta?.method === "thread/settings/update" && withRouteStatus.error && threadId) {
+      // virtual model 已在失败响应中恢复旧选择，此处把回滚后的 Auto 状态同步给展示层。
+      emitCurrentAutoRoute(threadId);
     } else if (["thread/deleted", "thread/unsubscribed"].includes(withRouteStatus?.method) && threadId) {
       emitRouteStatus({ status: withRouteStatus.method === "thread/deleted" ? "deleted" : "unsubscribed", threadId });
     }
-    return virtualModel.processServerMessage(withRouteStatus);
+    return processed;
   }
 
   return {
@@ -381,7 +413,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     activeRoute(threadId) {
       const config = pluginConfig();
       if (!config.enabled || config.values?.showRouteInSummary === false) return null;
-      const route = turnRouteStatus.activeRoute(threadId);
+      const route = currentAutoRoute(threadId);
       return route ? { ...route, displayName: modelDisplayName(route.model) } : null;
     },
     async listModels() {

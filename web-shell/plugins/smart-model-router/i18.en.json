@@ -37,5 +37,5 @@
   "plugin.smartModelRouter.setting.model": "Model",
   "plugin.smartModelRouter.setting.effort": "Reasoning effort",
   "plugin.smartModelRouter.setting.showRouteInSummary": "Show scheduling result",
-  "plugin.smartModelRouter.setting.showRouteInSummary.description": "Show the actual model and reasoning effort in the task summary only while an Auto turn is running."
+  "plugin.smartModelRouter.setting.showRouteInSummary.description": "While Auto is enabled, keep the most recently scheduled model and reasoning effort visible in the task summary."
 }

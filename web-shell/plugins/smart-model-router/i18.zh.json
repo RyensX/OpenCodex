@@ -37,5 +37,5 @@
   "plugin.smartModelRouter.setting.model": "模型",
   "plugin.smartModelRouter.setting.effort": "推理强度",
   "plugin.smartModelRouter.setting.showRouteInSummary": "显示调度结果",
-  "plugin.smartModelRouter.setting.showRouteInSummary.description": "仅在 Auto 回合执行期间，在任务摘要中显示实际采用的模型和推理强度。"
+  "plugin.smartModelRouter.setting.showRouteInSummary.description": "开启 Auto 后，在任务摘要中持续显示最近一次调度采用的模型和推理强度。"
 }
