@@ -16,6 +16,8 @@ const { logLine } = require("../shared/logging.cjs");
 const { writeGatewayAsar } = require("../shared/runner-asar.cjs");
 const { patchWindowsRunnerAsarIntegrity } = require("./windows-integrity.cjs");
 
+const WINDOWS_READ_WRITE_COPY_BUFFER_SIZE = 8 * 1024 * 1024;
+
 function runnerExecutableNameForPlatform() {
   if (process.platform === "win32") return RUNNER_WINDOWS_EXECUTABLE_NAME;
   if (process.platform === "linux") return RUNNER_LINUX_EXECUTABLE_NAME;
@@ -66,6 +68,185 @@ function samePortableRuntimeFingerprint(left, right) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
 
+function copyFileByReadWriteSync(sourcePath, targetPath) {
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  const buffer = Buffer.allocUnsafe(WINDOWS_READ_WRITE_COPY_BUFFER_SIZE);
+  let sourceFd = null;
+  let targetFd = null;
+
+  try {
+    sourceFd = fs.openSync(sourcePath, "r");
+    targetFd = fs.openSync(targetPath, "w");
+
+    for (;;) {
+      const bytesRead = fs.readSync(sourceFd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+
+      let offset = 0;
+      while (offset < bytesRead) {
+        offset += fs.writeSync(targetFd, buffer, offset, bytesRead - offset);
+      }
+    }
+  } finally {
+    if (targetFd !== null) fs.closeSync(targetFd);
+    if (sourceFd !== null) fs.closeSync(sourceFd);
+  }
+
+  try {
+    const stat = fs.statSync(sourcePath);
+    fs.chmodSync(targetPath, stat.mode);
+    fs.utimesSync(targetPath, stat.atime, stat.mtime);
+  } catch {}
+}
+
+function tryCopyWindowsFileByReadWrite({
+  sourcePath,
+  targetPath,
+  name,
+  logger,
+  error,
+  platform = process.platform,
+  logFallback = true,
+}) {
+  if (platform !== "win32") return false;
+
+  try {
+    if (!fs.statSync(sourcePath).isFile()) return false;
+  } catch {
+    return false;
+  }
+
+  /**
+   * WindowsApps/MSIX 文件可能可读却无法通过 CopyFile 复制；分块读写避免一次性加载大型 DLL。
+   * 该兜底只处理 runner 工作副本，不改变官方 resources 仍是唯一数据源的语义。
+   */
+  copyFileByReadWriteSync(sourcePath, targetPath);
+  if (logFallback) {
+    const reason = error && error.code ? error.code : error instanceof Error ? error.message : String(error || "");
+    logLine(logger, `official Electron runtime copied Windows file via read/write fallback: ${name || path.basename(sourcePath)} (${reason})`);
+  }
+  return true;
+}
+
+function recoverPortableRuntimeFileCopy({
+  entry,
+  sourcePath,
+  targetPath,
+  logger,
+  error,
+  platform = process.platform,
+  logFallback = true,
+}) {
+  if (tryCopyWindowsFileByReadWrite({ sourcePath, targetPath, name: entry.name, logger, error, platform, logFallback })) {
+    return { copied: true, synthesized: false };
+  }
+  return null;
+}
+
+function copyPortableRuntimeFile({ entry, sourcePath, targetPath, logger, platform = process.platform, logFallback = true }) {
+  try {
+    fs.copyFileSync(sourcePath, targetPath);
+    return { copied: true, synthesized: false };
+  } catch (error) {
+    const recovered = recoverPortableRuntimeFileCopy({ entry, sourcePath, targetPath, logger, error, platform, logFallback });
+    if (recovered) return recovered;
+    throw error;
+  }
+}
+
+function copyPortableRuntimeDirectoryByReadWrite({
+  sourcePath,
+  targetPath,
+  logger,
+  error,
+  platform = process.platform,
+  logDirectory = true,
+}) {
+  if (platform !== "win32") return false;
+
+  try {
+    if (!fs.statSync(sourcePath).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+
+  // 目标目录可能已被原生复制部分写入；逐项覆盖并保留来源中不存在的已有文件。
+  fs.mkdirSync(targetPath, { recursive: true });
+  for (const child of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+    const childSourcePath = path.join(sourcePath, child.name);
+    const childTargetPath = path.join(targetPath, child.name);
+
+    if (child.isDirectory()) {
+      copyPortableRuntimeDirectoryByReadWrite({
+        sourcePath: childSourcePath,
+        targetPath: childTargetPath,
+        logger,
+        error,
+        platform,
+        logDirectory: false,
+      });
+    } else if (child.isFile()) {
+      copyPortableRuntimeFile({
+        entry: child,
+        sourcePath: childSourcePath,
+        targetPath: childTargetPath,
+        logger,
+        platform,
+        logFallback: false,
+      });
+    } else {
+      fs.cpSync(childSourcePath, childTargetPath, {
+        recursive: true,
+        force: true,
+        verbatimSymlinks: true,
+      });
+    }
+  }
+
+  if (logDirectory) {
+    const reason = error && error.code ? error.code : error instanceof Error ? error.message : String(error || "");
+    logLine(logger, `official Electron runtime copied Windows directory via read/write fallback: ${path.basename(sourcePath)} (${reason})`);
+  }
+  return true;
+}
+
+function copyPortableRuntimeEntry({ entry, sourcePath, targetPath, logger, platform = process.platform }) {
+  try {
+    fs.cpSync(sourcePath, targetPath, {
+      recursive: true,
+      force: true,
+      verbatimSymlinks: true,
+    });
+    return { copied: true, synthesized: false };
+  } catch (error) {
+    if (entry.isFile()) {
+      const recovered = recoverPortableRuntimeFileCopy({ entry, sourcePath, targetPath, logger, error, platform });
+      if (recovered) return recovered;
+    }
+    if (
+      typeof entry.isDirectory === "function" &&
+      entry.isDirectory() &&
+      copyPortableRuntimeDirectoryByReadWrite({ sourcePath, targetPath, logger, error, platform })
+    ) {
+      return { copied: true, synthesized: false };
+    }
+    throw error;
+  }
+}
+
+function copyPortableRuntimeExecutable({ sourcePath, targetPath, logger, platform = process.platform }) {
+  copyPortableRuntimeFile({
+    entry: {
+      name: path.basename(sourcePath),
+      isFile: () => true,
+    },
+    sourcePath,
+    targetPath,
+    logger,
+    platform,
+  });
+}
+
 function ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath, markerPath, logger }) {
   const nextFingerprint = portableRuntimeFingerprint(layout);
   const previous = readJsonIfPresent(markerPath);
@@ -88,13 +269,9 @@ function ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath
   for (const entry of fs.readdirSync(layout.runtimeRoot, { withFileTypes: true })) {
     const sourcePath = path.join(layout.runtimeRoot, entry.name);
     if (shouldSkipPortableRuntimeEntry(entry, sourcePath, layout)) continue;
-    fs.cpSync(sourcePath, path.join(runnerRootDir, entry.name), {
-      recursive: true,
-      force: true,
-      verbatimSymlinks: true,
-    });
+    copyPortableRuntimeEntry({ entry, sourcePath, targetPath: path.join(runnerRootDir, entry.name), logger });
   }
-  fs.copyFileSync(layout.executablePath, runnerExecutablePath);
+  copyPortableRuntimeExecutable({ sourcePath: layout.executablePath, targetPath: runnerExecutablePath, logger });
   if (process.platform !== "win32") fs.chmodSync(runnerExecutablePath, 0o755);
   writeJson(markerPath, {
     fingerprint: nextFingerprint,
@@ -137,4 +314,8 @@ async function createPortableRunner({ layout, runtimeDir, logger }) {
 
 module.exports = {
   createPortableRunner,
+  __test: {
+    copyPortableRuntimeEntry,
+    copyPortableRuntimeExecutable,
+  },
 };

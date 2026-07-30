@@ -5,17 +5,22 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
+const WINDOWS_READ_WRITE_COPY_BUFFER_SIZE = 8 * 1024 * 1024;
+
 /** 封装 provider 需要的文件系统操作，集中处理 home/env 展开、目录创建和原子替换所需操作。 */
 class OfficialBundleFileSystem {
   constructor({
     env = process.env,
     homeDir = os.homedir(),
+    platform = process.platform,
   }: {
     env?: Record<string, string | undefined>;
     homeDir?: string;
+    platform?: NodeJS.Platform;
   } = {}) {
     this.env = env;
     this.homeDir = homeDir;
+    this.platform = platform;
   }
 
   normalizePath(rawPath: string): string {
@@ -94,11 +99,74 @@ class OfficialBundleFileSystem {
   copyTree(fromPath: string, toPath: string): void {
     // 官方 app.asar.unpacked 里放的是 native addon 等 asar 不能承载的文件；复制到缓存工作副本时允许覆盖旧残留。
     this.ensureDir(path.dirname(toPath));
-    fs.cpSync(fromPath, toPath, { recursive: true, force: true });
+    try {
+      fs.cpSync(fromPath, toPath, { recursive: true, force: true });
+    } catch (error) {
+      if (this.platform !== "win32") throw error;
+      // 原生复制可能已写入部分内容；兜底时只覆盖来源文件，不能删除工作副本中的已有运行时。
+      this.copyTreeByReadWrite(fromPath, toPath);
+    }
   }
 
   rename(fromPath: string, toPath: string): void {
     fs.renameSync(fromPath, toPath);
+  }
+
+  private copyFileByReadWrite(fromPath: string, toPath: string): void {
+    this.ensureDir(path.dirname(toPath));
+    const buffer = Buffer.allocUnsafe(WINDOWS_READ_WRITE_COPY_BUFFER_SIZE);
+    let sourceFd = null;
+    let targetFd = null;
+
+    try {
+      sourceFd = fs.openSync(fromPath, "r");
+      targetFd = fs.openSync(toPath, "w");
+
+      for (;;) {
+        const bytesRead = fs.readSync(sourceFd, buffer, 0, buffer.length, null);
+        if (bytesRead === 0) break;
+
+        let offset = 0;
+        while (offset < bytesRead) {
+          offset += fs.writeSync(targetFd, buffer, offset, bytesRead - offset);
+        }
+      }
+    } finally {
+      if (targetFd !== null) fs.closeSync(targetFd);
+      if (sourceFd !== null) fs.closeSync(sourceFd);
+    }
+
+    try {
+      const stat = fs.statSync(fromPath);
+      fs.chmodSync(toPath, stat.mode);
+      fs.utimesSync(toPath, stat.atime, stat.mtime);
+    } catch {}
+  }
+
+  private copyTreeByReadWrite(fromPath: string, toPath: string): void {
+    const stat = fs.statSync(fromPath);
+    if (stat.isFile()) {
+      this.copyFileByReadWrite(fromPath, toPath);
+      return;
+    }
+
+    if (!stat.isDirectory()) {
+      fs.cpSync(fromPath, toPath, { recursive: true, force: true, verbatimSymlinks: true });
+      return;
+    }
+
+    this.ensureDir(toPath);
+    for (const entry of fs.readdirSync(fromPath, { withFileTypes: true })) {
+      const childFromPath = path.join(fromPath, entry.name);
+      const childToPath = path.join(toPath, entry.name);
+      if (entry.isDirectory()) {
+        this.copyTreeByReadWrite(childFromPath, childToPath);
+      } else if (entry.isFile()) {
+        this.copyFileByReadWrite(childFromPath, childToPath);
+      } else {
+        fs.cpSync(childFromPath, childToPath, { recursive: true, force: true, verbatimSymlinks: true });
+      }
+    }
   }
 
   private expandHome(rawPath: string): string {
