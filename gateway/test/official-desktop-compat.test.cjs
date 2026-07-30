@@ -38,9 +38,9 @@ test("macOS default candidates prefer ChatGPT while retaining Codex paths", () =
 
   assert.deepEqual(provider.toList(), [
     "/Applications/ChatGPT.app",
-    "/Users/example/Applications/ChatGPT.app",
+    path.join("/Users/example", "Applications", "ChatGPT.app"),
     "/Applications/Codex.app",
-    "/Users/example/Applications/Codex.app",
+    path.join("/Users/example", "Applications", "Codex.app"),
   ]);
 
   const configuredProvider = new CodexAsarCandidateProvider({
@@ -176,6 +176,40 @@ test("schema 4 cache resolves both dynamic and legacy bootstrap paths", (t) => {
 
   assert.equal(cache.reuseWithoutSourceScanBlockReason(manifest), "");
   assert.equal(cache.bootstrapPath, path.join(bundleDir, ".vite", "build", "bootstrap.js"));
+});
+
+test("Windows unpacked fallback merges into an existing runtime bundle", (t) => {
+  const root = temporaryDirectory(t);
+  const sourceDir = path.join(root, "app.asar.unpacked");
+  const targetDir = path.join(root, "bundle");
+  const previousCpSync = fs.cpSync;
+
+  // 目标工作副本已经包含 ASAR 解压结果；fallback 只能覆盖同名文件，不能删除其它运行时内容。
+  writeFile(path.join(targetDir, ".vite", "build", "bootstrap.js"), "bootstrap");
+  writeFile(path.join(targetDir, "webview", "index.html"), "webview");
+  writeFile(path.join(targetDir, "node_modules", "existing", "index.js"), "existing");
+  writeFile(path.join(targetDir, "node_modules", "shared", "binding.node"), "old-native");
+  writeFile(path.join(sourceDir, "node_modules", "shared", "binding.node"), "new-native");
+  writeFile(path.join(sourceDir, "node_modules", "added", "binding.node"), "added-native");
+
+  try {
+    fs.cpSync = () => {
+      const error = new Error("UNKNOWN: unknown error, copyfile");
+      error.code = "UNKNOWN";
+      throw error;
+    };
+
+    const fileSystem = new OfficialBundleFileSystem({ platform: "win32" });
+    fileSystem.copyTree(sourceDir, targetDir);
+  } finally {
+    fs.cpSync = previousCpSync;
+  }
+
+  assert.equal(fs.readFileSync(path.join(targetDir, ".vite", "build", "bootstrap.js"), "utf8"), "bootstrap");
+  assert.equal(fs.readFileSync(path.join(targetDir, "webview", "index.html"), "utf8"), "webview");
+  assert.equal(fs.readFileSync(path.join(targetDir, "node_modules", "existing", "index.js"), "utf8"), "existing");
+  assert.equal(fs.readFileSync(path.join(targetDir, "node_modules", "shared", "binding.node"), "utf8"), "new-native");
+  assert.equal(fs.readFileSync(path.join(targetDir, "node_modules", "added", "binding.node"), "utf8"), "added-native");
 });
 
 test("Windows Appx manifest selects ChatGPT for new packages and Codex for legacy packages", (t) => {
