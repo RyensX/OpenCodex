@@ -5,6 +5,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { parseClassificationText, validateClassification } = require("../runtime/model-router/classifier.cjs");
 const {
+  buildClassifierPrompt,
   createRoutingContext,
   summarizeUserInput,
   userInputsFromTurns,
@@ -15,6 +16,7 @@ const {
   resolveClassifierRoute,
   resolveTierRoute,
 } = require("../runtime/model-router/resolver.cjs");
+const { defaultTierDefinitions } = require("../runtime/model-router/tiers.cjs");
 const { createAutoStateStore } = require("../runtime/model-router/state-store.cjs");
 const { ROUTE_METADATA_KEY, createTurnRouteStatus } = require("../runtime/model-router/turn-route-status.cjs");
 
@@ -36,6 +38,21 @@ function model(id, efforts = ["low", "medium", "high", "xhigh"], isDefault = fal
   };
 }
 
+function tiersWithCustom(patch) {
+  const tiers = defaultTierDefinitions();
+  tiers.splice(1, 0, {
+    id: "routine-plus",
+    builtin: false,
+    enabled: true,
+    name: "Routine plus",
+    prompt: "Use for routine work with a wider change surface.",
+    model: "custom",
+    effort: "auto",
+    ...patch,
+  });
+  return tiers;
+}
+
 test("classification policy promotes low confidence and previous failures", () => {
   assert.equal(applyClassificationPolicy({ tier: "economy", confidence: 0.64 }, "completed").tier, "balanced");
   assert.equal(applyClassificationPolicy({ tier: "frontier", confidence: 0.1 }, "completed").tier, "frontier");
@@ -43,10 +60,32 @@ test("classification policy promotes low confidence and previous failures", () =
   assert.equal(applyClassificationPolicy({ tier: "economy", confidence: 0.9 }, "interrupted").tier, "economy");
 });
 
+test("classification policy follows custom order and skips disabled tiers", () => {
+  const defaults = defaultTierDefinitions();
+  const tiers = [
+    defaults[0],
+    {
+      id: "routine-plus",
+      builtin: false,
+      enabled: true,
+      name: "Routine plus",
+      prompt: "Use for routine work with a wider change surface.",
+      model: "custom",
+      effort: "auto",
+    },
+    defaults[1],
+    { ...defaults[2], enabled: false },
+    defaults[3],
+  ];
+  assert.equal(applyClassificationPolicy({ tier: "economy", confidence: 0.64 }, "completed", tiers).tier, "routine-plus");
+  assert.equal(applyClassificationPolicy({ tier: "balanced", confidence: 0.9 }, "failed", tiers).tier, "frontier");
+});
+
 test("resolver honors configured, tier, catalog default and nearest effort order", () => {
   const configured = resolveTierRoute({
-    tier: "balanced",
-    configValues: { balancedModel: "custom", balancedEffort: "medium", fallbackModel: "fallback" },
+    tier: "routine-plus",
+    tiers: tiersWithCustom({ model: "custom", effort: "medium" }),
+    configValues: { fallbackModel: "fallback" },
     models: [model("custom", ["low", "high"]), model("fallback"), model("catalog-default", ["medium"], true)],
   });
   assert.equal(configured.model, "custom");
@@ -55,23 +94,26 @@ test("resolver honors configured, tier, catalog default and nearest effort order
 
   const tierBuiltin = resolveTierRoute({
     tier: "balanced",
-    configValues: { balancedModel: "missing", balancedEffort: "medium", fallbackModel: "fallback" },
+    tiers: defaultTierDefinitions(),
+    configValues: { fallbackModel: "fallback" },
     models: [model("gpt-5.6-luna"), model("catalog-default", ["medium"], true), model("fallback")],
   });
   assert.equal(tierBuiltin.model, "gpt-5.6-luna");
 
   const catalogDefault = resolveTierRoute({
     tier: "balanced",
-    configValues: { balancedModel: "missing", balancedEffort: "medium", fallbackModel: "fallback" },
+    tiers: defaultTierDefinitions(),
+    configValues: { fallbackModel: "fallback" },
     models: [model("catalog-default", ["medium"], true), model("fallback")],
   });
   assert.equal(catalogDefault.model, "catalog-default");
   assert.equal(nearestEffort("medium", model("x", ["low", "high"])), "high");
 
   const automatic = resolveTierRoute({
-    tier: "balanced",
+    tier: "routine-plus",
     classificationEffort: "xhigh",
-    configValues: { balancedModel: "custom", balancedEffort: "auto", fallbackModel: "fallback" },
+    tiers: tiersWithCustom({ model: "custom", effort: "auto" }),
+    configValues: { fallbackModel: "fallback" },
     models: [model("custom", ["high", "max"]), model("fallback")],
   });
   // 分类建议 xhigh 与 high/max 等距时，仍沿用既有规则向上选择 max。
@@ -112,6 +154,28 @@ test("routing context keeps six recent user inputs, image markers, usage and sta
   assert.equal(context.previousStatus, "failed");
   assert.equal(context.usage.totalTokens, 150);
   assert.equal(summarizeUserInput([{ type: "skill", name: "x" }]).skillCount, 1);
+});
+
+test("classifier prompt composes only enabled tier names and custom criteria", () => {
+  const tiers = defaultTierDefinitions();
+  tiers[0].enabled = false;
+  tiers.splice(1, 0, {
+    id: "routine-plus",
+    builtin: false,
+    enabled: true,
+    name: "Routine plus",
+    prompt: "Prefer this tier for a bounded two-file implementation.",
+    model: "custom",
+    effort: "auto",
+  });
+  const prompt = buildClassifierPrompt(
+    { current: { text: "change two files" }, recentUserInputs: [] },
+    { tiers, automaticEffortTiers: ["routine-plus"] }
+  );
+  assert.match(prompt, /Routine plus/);
+  assert.match(prompt, /bounded two-file implementation/);
+  assert.match(prompt, /Auto-effort tiers: routine-plus/);
+  assert.doesNotMatch(prompt, /trivial questions\/edits/);
 });
 
 test("classifier JSON parser validates all required structured fields", () => {

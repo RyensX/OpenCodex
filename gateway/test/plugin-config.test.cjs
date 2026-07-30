@@ -60,21 +60,17 @@ test("gateway plugin config validates types, writes atomically and detects revis
   assert.equal(plugin.values.classifierModel, "gpt-5.3-codex-spark");
   assert.equal(plugin.values.classifierEffort, "low");
   assert.equal(plugin.values.showRouteInSummary, true);
-  assert.equal(
-    ["economy", "balanced", "complex", "frontier", "fallback"].every(
-      (tier) => plugin.values[`${tier}Effort`] === "auto"
-    ),
-    true
-  );
+  assert.deepEqual(plugin.tiers.map((tier) => tier.id), ["economy", "balanced", "complex", "frontier"]);
+  assert.equal(plugin.tiers.every((tier) => tier.builtin && tier.enabled && tier.effort === "auto"), true);
+  assert.equal(plugin.values.fallbackEffort, "auto");
 
   const updated = store.update(plugin.id, {
     expectedRevision: 0,
     enabled: true,
-    values: { balancedModel: "custom-balanced", balancedEffort: "auto" },
   });
   assert.equal(updated.revision, 1);
-  assert.equal(store.plugin(plugin.id).values.balancedModel, "custom-balanced");
-  assert.equal(store.plugin(plugin.id).values.balancedEffort, "auto");
+  assert.equal(store.plugin(plugin.id).tiers.find((tier) => tier.id === "balanced").model, "gpt-5.6-luna");
+  assert.equal(store.plugin(plugin.id).tiers.find((tier) => tier.id === "balanced").effort, "auto");
   assert.equal(fs.existsSync(filePath), true);
   assert.equal(fs.readdirSync(path.dirname(filePath)).some((name) => name.endsWith(".tmp")), false);
 
@@ -87,12 +83,93 @@ test("gateway plugin config validates types, writes atomically and detects revis
     /cannot target Auto/
   );
   assert.throws(
-    () => store.update(plugin.id, { expectedRevision: 1, values: { balancedEffort: "adaptive" } }),
-    /unsupported effort/
+    () =>
+      store.update(plugin.id, {
+        expectedRevision: 1,
+        tiers: plugin.tiers.map((tier) =>
+          tier.id === "balanced" ? { ...tier, model: "custom-balanced" } : tier
+        ),
+      }),
+    /model cannot be modified/
   );
 });
 
-test("legacy smart scheduling defaults migrate to Auto without replacing custom efforts", (t) => {
+test("smart scheduling tiers support custom CRUD while protecting built-ins", (t) => {
+  const store = createPluginConfigStore({ filePath: tempFile(t), manifests: listPluginManifests() });
+  const pluginId = "opencodex.smart-model-router";
+  const initial = store.plugin(pluginId);
+  const custom = {
+    id: "routine-plus",
+    enabled: true,
+    name: "Routine plus",
+    prompt: "Use for bounded implementation across a few files.",
+    model: "gpt-5.6-luna",
+    effort: "high",
+  };
+  const withCustom = [initial.tiers[0], custom, ...initial.tiers.slice(1)];
+  store.update(pluginId, { expectedRevision: 0, tiers: withCustom });
+  assert.deepEqual(store.plugin(pluginId).tiers.map((tier) => tier.id), [
+    "economy",
+    "routine-plus",
+    "balanced",
+    "complex",
+    "frontier",
+  ]);
+  assert.equal(store.plugin(pluginId).tiers.find((tier) => tier.id === "routine-plus").builtin, false);
+
+  assert.throws(
+    () =>
+      store.update(pluginId, {
+        expectedRevision: 1,
+        tiers: store.plugin(pluginId).tiers.filter((tier) => tier.id !== "economy"),
+      }),
+    /cannot be deleted/
+  );
+  for (const [field, value] of [
+    ["name", "Renamed"],
+    ["prompt", "Different criteria"],
+    ["model", "different-model"],
+    ["effort", "high"],
+  ]) {
+    assert.throws(
+      () =>
+        store.update(pluginId, {
+          expectedRevision: 1,
+          tiers: store
+            .plugin(pluginId)
+            .tiers.map((tier) => (tier.id === "balanced" ? { ...tier, [field]: value } : tier)),
+        }),
+      new RegExp(`${field} cannot be modified`)
+    );
+  }
+  const reorderedBuiltins = [...store.plugin(pluginId).tiers];
+  [reorderedBuiltins[0], reorderedBuiltins[2]] = [reorderedBuiltins[2], reorderedBuiltins[0]];
+  assert.throws(
+    () => store.update(pluginId, { expectedRevision: 1, tiers: reorderedBuiltins }),
+    /Built-in tier order cannot be changed/
+  );
+  assert.throws(
+    () =>
+      store.update(pluginId, {
+        expectedRevision: 1,
+        tiers: store
+          .plugin(pluginId)
+          .tiers.map((tier) => (tier.id === "routine-plus" ? { ...tier, model: "auto" } : tier)),
+      }),
+    /cannot target Auto/
+  );
+
+  const withoutCustom = store.plugin(pluginId).tiers.filter((tier) => tier.id !== "routine-plus");
+  store.update(pluginId, { expectedRevision: 1, tiers: withoutCustom });
+  assert.equal(store.plugin(pluginId).tiers.some((tier) => tier.id === "routine-plus"), false);
+  store.update(pluginId, {
+    expectedRevision: 2,
+    tiers: store.plugin(pluginId).tiers.map((tier) => ({ ...tier, enabled: false })),
+  });
+  assert.equal(store.plugin(pluginId).tiers.some((tier) => tier.enabled), false);
+});
+
+test("legacy smart scheduling settings migrate to immutable built-in defaults", (t) => {
   const filePath = tempFile(t);
   fs.writeFileSync(
     filePath,
@@ -115,18 +192,21 @@ test("legacy smart scheduling defaults migrate to Auto without replacing custom 
     })
   );
   const store = createPluginConfigStore({ filePath, manifests: listPluginManifests() });
-  const values = store.plugin("opencodex.smart-model-router").values;
+  const plugin = store.plugin("opencodex.smart-model-router");
+  const values = plugin.values;
+  const tiers = Object.fromEntries(plugin.tiers.map((tier) => [tier.id, tier]));
 
-  // 分类器保持 low，旧默认档位迁移为 Auto，用户显式选择的 max 不变。
+  // 分类器保持 low；四个内置档位恢复只读默认值，失败回退仍按旧版规则迁移到 Auto。
   assert.equal(values.classifierEffort, "low");
-  assert.equal(values.economyEffort, "auto");
-  assert.equal(values.balancedEffort, "auto");
-  assert.equal(values.complexEffort, "max");
-  assert.equal(values.frontierEffort, "auto");
+  assert.equal(tiers.economy.effort, "auto");
+  assert.equal(tiers.balanced.effort, "auto");
+  assert.equal(tiers.complex.effort, "auto");
+  assert.equal(tiers.frontier.effort, "auto");
   assert.equal(values.fallbackEffort, "auto");
+  assert.equal("economyEffort" in values, false);
 
   store.update("opencodex.smart-model-router", { expectedRevision: 4, enabled: true });
-  assert.equal(JSON.parse(fs.readFileSync(filePath, "utf-8")).schemaVersion, 2);
+  assert.equal(JSON.parse(fs.readFileSync(filePath, "utf-8")).schemaVersion, 3);
 });
 
 test("browser plugin descriptors preserve typed default values", () => {

@@ -1,8 +1,14 @@
 const fs = require("fs");
 const path = require("path");
 const { EventEmitter } = require("events");
+const {
+  LEGACY_TIER_SETTING_IDS,
+  SMART_ROUTER_PLUGIN_ID,
+  normalizeStoredTierDefinitions,
+  validateTierDefinitions,
+} = require("../model-router/tiers.cjs");
 
-const CONFIG_SCHEMA_VERSION = 2;
+const CONFIG_SCHEMA_VERSION = 3;
 // reasoning-effort 是通用设置类型；auto 由具体核心能力在运行时解析为实际强度。
 const REASONING_EFFORTS = new Set(["auto", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const LEGACY_SMART_ROUTER_EFFORT_DEFAULTS = Object.freeze({
@@ -44,16 +50,27 @@ function normalizeStoredDocument(value) {
 }
 
 function migrateStoredDocument(document) {
-  if (document.schemaVersion >= CONFIG_SCHEMA_VERSION) return { ...document, schemaVersion: CONFIG_SCHEMA_VERSION };
   const plugins = { ...document.plugins };
-  const router = plugins["opencodex.smart-model-router"];
+  const router = plugins[SMART_ROUTER_PLUGIN_ID];
   if (router && typeof router === "object" && router.values && typeof router.values === "object") {
     const values = { ...router.values };
-    // v2 将仍等于旧内置默认值的档位迁移到 Auto；非默认具体值视为用户选择并原样保留。
-    for (const [id, legacyDefault] of Object.entries(LEGACY_SMART_ROUTER_EFFORT_DEFAULTS)) {
-      if (values[id] === legacyDefault) values[id] = "auto";
+    if (document.schemaVersion < 2) {
+      // v2 将仍等于旧内置默认值的档位迁移到 Auto；非默认具体值视为用户选择并原样保留。
+      for (const [id, legacyDefault] of Object.entries(LEGACY_SMART_ROUTER_EFFORT_DEFAULTS)) {
+        if (values[id] === legacyDefault) values[id] = "auto";
+      }
     }
-    plugins["opencodex.smart-model-router"] = { ...router, values };
+    let tiers = router.tiers;
+    if (document.schemaVersion < 3) {
+      // v3 把扁平的四档模型/强度迁入有序档位列表，分类器和失败回退设置仍保留为普通字段。
+      tiers = normalizeStoredTierDefinitions(tiers, values);
+      for (const settingId of LEGACY_TIER_SETTING_IDS) delete values[settingId];
+    }
+    plugins[SMART_ROUTER_PLUGIN_ID] = {
+      ...router,
+      values,
+      tiers: normalizeStoredTierDefinitions(tiers, values),
+    };
   }
   return { ...document, schemaVersion: CONFIG_SCHEMA_VERSION, plugins };
 }
@@ -118,10 +135,15 @@ function createPluginConfigStore({ filePath, manifests }) {
         } catch {}
       }
     }
-    return {
+    const state = {
       enabled: stored && typeof stored.enabled === "boolean" ? stored.enabled : manifest.defaultEnabled === true,
       values,
     };
+    if (manifest.id === SMART_ROUTER_PLUGIN_ID) {
+      // 快照始终返回完整的内置档位，旧配置和局部损坏不会让不可删除项从设置页消失。
+      state.tiers = normalizeStoredTierDefinitions(stored?.tiers, stored?.values);
+    }
+    return state;
   }
 
   function plugin(id) {
@@ -172,7 +194,11 @@ function createPluginConfigStore({ filePath, manifests }) {
     }
 
     const current = stateForManifest(manifest);
-    const next = { enabled: current.enabled, values: { ...current.values } };
+    const next = {
+      enabled: current.enabled,
+      values: { ...current.values },
+      ...(current.tiers ? { tiers: cloneJson(current.tiers) } : {}),
+    };
     if (hasOwn(patch, "enabled")) {
       if (typeof patch.enabled !== "boolean") throw new PluginConfigError("enabled must be a boolean");
       next.enabled = patch.enabled;
@@ -186,6 +212,14 @@ function createPluginConfigStore({ filePath, manifests }) {
         const setting = settingById.get(settingId);
         if (!setting) throw new PluginConfigError(`Unknown setting: ${settingId}`);
         next.values[settingId] = validateSettingValue(setting, value);
+      }
+    }
+    if (hasOwn(patch, "tiers")) {
+      if (manifest.id !== SMART_ROUTER_PLUGIN_ID) throw new PluginConfigError("This plugin does not support tiers");
+      try {
+        next.tiers = validateTierDefinitions(patch.tiers);
+      } catch (error) {
+        throw new PluginConfigError(error instanceof Error ? error.message : String(error));
       }
     }
 

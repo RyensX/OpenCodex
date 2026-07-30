@@ -2,14 +2,15 @@ const {
   AUTO_REASONING_EFFORT,
   BUILTIN_ROUTE_DEFAULTS,
   EFFORT_ORDER,
-  TIER_ORDER,
 } = require("./constants.cjs");
+const {
+  defaultTierDefinitions,
+  enabledTierDefinitions,
+  failureFloorTierId,
+  normalizeStoredTierDefinitions,
+} = require("./tiers.cjs");
 
 const BUILTIN_TIER_CANDIDATES = Object.freeze({
-  economy: Object.freeze(["gpt-5.3-codex-spark"]),
-  balanced: Object.freeze(["gpt-5.6-luna"]),
-  complex: Object.freeze(["gpt-5.6-terra"]),
-  frontier: Object.freeze(["gpt-5.6-sol"]),
   classifier: Object.freeze(["gpt-5.3-codex-spark"]),
   fallback: Object.freeze(["gpt-5.3-codex-spark"]),
 });
@@ -70,9 +71,10 @@ function routeSettings(configValues, tier) {
   };
 }
 
-function candidateModelNames({ tier, configuredModel, fallbackModel }) {
+function candidateModelNames({ tier, configuredModel, tierCandidates = [], fallbackModel }) {
   const values = [
     configuredModel,
+    ...tierCandidates,
     ...(BUILTIN_TIER_CANDIDATES[tier] || []),
     fallbackModel,
     ...BUILTIN_TIER_CANDIDATES.fallback,
@@ -87,6 +89,7 @@ function resolveModelAndEffort({
   automaticEffort,
   automaticEffortFallback,
   fallbackModel,
+  tierCandidates = [],
   models,
 }) {
   const available = visibleModels(models);
@@ -106,7 +109,9 @@ function resolveModelAndEffort({
 
   let selected = null;
   // 严格按“用户配置 → 档位内置候选 → catalog 默认 → fallback”解析，便于结果可预测。
-  for (const candidate of Array.from(new Set([configuredModel, ...(BUILTIN_TIER_CANDIDATES[tier] || [])].filter(Boolean)))) {
+  for (const candidate of Array.from(
+    new Set([configuredModel, ...tierCandidates, ...(BUILTIN_TIER_CANDIDATES[tier] || [])].filter(Boolean))
+  )) {
     selected = available.find((model) => modelMatches(model, candidate));
     if (selected) break;
   }
@@ -130,28 +135,36 @@ function resolveModelAndEffort({
   };
 }
 
-function resolveTierRoute({ tier, classificationEffort, configValues, models }) {
-  const normalizedTier = TIER_ORDER.includes(tier) ? tier : "economy";
-  const requested = routeSettings(configValues, normalizedTier);
+function resolveTierRoute({
+  tier,
+  classificationEffort,
+  tiers = defaultTierDefinitions(),
+  configValues,
+  models,
+}) {
+  const enabledTiers = enabledTierDefinitions(tiers);
+  const requested = enabledTiers.find((candidate) => candidate.id === tier) || enabledTiers[0] || null;
+  if (!requested) return resolveFallbackRoute({ configValues, tiers, models });
   const fallback = routeSettings(configValues, "fallback");
   return {
-    tier: normalizedTier,
+    tier: requested.id,
     ...resolveModelAndEffort({
-      tier: normalizedTier,
+      tier: requested.id,
       configuredModel: requested.model,
       configuredEffort: requested.effort,
       automaticEffort: classificationEffort,
-      automaticEffortFallback: BUILTIN_ROUTE_DEFAULTS[normalizedTier].effort,
+      automaticEffortFallback: requested.defaultEffort,
       fallbackModel: fallback.model,
+      tierCandidates: requested.defaultModel ? [requested.defaultModel] : [],
       models,
     }),
   };
 }
 
-function resolveFallbackRoute({ configValues, models }) {
+function resolveFallbackRoute({ configValues, tiers = defaultTierDefinitions(), models }) {
   const fallback = routeSettings(configValues, "fallback");
   return {
-    tier: "economy",
+    tier: enabledTierDefinitions(tiers)[0]?.id || "",
     fallback: true,
     ...resolveModelAndEffort({
       tier: "fallback",
@@ -177,14 +190,20 @@ function resolveClassifierRoute({ configValues, models }) {
   });
 }
 
-function applyClassificationPolicy(classification, previousStatus) {
-  const startTier = TIER_ORDER.includes(classification?.tier) ? classification.tier : "economy";
-  let index = TIER_ORDER.indexOf(startTier);
+function applyClassificationPolicy(classification, previousStatus, tiers = defaultTierDefinitions()) {
+  const normalizedTiers = normalizeStoredTierDefinitions(tiers);
+  const activeTiers = enabledTierDefinitions(normalizedTiers);
+  if (activeTiers.length === 0) return { ...classification, tier: "" };
+  let index = activeTiers.findIndex((tier) => tier.id === classification?.tier);
+  if (index < 0) index = 0;
   const confidence = Number(classification?.confidence);
-  if (Number.isFinite(confidence) && confidence < 0.65) index = Math.min(index + 1, TIER_ORDER.length - 1);
-  // 用户主动中断不代表任务困难；只有真实失败才强制提升到 complex。
-  if (previousStatus === "failed") index = Math.max(index, TIER_ORDER.indexOf("complex"));
-  return { ...classification, tier: TIER_ORDER[index] };
+  if (Number.isFinite(confidence) && confidence < 0.65) index = Math.min(index + 1, activeTiers.length - 1);
+  // 用户主动中断不代表任务困难；真实失败使用档位定义中的基准标记，并跳过已关闭档位。
+  if (previousStatus === "failed") {
+    const floorIndex = activeTiers.findIndex((tier) => tier.id === failureFloorTierId(normalizedTiers));
+    if (floorIndex >= 0) index = Math.max(index, floorIndex);
+  }
+  return { ...classification, tier: activeTiers[index].id };
 }
 
 module.exports = {

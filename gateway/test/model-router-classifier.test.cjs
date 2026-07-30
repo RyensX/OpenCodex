@@ -5,6 +5,7 @@ const {
   classifierTurnFailureCategory,
   createClassifier,
 } = require("../runtime/model-router/classifier.cjs");
+const { defaultTierDefinitions } = require("../runtime/model-router/tiers.cjs");
 
 function classifierTransport(
   agentText,
@@ -120,6 +121,47 @@ test("classifier requests effort only when a configured tier uses Auto", async (
   assert.equal(effortVariants[0].properties.effort.enum.includes("ultra"), true);
   assert.match(turn.params.input[0].text, /Auto-effort tiers: balanced/);
   assert.match(turn.params.input[0].text, /"route" field/);
+});
+
+test("classifier schema and prompt use enabled custom tiers", async () => {
+  const tiers = defaultTierDefinitions();
+  tiers[0].enabled = false;
+  tiers.splice(1, 0, {
+    id: "routine-plus",
+    builtin: false,
+    enabled: true,
+    name: "Routine plus",
+    prompt: "Use for bounded changes spanning a few files.",
+    model: "custom",
+    effort: "auto",
+  });
+  const transport = classifierTransport(
+    JSON.stringify({
+      route: {
+        tier: "routine-plus",
+        effort: "high",
+        confidence: 0.9,
+        taskType: "code_generation",
+        rationale: "bounded implementation",
+      },
+    })
+  );
+  const classifier = createClassifier({ transport, timeoutMs: 500 });
+  const result = await classifier.classify({
+    context: { current: {}, recentUserInputs: [] },
+    model: "spark",
+    effort: "low",
+    tiers,
+    automaticEffortTiers: ["routine-plus"],
+  });
+  assert.equal(result.classification.tier, "routine-plus");
+  const turn = transport.calls.find((call) => call.method === "turn/start");
+  const tierEnums = turn.params.outputSchema.properties.route.anyOf.flatMap(
+    (variant) => variant.properties.tier.enum
+  );
+  assert.equal(tierEnums.includes("routine-plus"), true);
+  assert.equal(tierEnums.includes("economy"), false);
+  assert.match(turn.params.input[0].text, /bounded changes spanning a few files/);
 });
 
 test("classifier exposes a safe structured-output failure category", async () => {

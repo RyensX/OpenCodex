@@ -7,18 +7,17 @@ const {
   CLASSIFICATION_TIMEOUT_MS,
   EFFORT_ORDER,
   SMART_ROUTER_PLUGIN_ID,
-  TIER_ORDER,
 } = require("./constants.cjs");
 const {
   applyClassificationPolicy,
   resolveClassifierRoute,
   resolveFallbackRoute,
   resolveTierRoute,
-  routeSettings,
 } = require("./resolver.cjs");
 const { createAutoStateStore } = require("./state-store.cjs");
 const { createAppServerTransport } = require("./transport.cjs");
 const { createTurnRouteStatus } = require("./turn-route-status.cjs");
+const { enabledTierDefinitions } = require("./tiers.cjs");
 const { createVirtualModelController, isAuto, requestKey } = require("./virtual-model.cjs");
 
 function createSmartModelRouterService({ configStore, stateFilePath, classifierOptions = {}, injectionHealth = null }) {
@@ -50,7 +49,8 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
   }
 
   function fallbackRoute() {
-    return resolveFallbackRoute({ configValues: pluginConfig().values, models: catalog.models() });
+    const config = pluginConfig();
+    return resolveFallbackRoute({ configValues: config.values, tiers: config.tiers, models: catalog.models() });
   }
 
   function modelDisplayName(modelId) {
@@ -238,10 +238,18 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
         usage: usageByThread.get(threadId),
         previousStatus: threadState.lastStatus,
       });
-      const configValues = pluginConfig().values;
-      const automaticEffortTiers = TIER_ORDER.filter(
-        (tier) => routeSettings(configValues, tier).effort === AUTO_REASONING_EFFORT
-      );
+      const config = pluginConfig();
+      const configValues = config.values;
+      const tiers = config.tiers;
+      const enabledTiers = enabledTierDefinitions(tiers);
+      if (enabledTiers.length === 0) {
+        const error = new Error("Smart scheduling has no enabled tiers");
+        error.category = "no_enabled_tiers";
+        throw error;
+      }
+      const automaticEffortTiers = enabledTiers
+        .filter((tier) => tier.effort === AUTO_REASONING_EFFORT)
+        .map((tier) => tier.id);
       const classifierRoute = resolveClassifierRoute({
         configValues,
         models: catalog.models(),
@@ -250,10 +258,11 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
         context,
         model: classifierRoute.model,
         effort: classifierRoute.effort,
+        tiers,
         automaticEffortTiers,
         deadlineAt,
       });
-      const classification = applyClassificationPolicy(result.classification, threadState.lastStatus);
+      const classification = applyClassificationPolicy(result.classification, threadState.lastStatus, tiers);
       if (automaticEffortTiers.includes(classification.tier) && !EFFORT_ORDER.includes(classification.effort)) {
         const error = new Error("Classifier omitted effort for an automatic-effort tier");
         error.category = "invalid_schema";
@@ -262,6 +271,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       route = resolveTierRoute({
         tier: classification.tier,
         classificationEffort: classification.effort,
+        tiers,
         configValues,
         models: catalog.models(),
       });

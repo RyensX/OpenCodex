@@ -6,7 +6,7 @@
   const FEATURE = "smart-model-router";
   const NAV_SLUG = "opencodex-smart-model-router";
   const EFFORTS = ["auto", "low", "medium", "high", "xhigh", "max", "ultra"];
-  const GROUPS = ["display", "classifier", "economy", "balanced", "complex", "frontier", "fallback"];
+  const GROUPS = ["display", "classifier", "fallback"];
   // 官方 React 组件没有向注入脚本导出构造入口，因此复用其实际 trigger/menu DOM 约定和 Tailwind 样式类。
   const NATIVE_PICKER_TRIGGER_FALLBACK_CLASS = [
     "border-token-border no-drag cursor-interaction items-center gap-1 border whitespace-nowrap select-none",
@@ -29,7 +29,7 @@
     "zh-CN": {
       title: "智能调度",
       navLabel: "智能调度",
-      description: "配置 Auto 每轮分类时使用的分类器，以及各复杂度档位调度的模型和推理强度；强度选择 auto 时采用分类器建议。",
+      description: "配置分类器、失败回退和调度档位；内置档位仅可启停，自定义档位可添加、删除和调整。",
       disabled: "智能调度当前已关闭。可在 OpenCodex 登录页的“设置 → 插件”中开启。",
       loading: "正在读取智能调度配置…",
       missing: "未发现智能调度配置。",
@@ -38,6 +38,22 @@
       saved: "已保存",
       conflict: "配置已被其他页面修改，已加载最新版本，请重试。",
       failed: "保存失败",
+      tiersTitle: "档位",
+      tiersDescription: "档位按能力从低到高排列；内置档位为只读默认项，只有已启用档位会参与分类。",
+      addTier: "添加档位",
+      builtinTier: "内置 · 只读",
+      tierEnabled: "启用",
+      tierName: "名称",
+      tierPrompt: "分类提示词",
+      tierModel: "模型",
+      tierEffort: "推理强度",
+      moveTierUp: "上移",
+      moveTierDown: "下移",
+      deleteTier: "删除",
+      deleteTierConfirm: "确定删除这个自定义档位吗？",
+      newTierName: "自定义档位",
+      newTierPrompt: "描述什么任务应当选择此档位。",
+      noEnabledTiers: "当前没有启用档位，Auto 将直接使用失败回退。",
       groups: {
         display: "显示",
         classifier: "分类器",
@@ -51,7 +67,7 @@
     "en-US": {
       title: "Smart scheduling",
       navLabel: "Smart scheduling",
-      description: "Configure the classifier, model, and reasoning effort for each tier. auto effort follows the classifier recommendation.",
+      description: "Configure the classifier, fallback, and scheduling tiers. Built-in tiers can only be enabled or disabled; custom tiers remain fully editable.",
       disabled: "Smart scheduling is off. Enable it from Settings → Plugins on the OpenCodex sign-in page.",
       loading: "Loading smart scheduling configuration…",
       missing: "Smart scheduling configuration was not found.",
@@ -60,6 +76,22 @@
       saved: "Saved",
       conflict: "Another page changed this configuration. The latest revision was loaded; please retry.",
       failed: "Could not save",
+      tiersTitle: "Tiers",
+      tiersDescription: "Tiers are ordered from lowest to highest capability. Built-ins are read-only defaults, and only enabled tiers participate in classification.",
+      addTier: "Add tier",
+      builtinTier: "Built in · Read only",
+      tierEnabled: "Enabled",
+      tierName: "Name",
+      tierPrompt: "Classification prompt",
+      tierModel: "Model",
+      tierEffort: "Reasoning effort",
+      moveTierUp: "Move up",
+      moveTierDown: "Move down",
+      deleteTier: "Delete",
+      deleteTierConfirm: "Delete this custom tier?",
+      newTierName: "Custom tier",
+      newTierPrompt: "Describe which tasks should select this tier.",
+      noEnabledTiers: "No tiers are enabled. Auto will use the fallback route directly.",
       groups: {
         display: "Display",
         classifier: "Classifier",
@@ -88,6 +120,7 @@
   let observerScheduled = false;
   let pickerSequence = 0;
   let activeChoicePopover = null;
+  let updateQueue = Promise.resolve();
 
   function localized(key, fallback) {
     return (key && typeof messages[key] === "string" && messages[key]) || fallback || key || "";
@@ -110,6 +143,22 @@
     saved: localized("plugin.smartModelRouter.settings.saved", fallbackCopy.saved),
     conflict: localized("plugin.smartModelRouter.settings.conflict", fallbackCopy.conflict),
     failed: localized("plugin.smartModelRouter.settings.failed", fallbackCopy.failed),
+    tiersTitle: localized("plugin.smartModelRouter.tiers.title", fallbackCopy.tiersTitle),
+    tiersDescription: localized("plugin.smartModelRouter.tiers.description", fallbackCopy.tiersDescription),
+    addTier: localized("plugin.smartModelRouter.tiers.add", fallbackCopy.addTier),
+    builtinTier: localized("plugin.smartModelRouter.tiers.builtin", fallbackCopy.builtinTier),
+    tierEnabled: localized("plugin.smartModelRouter.tier.enabled", fallbackCopy.tierEnabled),
+    tierName: localized("plugin.smartModelRouter.tier.name", fallbackCopy.tierName),
+    tierPrompt: localized("plugin.smartModelRouter.tier.prompt", fallbackCopy.tierPrompt),
+    tierModel: localized("plugin.smartModelRouter.tier.model", fallbackCopy.tierModel),
+    tierEffort: localized("plugin.smartModelRouter.tier.effort", fallbackCopy.tierEffort),
+    moveTierUp: localized("plugin.smartModelRouter.tier.moveUp", fallbackCopy.moveTierUp),
+    moveTierDown: localized("plugin.smartModelRouter.tier.moveDown", fallbackCopy.moveTierDown),
+    deleteTier: localized("plugin.smartModelRouter.tier.delete", fallbackCopy.deleteTier),
+    deleteTierConfirm: localized("plugin.smartModelRouter.tier.deleteConfirm", fallbackCopy.deleteTierConfirm),
+    newTierName: localized("plugin.smartModelRouter.tier.newName", fallbackCopy.newTierName),
+    newTierPrompt: localized("plugin.smartModelRouter.tier.newPrompt", fallbackCopy.newTierPrompt),
+    noEnabledTiers: localized("plugin.smartModelRouter.tiers.noneEnabled", fallbackCopy.noEnabledTiers),
     groups: Object.fromEntries(
       GROUPS.map((group) => [
         group,
@@ -486,6 +535,68 @@
     return GROUPS.find((group) => normalized.startsWith(group)) || "fallback";
   }
 
+  function editableTiers(plugin = routerPlugin()) {
+    // API 回传的 builtin/default 元数据由服务端维护，保存时只提交用户真正可编辑的字段。
+    return (Array.isArray(plugin?.tiers) ? plugin.tiers : []).map((tier) => ({
+      id: String(tier.id || ""),
+      enabled: tier.enabled === true,
+      name: String(tier.name || ""),
+      prompt: String(tier.prompt || ""),
+      model: String(tier.model || ""),
+      effort: String(tier.effort || "auto"),
+    }));
+  }
+
+  function tierDisplayName(tier) {
+    if (tier?.builtin && tier.name === tier.defaultName) return localized(tier.nameKey, tier.name);
+    return String(tier?.name || tier?.id || "");
+  }
+
+  function tierSettingId(tierId, field) {
+    return `tier:${tierId}:${field}`;
+  }
+
+  function parseTierSettingId(settingId) {
+    const match = /^tier:([a-z][a-z0-9_-]{1,63}):(enabled|model|effort)$/.exec(String(settingId || ""));
+    return match ? { tierId: match[1], field: match[2] } : null;
+  }
+
+  function createTierTextControl(tier, field, multiline = false) {
+    const control = createElement(
+      multiline ? "textarea" : "input",
+      `opencodex-router-setting-control${multiline ? " opencodex-router-tier-prompt" : ""}`
+    );
+    if (!multiline) control.type = "text";
+    // 输入框展示实际参与分类的名称；本地化名称只用于未修改内置档位的卡片标题。
+    control.value = String(tier[field] || "");
+    control.maxLength = field === "name" ? 80 : 2_000;
+    control.disabled = tier.builtin === true;
+    control.dataset.tierId = tier.id;
+    control.dataset.tierField = field;
+    return control;
+  }
+
+  function createTierField(label, control, { full = false, warning = "" } = {}) {
+    const field = createElement(
+      "label",
+      `opencodex-router-tier-field${full ? " opencodex-router-tier-field-full" : ""}`
+    );
+    const text = createElement("span", "opencodex-router-setting-label", label);
+    if (warning) text.appendChild(createElement("span", "opencodex-router-setting-warning", warning));
+    field.append(text, control);
+    return field;
+  }
+
+  function createTierAction(label, text, handler, disabled = false) {
+    const button = createElement("button", "opencodex-router-tier-action", text);
+    button.type = "button";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.disabled = disabled;
+    button.addEventListener("click", handler);
+    return button;
+  }
+
   function notifySummaryConfiguration() {
     const plugin = routerPlugin();
     try {
@@ -509,6 +620,82 @@
     if (text && !error) statusTimer = setTimeout(() => setStatus(""), 2_000);
   }
 
+  function renderTierSection(content, plugin) {
+    const section = createElement("section", "opencodex-router-settings-card opencodex-router-tiers-card");
+    const sectionHeader = createElement("div", "opencodex-router-tiers-header");
+    const heading = createElement("div", "opencodex-router-tiers-heading");
+    heading.append(
+      createElement("h2", "opencodex-router-settings-group-title", c.tiersTitle),
+      createElement("p", "opencodex-router-tiers-description", c.tiersDescription)
+    );
+    const addButton = createElement("button", "opencodex-router-tier-add", c.addTier);
+    addButton.type = "button";
+    addButton.addEventListener("click", () => void addTier());
+    sectionHeader.append(heading, addButton);
+    section.appendChild(sectionHeader);
+
+    const tiers = Array.isArray(plugin.tiers) ? plugin.tiers : [];
+    if (!tiers.some((tier) => tier.enabled === true)) {
+      section.appendChild(createElement("p", "opencodex-router-tier-empty-warning", c.noEnabledTiers));
+    }
+    const list = createElement("div", "opencodex-router-tier-list");
+    tiers.forEach((tier, index) => {
+      const card = createElement("article", "opencodex-router-tier-card");
+      card.dataset.enabled = tier.enabled === true ? "true" : "false";
+      card.dataset.builtin = tier.builtin === true ? "true" : "false";
+      const header = createElement("header", "opencodex-router-tier-header");
+      const title = createElement("div", "opencodex-router-tier-title");
+      title.appendChild(createElement("span", "opencodex-router-tier-name", tierDisplayName(tier)));
+      if (tier.builtin) title.appendChild(createElement("span", "opencodex-router-tier-badge", c.builtinTier));
+
+      const actions = createElement("div", "opencodex-router-tier-actions");
+      if (!tier.builtin) {
+        actions.append(
+          createTierAction(c.moveTierUp, "↑", () => void moveTier(tier.id, -1), index === 0),
+          createTierAction(c.moveTierDown, "↓", () => void moveTier(tier.id, 1), index === tiers.length - 1)
+        );
+      }
+      const enabledLabel = createElement("span", "opencodex-router-tier-enabled-label", c.tierEnabled);
+      const enabledControl = createBooleanControl(
+        { id: tierSettingId(tier.id, "enabled"), label: c.tierEnabled },
+        tier.enabled
+      );
+      actions.append(enabledLabel, enabledControl);
+      if (!tier.builtin) {
+        actions.appendChild(
+          createTierAction(c.deleteTier, "×", () => void deleteTier(tier.id), false)
+        );
+      }
+      header.append(title, actions);
+
+      const fields = createElement("div", "opencodex-router-tier-fields");
+      fields.appendChild(createTierField(c.tierName, createTierTextControl(tier, "name")));
+      const modelControl = createControl(
+        { id: tierSettingId(tier.id, "model"), type: "model", label: c.tierModel },
+        tier.model
+      );
+      modelControl.control.disabled = tier.builtin === true;
+      fields.appendChild(
+        createTierField(c.tierModel, modelControl.control, {
+          warning: modelControl.unavailable ? c.unavailable : "",
+        })
+      );
+      const effortControl = createControl(
+        { id: tierSettingId(tier.id, "effort"), type: "reasoning-effort", label: c.tierEffort },
+        tier.effort
+      );
+      effortControl.control.disabled = tier.builtin === true;
+      fields.appendChild(createTierField(c.tierEffort, effortControl.control));
+      fields.appendChild(
+        createTierField(c.tierPrompt, createTierTextControl(tier, "prompt", true), { full: true })
+      );
+      card.append(header, fields);
+      list.appendChild(card);
+    });
+    section.appendChild(list);
+    content.appendChild(section);
+  }
+
   function renderConfiguration() {
     const content = page?.querySelector(".opencodex-router-settings-groups");
     if (!content) return;
@@ -526,6 +713,7 @@
     const settingsByGroup = new Map(GROUPS.map((group) => [group, []]));
     for (const setting of plugin.settings || []) settingsByGroup.get(settingGroup(setting.id)).push(setting);
     for (const group of GROUPS) {
+      if (group === "fallback") renderTierSection(content, plugin);
       const settings = settingsByGroup.get(group);
       if (!settings || settings.length === 0) continue;
       const section = createElement("section", "opencodex-router-settings-card");
@@ -568,13 +756,15 @@
     }
   }
 
-  async function updateSetting(settingId, value) {
+  async function persistPluginUpdate(patchFactory) {
     const plugin = routerPlugin();
     if (!plugin) return;
     try {
+      const patch = typeof patchFactory === "function" ? patchFactory(plugin) : patchFactory;
+      if (!patch) return;
       const result = await api(`/api/opencodex/plugins/${encodeURIComponent(plugin.id)}/config`, {
         method: "PATCH",
-        body: JSON.stringify({ expectedRevision: snapshot.revision, values: { [settingId]: value } }),
+        body: JSON.stringify({ expectedRevision: snapshot.revision, ...patch }),
       });
       snapshot = { revision: result.revision, plugins: result.plugins || [] };
       renderConfiguration();
@@ -589,6 +779,75 @@
       renderConfiguration();
       setStatus(`${c.failed}: ${error.message}`, true);
     }
+  }
+
+  function updatePlugin(patchFactory) {
+    // 所有写入按 revision 串行执行；档位变更函数会在执行时读取最新快照，防止快速操作互相覆盖。
+    const pending = updateQueue.catch(() => {}).then(() => persistPluginUpdate(patchFactory));
+    updateQueue = pending;
+    return pending;
+  }
+
+  async function updateSetting(settingId, value) {
+    await updatePlugin({ values: { [settingId]: value } });
+  }
+
+  async function updateTiers(mutator) {
+    await updatePlugin((plugin) => {
+      const nextTiers = mutator(editableTiers(plugin), plugin);
+      return Array.isArray(nextTiers) ? { tiers: nextTiers } : null;
+    });
+  }
+
+  function updateTierField(tierId, field, value) {
+    void updateTiers((tiers) => {
+      const target = tiers.find((tier) => tier.id === tierId);
+      if (!target) return null;
+      target[field] = value;
+      return tiers;
+    });
+  }
+
+  function moveTier(tierId, delta) {
+    void updateTiers((tiers) => {
+      const index = tiers.findIndex((tier) => tier.id === tierId);
+      const targetIndex = index + delta;
+      if (index < 0 || targetIndex < 0 || targetIndex >= tiers.length) return null;
+      [tiers[index], tiers[targetIndex]] = [tiers[targetIndex], tiers[index]];
+      return tiers;
+    });
+  }
+
+  function deleteTier(tierId) {
+    const plugin = routerPlugin();
+    const tier = plugin?.tiers?.find((candidate) => candidate.id === tierId);
+    if (!tier || tier.builtin) return;
+    if (typeof w.confirm === "function" && !w.confirm(c.deleteTierConfirm)) return;
+    void updateTiers((tiers, latestPlugin) => {
+      const latestTier = latestPlugin?.tiers?.find((candidate) => candidate.id === tierId);
+      if (!latestTier || latestTier.builtin) return null;
+      return tiers.filter((candidate) => candidate.id !== tierId);
+    });
+  }
+
+  function addTier() {
+    void updateTiers((tiers, plugin) => {
+      const ids = new Set(tiers.map((tier) => tier.id));
+      const prefix = `custom-${Date.now().toString(36)}`;
+      let id = prefix;
+      let suffix = 1;
+      while (ids.has(id)) id = `${prefix}-${suffix++}`;
+      const firstModel = modelValue(realModels()[0]);
+      tiers.push({
+        id,
+        enabled: true,
+        name: c.newTierName,
+        prompt: c.newTierPrompt,
+        model: String(plugin.values?.fallbackModel || firstModel || "gpt-5.3-codex-spark"),
+        effort: "auto",
+      });
+      return tiers;
+    });
   }
 
   function ensurePage() {
@@ -617,6 +876,14 @@
     page.appendChild(scroll);
     page.addEventListener("change", (event) => {
       const control = event.target;
+      if (control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) {
+        const tierId = control.dataset.tierId;
+        const tierField = control.dataset.tierField;
+        if (tierId && tierField) {
+          updateTierField(tierId, tierField, control.value);
+          return;
+        }
+      }
       if (!(control instanceof HTMLInputElement)) return;
       const settingId = control.dataset.settingId;
       if (!settingId) return;
@@ -626,6 +893,11 @@
     page.addEventListener("opencodex-setting-change", (event) => {
       const { settingId, value } = event.detail || {};
       if (!settingId) return;
+      const tierSetting = parseTierSettingId(settingId);
+      if (tierSetting) {
+        updateTierField(tierSetting.tierId, tierSetting.field, value);
+        return;
+      }
       void updateSetting(settingId, value);
     });
     document.body.appendChild(page);

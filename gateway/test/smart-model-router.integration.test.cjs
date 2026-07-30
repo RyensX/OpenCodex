@@ -77,7 +77,6 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
   configStore.update("opencodex.smart-model-router", {
     expectedRevision: 0,
     enabled: true,
-    values: { balancedEffort: "auto" },
   });
   const injectionPoints = [];
   const service = createSmartModelRouterService({
@@ -329,6 +328,36 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
   });
   await waitFor(() => publicMessages.find((message) => message.id === "select-manual"));
   assert.equal(service.activeRoute("user-thread"), null);
+
+  const classifierCountBeforeDisabledTurn = classifierThread;
+  configStore.update("opencodex.smart-model-router", {
+    expectedRevision: 3,
+    tiers: configStore
+      .plugin("opencodex.smart-model-router")
+      .tiers.map((tier) => ({ ...tier, enabled: false })),
+  });
+  await writeRequest(fake.child.stdin, {
+    id: "select-auto-without-tiers",
+    method: "thread/settings/update",
+    params: { threadId: "user-thread", model: "auto", effort: "medium" },
+  });
+  await waitFor(() => publicMessages.find((message) => message.id === "select-auto-without-tiers"));
+  await writeRequest(fake.child.stdin, {
+    id: "user-turn-without-tiers",
+    method: "turn/start",
+    params: {
+      threadId: "user-thread",
+      model: "auto",
+      effort: "medium",
+      input: [{ type: "text", text: "Use fallback because every tier is disabled", text_elements: [] }],
+    },
+  });
+  const disabledTierTurn = await waitFor(() =>
+    forwardedTurns.find((message) => message.id === "user-turn-without-tiers")
+  );
+  assert.equal(disabledTierTurn.params.model, "gpt-5.3-codex-spark");
+  assert.equal(disabledTierTurn.params.effort, "low");
+  assert.equal(classifierThread, classifierCountBeforeDisabledTurn);
 
   assert.equal(publicMessages.some((message) => String(message.id || "").startsWith("opencodex.router:")), false);
   assert.equal(publicMessages.some((message) => String(message.params?.threadId || "").startsWith("classifier-")), false);

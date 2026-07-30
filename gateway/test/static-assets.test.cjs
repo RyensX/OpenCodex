@@ -335,7 +335,7 @@ test("smart scheduling injection health reports every renderer injection point",
   assert.match(summary, /report\("summary-adapter"\)/);
 });
 
-test("smart scheduling settings localize tier and field labels", () => {
+test("smart scheduling settings localize and render dynamic tier controls", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(SMART_SCHEDULING_PLUGIN_DIR, "plugin.json"), "utf-8"));
   const zh = JSON.parse(fs.readFileSync(path.join(SMART_SCHEDULING_PLUGIN_DIR, "i18.zh.json"), "utf-8"));
   const en = JSON.parse(fs.readFileSync(path.join(SMART_SCHEDULING_PLUGIN_DIR, "i18.en.json"), "utf-8"));
@@ -345,6 +345,8 @@ test("smart scheduling settings localize tier and field labels", () => {
   assert.equal(en["plugin.smartModelRouter.group.balanced"], "Balanced");
   assert.equal(zh["plugin.smartModelRouter.setting.model"], "模型");
   assert.equal(en["plugin.smartModelRouter.setting.effort"], "Reasoning effort");
+  assert.equal(zh["plugin.smartModelRouter.tiers.add"], "添加档位");
+  assert.equal(en["plugin.smartModelRouter.tier.prompt"], "Classification prompt");
   // 认证前插件页必须明确说明选择 Auto 后会同时自动选择模型与推理强度。
   assert.match(zh["plugin.smartModelRouter.desc"], /选择 Auto.*自动选择模型和推理强度/);
   assert.match(en["plugin.smartModelRouter.desc"], /Selecting Auto.*model and reasoning effort/);
@@ -375,8 +377,14 @@ test("smart scheduling settings localize tier and field labels", () => {
   assert.match(injectionHealthSource, /card\.appendChild\(header\)/);
   assert.match(injectionHealthSource, /root\.appendChild\(card\)/);
   assert.equal(manifest.settings.find((setting) => setting.id === "showRouteInSummary").defaultValue, true);
-  assert.equal(manifest.settings.find((setting) => setting.id === "balancedModel").labelKey, "plugin.smartModelRouter.setting.model");
-  assert.match(fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8"), /label: effort/);
+  assert.equal(manifest.settings.some((setting) => setting.id === "balancedModel"), false);
+  assert.equal(manifest.settings.find((setting) => setting.id === "fallbackModel").labelKey, "plugin.smartModelRouter.setting.model");
+  const settingsSource = fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8");
+  assert.match(settingsSource, /function addTier\(\)/);
+  assert.match(settingsSource, /function deleteTier\(tierId\)/);
+  assert.match(settingsSource, /control\.disabled = tier\.builtin === true/);
+  assert.match(settingsSource, /if \(!tier\.builtin\) \{/);
+  assert.match(settingsSource, /body: JSON\.stringify\(\{ expectedRevision: snapshot\.revision, \.\.\.patch \}\)/);
 });
 
 test("smart scheduling summary follows root-path task context while Auto remains enabled", () => {

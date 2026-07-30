@@ -4,36 +4,50 @@ const {
   CLASSIFICATION_TIMEOUT_MS,
   EFFORT_ORDER,
   TASK_TYPES,
-  TIER_ORDER,
 } = require("./constants.cjs");
 const { buildClassifierPrompt } = require("./context.cjs");
 const { applyClassificationPolicy } = require("./resolver.cjs");
+const { defaultTierDefinitions, enabledTierDefinitions } = require("./tiers.cjs");
 
-const CLASSIFIER_OUTPUT_SCHEMA = Object.freeze({
-  type: "object",
-  additionalProperties: false,
-  required: ["tier", "confidence", "taskType", "rationale"],
-  properties: {
-    tier: { type: "string", enum: TIER_ORDER },
-    confidence: { type: "number", minimum: 0, maximum: 1 },
-    taskType: { type: "string", enum: TASK_TYPES },
-    rationale: { type: "string", maxLength: 300 },
-  },
-});
+function baseClassifierOutputSchema(tierIds) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["tier", "confidence", "taskType", "rationale"],
+    properties: {
+      tier: { type: "string", enum: tierIds },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+      taskType: { type: "string", enum: TASK_TYPES },
+      rationale: { type: "string", maxLength: 300 },
+    },
+  };
+}
 
-function classifierOutputSchema(automaticEffortTiers, previousStatus = "") {
+// 兼容旧调用方的默认 schema 也从内置档位数据生成，不再单独维护一份写死枚举。
+const DEFAULT_TIER_IDS = Object.freeze(defaultTierDefinitions().map((tier) => tier.id));
+const CLASSIFIER_OUTPUT_SCHEMA = Object.freeze(baseClassifierOutputSchema(DEFAULT_TIER_IDS));
+
+function classifierOutputSchema(
+  automaticEffortTiers,
+  previousStatus = "",
+  tiers = defaultTierDefinitions()
+) {
+  const activeTiers = enabledTierDefinitions(tiers);
+  const tierIds = activeTiers.map((tier) => tier.id);
+  const baseSchema = baseClassifierOutputSchema(tierIds);
   const needsEffort = Array.isArray(automaticEffortTiers) && automaticEffortTiers.length > 0;
-  if (!needsEffort) return CLASSIFIER_OUTPUT_SCHEMA;
+  if (!needsEffort) return baseSchema;
   const automaticTiers = new Set(automaticEffortTiers);
   const variants = [];
-  for (const tier of TIER_ORDER) {
+  for (const tier of tierIds) {
     for (const lowConfidence of [true, false]) {
       const confidence = lowConfidence
         ? { type: "number", minimum: 0, exclusiveMaximum: 0.65 }
         : { type: "number", minimum: 0.65, maximum: 1 };
       const effectiveTier = applyClassificationPolicy(
         { tier, confidence: lowConfidence ? 0.64 : 0.65 },
-        previousStatus
+        previousStatus,
+        tiers
       ).tier;
       const effortRequired = automaticTiers.has(effectiveTier);
       variants.push({
@@ -44,8 +58,8 @@ function classifierOutputSchema(automaticEffortTiers, previousStatus = "") {
           tier: { type: "string", enum: [tier] },
           ...(effortRequired ? { effort: { type: "string", enum: EFFORT_ORDER } } : {}),
           confidence,
-          taskType: CLASSIFIER_OUTPUT_SCHEMA.properties.taskType,
-          rationale: CLASSIFIER_OUTPUT_SCHEMA.properties.rationale,
+          taskType: baseSchema.properties.taskType,
+          rationale: baseSchema.properties.rationale,
         },
       });
     }
@@ -118,7 +132,7 @@ function remainingMs(deadlineAt) {
   return value;
 }
 
-function parseClassificationText(text) {
+function parseClassificationText(text, allowedTierIds = DEFAULT_TIER_IDS) {
   if (typeof text !== "string" || !text.trim()) throw new ClassificationError("Classifier returned no message", "empty");
   const trimmed = text.trim();
   const unwrapped = trimmed.startsWith("```")
@@ -131,7 +145,7 @@ function parseClassificationText(text) {
     throw new ClassificationError("Classifier returned invalid JSON", "invalid_json");
   }
   // Auto effort 的条件 schema 使用 route 外壳；无 Auto 档位时仍兼容原来的扁平对象，避免无谓改变协议形态。
-  return validateClassification(parsed?.route ?? parsed);
+  return validateClassification(parsed?.route ?? parsed, allowedTierIds);
 }
 
 function normalizedFailureCode(value) {
@@ -155,11 +169,12 @@ function classifierTurnFailureCategory(turn) {
   return codexErrorInfo && codexErrorInfo !== "other" ? codexErrorInfo : "turn_failed";
 }
 
-function validateClassification(value) {
+function validateClassification(value, allowedTierIds = DEFAULT_TIER_IDS) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new ClassificationError("Classifier result must be an object", "invalid_schema");
   }
-  if (!TIER_ORDER.includes(value.tier)) throw new ClassificationError("Classifier tier is invalid", "invalid_schema");
+  const allowedTiers = new Set(Array.isArray(allowedTierIds) ? allowedTierIds : []);
+  if (!allowedTiers.has(value.tier)) throw new ClassificationError("Classifier tier is invalid", "invalid_schema");
   if (value.effort !== undefined && !EFFORT_ORDER.includes(value.effort)) {
     throw new ClassificationError("Classifier effort is invalid", "invalid_schema");
   }
@@ -228,9 +243,18 @@ function createClassifier({ transport, timeoutMs = CLASSIFICATION_TIMEOUT_MS, co
     transport.unregisterInternalThread(threadId);
   }
 
-  async function classify({ context, model, effort, automaticEffortTiers = [], deadlineAt: requestedDeadlineAt }) {
+  async function classify({
+    context,
+    model,
+    effort,
+    tiers = defaultTierDefinitions(),
+    automaticEffortTiers = [],
+    deadlineAt: requestedDeadlineAt,
+  }) {
     const startedAt = Date.now();
     const deadlineAt = Number.isFinite(requestedDeadlineAt) ? requestedDeadlineAt : startedAt + timeoutMs;
+    const activeTierIds = enabledTierDefinitions(tiers).map((tier) => tier.id);
+    if (activeTierIds.length === 0) throw new ClassificationError("No enabled tiers are available", "no_enabled_tiers");
     const release = await semaphore.acquire(remainingMs(deadlineAt));
     let threadId = "";
     let turnId = "";
@@ -276,13 +300,13 @@ function createClassifier({ transport, timeoutMs = CLASSIFICATION_TIMEOUT_MS, co
           input: [
             {
               type: "text",
-              text: buildClassifierPrompt(context, { automaticEffortTiers }),
+              text: buildClassifierPrompt(context, { tiers, automaticEffortTiers }),
               text_elements: [],
             },
           ],
           model,
           effort,
-          outputSchema: classifierOutputSchema(automaticEffortTiers, context?.previousStatus),
+          outputSchema: classifierOutputSchema(automaticEffortTiers, context?.previousStatus, tiers),
         },
         { timeoutMs: remainingMs(deadlineAt) }
       );
@@ -312,7 +336,7 @@ function createClassifier({ transport, timeoutMs = CLASSIFICATION_TIMEOUT_MS, co
         threadId,
         deadlineAt,
       });
-      const classification = parseClassificationText(agentMessage);
+      const classification = parseClassificationText(agentMessage, activeTierIds);
       return { classification, elapsedMs: Date.now() - startedAt };
     } catch (error) {
       if (error instanceof ClassificationError) throw error;
