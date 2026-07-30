@@ -8,7 +8,7 @@
   "feature": "smart-model-router",
   "persistence": "gateway",
   "surface": "renderer",
-  "defaultEnabled": false,
+  "defaultEnabled": true,
   "order": 5,
   "settings": [
     { "id": "showRouteInSummary", "type": "boolean", "defaultValue": true, "labelKey": "plugin.smartModelRouter.setting.showRouteInSummary", "descriptionKey": "plugin.smartModelRouter.setting.showRouteInSummary.description", "order": 1 },

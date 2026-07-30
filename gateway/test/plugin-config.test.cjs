@@ -56,7 +56,7 @@ test("gateway plugin config validates types, writes atomically and detects revis
   const initial = store.snapshot();
   const plugin = initial.plugins.find((value) => value.id === "opencodex.smart-model-router");
   assert.equal(initial.revision, 0);
-  assert.equal(plugin.enabled, false);
+  assert.equal(plugin.enabled, true);
   assert.equal(plugin.values.classifierModel, "gpt-5.3-codex-spark");
   assert.equal(plugin.values.classifierEffort, "low");
   assert.equal(plugin.values.showRouteInSummary, true);
