@@ -94,6 +94,13 @@ function serveOfficialAsset(service, reqPath, host) {
   return res.body.toString("utf-8");
 }
 
+function serveOfficialAssetResponse(service, reqPath, host = "localhost:3737") {
+  const file = service.staticFile(reqPath);
+  const res = makeResponseRecorder();
+  service.serveFile({ headers: { host } }, res, file, 200, reqPath);
+  return res;
+}
+
 test("web shell manifest requests credentials for protected origins", () => {
   const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
 
@@ -109,6 +116,13 @@ test("bridge keeps synchronous official preload methods out of the adaptive IPC 
   assert.match(source, /target\.isDeviceCheckSupported = \(\) => false;/);
   assert.match(source, /target\.startFileDrag = \(\) => false;/);
   assert.ok(source.indexOf("target.getInitialSidebarBootstrap") < source.indexOf("createAdaptiveBridgeProxy"));
+});
+
+test("bridge reconnects active app-host ports after websocket hello", () => {
+  const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
+
+  assert.match(bridge, /state\.pending\.unshift\(appHostWsPayload\(state, \{ type: "app-host-connect" \}\)\)/);
+  assert.match(bridge, /for \(const state of appHostPortRelays\.values\(\)\) state\.connected = false/);
 });
 
 test("patched official renderer CSP allows the injected PWA manifest", (t) => {
@@ -352,4 +366,39 @@ test("renames official open-in-folder locale message only for remote browser hos
 
   const loopbackSource = serveOfficialAsset(service, reqPath, "localhost:3737");
   assert.match(loopbackSource, /"artifactTab\.preview\.openInFolder":`打开所在文件夹`/);
+});
+
+test("only caches content-hashed patched assets as immutable", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  fs.writeFileSync(path.join(assetsDir, "app-Dk3EPlSk.js"), "export const ready = true;");
+  fs.writeFileSync(
+    path.join(assetsDir, "locale-Ab1_cdEF.js"),
+    'export default {"artifactTab.preview.openInFolder":"Open in folder"};'
+  );
+  fs.writeFileSync(path.join(assetsDir, "dotnet.js"), "export const runtime = true;");
+  const service = createService(webviewDir);
+  const patchedService = createStaticAssetService({
+    getI18nSnapshot: () => ({
+      locale: "zh-CN",
+      messages: { "web.remoteFile.downloadFile": "下载文件" },
+    }),
+    getOfficialBundle: () => ({ webviewDir }),
+  });
+
+  const current = serveOfficialAssetResponse(service, `${PATCHED_OFFICIAL_PREFIX}assets/app-Dk3EPlSk.js`);
+  const dynamic = serveOfficialAssetResponse(
+    patchedService,
+    `${PATCHED_OFFICIAL_PREFIX}assets/locale-Ab1_cdEF.js`,
+    "192.168.60.218:3737"
+  );
+  const fixedName = serveOfficialAssetResponse(service, `${PATCHED_OFFICIAL_PREFIX}assets/dotnet.js`);
+  const legacy = serveOfficialAssetResponse(service, "/official-patched/assets/app-Dk3EPlSk.js");
+
+  assert.equal(current.headers["cache-control"], "public, max-age=31536000, immutable");
+  assert.equal(dynamic.headers["cache-control"], "no-store");
+  assert.match(dynamic.body.toString("utf-8"), /下载文件/);
+  assert.equal(fixedName.headers["cache-control"], "no-store");
+  assert.equal(legacy.headers["cache-control"], "no-store");
 });

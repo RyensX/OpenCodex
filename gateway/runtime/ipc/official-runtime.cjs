@@ -37,6 +37,7 @@ const {
   officialNotificationHookStatus,
 } = require("../electron/official-notification-hook.cjs");
 const { hiddenTrayHookStatus, installOfficialTrayHook } = require("../electron/official-tray-hook.cjs");
+const { createOfficialLiveObserver } = require("./official-live-observer.cjs");
 
 const { app, ipcMain } = electron;
 
@@ -50,6 +51,36 @@ const requestRouteSummaries = new Map();
 let officialBundle = null;
 let wsHub = null;
 let appServerChildDecorator = null;
+let removeWsClientReadyListener = null;
+// 官方 runtime 会把自身 TMPDIR 改到隔离目录；observer 必须在此之前记住原始 fallback socket。
+const ORIGINAL_SYSTEM_TMPDIR = os.tmpdir();
+
+function officialDesktopIpcSocketPaths(platform = process.platform) {
+  // Windows 的 Node IPC 使用 named pipe；Unix socket 路径在该平台不会建立连接。
+  if (platform === "win32") return ["\\\\.\\pipe\\codex-ipc"];
+  const uid =
+    typeof process.getuid === "function"
+      ? String(process.getuid())
+      : String(os.userInfo().username || "user");
+  return [
+    path.join(CODEX_HOME, "ipc", "ipc.sock"),
+    path.join(ORIGINAL_SYSTEM_TMPDIR, "codex-ipc", `ipc-${uid}.sock`),
+  ];
+}
+
+const officialLiveObserver = createOfficialLiveObserver({
+  socketPaths: officialDesktopIpcSocketPaths(),
+  publish(payload) {
+    if (wsHub) wsHub.broadcast(payload, { suppressDiagnostic: true });
+    // peer snapshot 也会改变 recent-conversations-meta；沿用官方 renderer 的 invalidation 协议。
+    scheduleThreadListEventSync(payload.channel, [payload.payload]);
+  },
+  onError(error) {
+    diagnosticWarn("official-live-observer", "observer_error", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  },
+});
 
 const officialIpc = {
   // 官方 main 调 ipcMain.handle/on 注册的 handler 会被这里记录，再由 HTTP IPC invoke 复用。
@@ -510,7 +541,13 @@ function appServerSpawnHookStatus() {
 
 function setWsHub(nextWsHub) {
   // server.cjs 创建 WebSocket hub 后再注入，避免 runtime 层反向依赖 HTTP server。
+  removeWsClientReadyListener?.();
   wsHub = nextWsHub;
+  // Web config 首次加载可能早于浏览器 WS hello；页面真正注册后再重发一次 following，确保快照不丢。
+  removeWsClientReadyListener =
+    typeof nextWsHub?.onClientReady === "function"
+      ? nextWsHub.onClientReady(() => officialLiveObserver.refresh())
+      : null;
 }
 
 function getOfficialBundle() {
@@ -1419,6 +1456,102 @@ function logUnknownIpc(kind, details) {
   } catch {}
 }
 
+const THREAD_LIST_INVALIDATION_METHODS = new Set([
+  "thread/started",
+  "thread/name",
+  "thread/name/updated",
+  "thread/archived",
+  "thread/unarchived",
+  "thread/deleted",
+]);
+const THREAD_LIST_BROADCAST_INVALIDATION_METHODS = new Set(["thread-archived", "thread-unarchived"]);
+
+function threadListInvalidationForOfficialMessage(channel, args) {
+  if (channel !== MESSAGE_FOR_VIEW_CHANNEL && channel !== "thread-stream-state-changed") return null;
+  const payload = payloadFromArgs(args);
+  if (!payload || typeof payload !== "object") return null;
+  const method = String(payload.method || "");
+  const isAppServerListChange =
+    channel === MESSAGE_FOR_VIEW_CHANNEL &&
+    payload.type === "mcp-notification" &&
+    THREAD_LIST_INVALIDATION_METHODS.has(method);
+  const isPeerListChange =
+    channel === MESSAGE_FOR_VIEW_CHANNEL &&
+    payload.type === "ipc-broadcast" &&
+    THREAD_LIST_BROADCAST_INVALIDATION_METHODS.has(method);
+  const isPeerThreadSnapshot =
+    ((channel === MESSAGE_FOR_VIEW_CHANNEL && payload.type === "ipc-broadcast") ||
+      (channel === "thread-stream-state-changed" && payload.type === "broadcast")) &&
+    method === "thread-stream-state-changed" &&
+    payload.params &&
+    payload.params.change &&
+    payload.params.change.type === "snapshot";
+  if (!isAppServerListChange && !isPeerListChange && !isPeerThreadSnapshot) return null;
+  return { type: "query-cache-invalidate", queryKey: ["recent-conversations-meta"] };
+}
+
+function threadListInvalidationEnvelope() {
+  const payload = {
+    type: "ipc-broadcast",
+    method: "query-cache-invalidate",
+    params: { queryKey: ["recent-conversations-meta"] },
+  };
+  return { channel: MESSAGE_FOR_VIEW_CHANNEL, payload, args: [payload] };
+}
+
+function threadListInvalidationRequest() {
+  return { type: "query-cache-invalidate", queryKey: ["recent-conversations-meta"] };
+}
+
+let threadListEventSyncScheduled = false;
+
+function runThreadListInvalidation(logEvent, details = {}) {
+  let recipientCount = 0;
+  try {
+    if (wsHub) {
+      recipientCount = wsHub.broadcast(threadListInvalidationEnvelope(), { suppressDiagnostic: true });
+    }
+    // 官方隐藏 renderer 也使用同一条 query cache 协议；Web 广播不能替代 native 通知。
+    void invokeOfficialIpc(MESSAGE_FROM_VIEW_CHANNEL, [threadListInvalidationRequest()]).catch((error) => {
+      diagnosticWarn("official-thread-list-sync", "recent_conversations_meta_native_invalidation_failed", {
+        error: error instanceof Error ? error.message : String(error || ""),
+        source: logEvent,
+      });
+    });
+    diagnosticLog("official-thread-list-sync", logEvent, { ...details, recipientCount });
+    return recipientCount > 0;
+  } catch (error) {
+    diagnosticWarn("official-thread-list-sync", "recent_conversations_meta_invalidation_failed", {
+      error: error instanceof Error ? error.message : String(error || ""),
+      source: logEvent,
+    });
+    return false;
+  }
+}
+
+function scheduleThreadListEventSync(channel, args) {
+  const invalidation = threadListInvalidationForOfficialMessage(channel, args);
+  if (!invalidation || threadListEventSyncScheduled) return;
+  threadListEventSyncScheduled = true;
+  const notification = payloadFromArgs(args);
+  setImmediate(() => {
+    threadListEventSyncScheduled = false;
+    runThreadListInvalidation("recent_conversations_meta_invalidation_broadcast", {
+      hostId: typeof notification?.hostId === "string" ? notification.hostId : "",
+      threadId:
+        notification?.params &&
+        notification.params.thread &&
+        typeof notification.params.thread.id === "string"
+          ? notification.params.thread.id
+          : notification?.params && typeof notification.params.threadId === "string"
+            ? notification.params.threadId
+            : notification?.params && typeof notification.params.conversationId === "string"
+              ? notification.params.conversationId
+              : "",
+    });
+  });
+}
+
 function acknowledgeOfficialChunkSoon(acknowledgement, sourceWebContents) {
   if (!acknowledgement) return;
   /**
@@ -1461,6 +1594,7 @@ function routeOfficialWebContentsSend(channel, args, sourceWebContents = officia
       routedArgs = [payload];
     }
   }
+  scheduleThreadListEventSync(channel, routedArgs);
   if (!wsHub) {
     diagnosticWarn("official-ipc-route", "before_ws_ready", outgoingIpcDiagnosticSummary(channel, routedArgs));
     logUnknownIpc("webcontents-send-before-ws-ready", {
@@ -1955,7 +2089,12 @@ async function initialSidebarBootstrapForRenderer() {
       lastInitialSidebarBootstrap = bootstrap;
       hasWarnedInitialSidebarBootstrapFailure = false;
     }
-    return bootstrap || lastInitialSidebarBootstrap;
+    const effectiveBootstrap = bootstrap || lastInitialSidebarBootstrap;
+    if (effectiveBootstrap) {
+      // 只从 Web 首屏侧栏已知条目订阅，避免 observer 读取或跟踪用户不可见的 thread。
+      officialLiveObserver.observeSidebarBootstrap(effectiveBootstrap);
+    }
+    return effectiveBootstrap;
   } catch (error) {
     if (!hasWarnedInitialSidebarBootstrapFailure) {
       hasWarnedInitialSidebarBootstrapFailure = true;
@@ -1979,6 +2118,7 @@ function startOfficialRuntime(options = {}) {
     typeof options.decorateAppServerChild === "function" ? options.decorateAppServerChild : null;
   officialBundle = ensureOfficialBundle({ projectRoot: PROJECT_ROOT });
   alignOfficialElectronEnvironment(officialBundle);
+  officialLiveObserver.start();
   installAppServerSpawnHook(officialBundle);
   installIpcMainHooks();
   installBrowserWindowHooks();
@@ -1997,6 +2137,7 @@ function startOfficialRuntime(options = {}) {
 function rejectPendingInternalResponses(error) {
   // 当前没有 gateway 自己发起的官方 IPC 请求；保留出口让 shutdown 路径无需关心内部实现。
   void error;
+  officialLiveObserver.stop();
 }
 
 function listOfficialIpcChannels() {
@@ -2023,7 +2164,11 @@ module.exports = {
     fileManagerPathFromSpawn,
     normalizeInitialSidebarBootstrap,
     OfficialChunkedMessageReceiver,
+    officialDesktopIpcSocketPaths,
     isHiddenOfficialAppServerArgs,
     shouldInterceptRemoteFileManagerStore,
+    threadListInvalidationEnvelope,
+    threadListInvalidationForOfficialMessage,
+    threadListInvalidationRequest,
   },
 };
