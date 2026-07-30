@@ -7,8 +7,10 @@
   const SIDEBAR_THREAD_ROW_SELECTOR = "[data-app-action-sidebar-thread-row]";
   const SIDEBAR_SCROLL_SELECTOR = "[data-app-action-sidebar-scroll]";
   const SIDEBAR_NON_THREAD_ROW_SELECTOR = "[data-app-action-sidebar-project-row],[data-app-action-sidebar-section]";
+  const SIDEBAR_TOGGLE_SELECTOR = "[data-app-shell-sidebar-trigger]";
   const SIDEBAR_TOGGLE_VIEW_TRANSITION_NAME = "sidebar-trigger";
-  const SIDEBAR_NEW_CONVERSATION_ICON_PATH_PREFIX = "M2.6687 11.333";
+  // 官方不同版本使用过两套“新建任务”图标，需同时兼容，避免上游换图标后点击失效。
+  const SIDEBAR_NEW_CONVERSATION_ICON_PATH_PREFIXES = ["M2.6687 11.333", "M6.33325 1.88379"];
   const NEW_CONVERSATION_MESSAGE_TYPES = new Set(["new-chat", "new-quick-chat"]);
 
   function visibleElement(element) {
@@ -103,6 +105,9 @@
   }
 
   function findSidebarToggleButton() {
+    // 新版官方界面提供稳定标记；保留 view-transition 识别以兼容旧版。
+    const markedButton = document.querySelector(SIDEBAR_TOGGLE_SELECTOR);
+    if (markedButton?.matches?.("button") && visibleElement(markedButton)) return markedButton;
     return Array.from(document.querySelectorAll("button")).find((button) => {
       if (!visibleElement(button)) return false;
       return sidebarToggleViewTransitionName(button) === SIDEBAR_TOGGLE_VIEW_TRANSITION_NAME;
@@ -129,7 +134,9 @@
     if (!panel || !panel.contains(button)) return false;
     if (!visibleElement(button) || button.disabled || button.getAttribute("aria-disabled") === "true") return false;
     return Array.from(button.querySelectorAll("svg path")).some((path) =>
-      String(path.getAttribute("d") || "").startsWith(SIDEBAR_NEW_CONVERSATION_ICON_PATH_PREFIX)
+      SIDEBAR_NEW_CONVERSATION_ICON_PATH_PREFIXES.some((prefix) =>
+        String(path.getAttribute("d") || "").startsWith(prefix)
+      )
     );
   }
 
