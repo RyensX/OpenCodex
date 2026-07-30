@@ -1,0 +1,28 @@
+{
+  "id": "opencodex.smart-model-router",
+  "name": "Smart scheduling",
+  "label": "智能调度",
+  "labelKey": "plugin.smartModelRouter.label",
+  "desc": "为模型列表加入 Auto，并根据每轮任务自动调度模型和推理强度。",
+  "descKey": "plugin.smartModelRouter.desc",
+  "feature": "smart-model-router",
+  "persistence": "gateway",
+  "surface": "renderer",
+  "defaultEnabled": false,
+  "order": 5,
+  "settings": [
+    { "id": "showRouteInSummary", "type": "boolean", "defaultValue": true, "labelKey": "plugin.smartModelRouter.setting.showRouteInSummary", "descriptionKey": "plugin.smartModelRouter.setting.showRouteInSummary.description", "order": 1 },
+    { "id": "classifierModel", "type": "model", "defaultValue": "gpt-5.3-codex-spark", "labelKey": "plugin.smartModelRouter.setting.model", "order": 10 },
+    { "id": "classifierEffort", "type": "reasoning-effort", "defaultValue": "low", "labelKey": "plugin.smartModelRouter.setting.effort", "order": 11 },
+    { "id": "economyModel", "type": "model", "defaultValue": "gpt-5.3-codex-spark", "labelKey": "plugin.smartModelRouter.setting.model", "order": 20 },
+    { "id": "economyEffort", "type": "reasoning-effort", "defaultValue": "auto", "labelKey": "plugin.smartModelRouter.setting.effort", "order": 21 },
+    { "id": "balancedModel", "type": "model", "defaultValue": "gpt-5.6-luna", "labelKey": "plugin.smartModelRouter.setting.model", "order": 30 },
+    { "id": "balancedEffort", "type": "reasoning-effort", "defaultValue": "auto", "labelKey": "plugin.smartModelRouter.setting.effort", "order": 31 },
+    { "id": "complexModel", "type": "model", "defaultValue": "gpt-5.6-terra", "labelKey": "plugin.smartModelRouter.setting.model", "order": 40 },
+    { "id": "complexEffort", "type": "reasoning-effort", "defaultValue": "auto", "labelKey": "plugin.smartModelRouter.setting.effort", "order": 41 },
+    { "id": "frontierModel", "type": "model", "defaultValue": "gpt-5.6-sol", "labelKey": "plugin.smartModelRouter.setting.model", "order": 50 },
+    { "id": "frontierEffort", "type": "reasoning-effort", "defaultValue": "auto", "labelKey": "plugin.smartModelRouter.setting.effort", "order": 51 },
+    { "id": "fallbackModel", "type": "model", "defaultValue": "gpt-5.3-codex-spark", "labelKey": "plugin.smartModelRouter.setting.model", "order": 60 },
+    { "id": "fallbackEffort", "type": "reasoning-effort", "defaultValue": "auto", "labelKey": "plugin.smartModelRouter.setting.effort", "order": 61 }
+  ]
+}

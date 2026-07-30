@@ -99,6 +99,31 @@
     tokenUsageCapability?.handleGatewayPayload?.(payload);
   }
 
+  const smartSchedulingBridgeStats = { clientFrames: 0, serverFrames: 0, protocolFrames: 0 };
+
+  function handleSmartSchedulingAppHostData(data, direction) {
+    // 智能调度的展示状态由独立模块维护，bridge 只标记帧方向并保持原始内容透明转发。
+    if (direction === "client") smartSchedulingBridgeStats.clientFrames += 1;
+    else smartSchedulingBridgeStats.serverFrames += 1;
+    if (typeof data === "string" && (data.includes("turn/") || data.includes("thread/"))) {
+      smartSchedulingBridgeStats.protocolFrames += 1;
+    }
+    w.__OpenCodexSmartSchedulingSummary?.handleAppHostData?.(data, direction);
+  }
+
+  function handleSmartSchedulingGatewayMessage(message) {
+    if (!message || message.type !== "opencodex:smart-scheduling-route") return false;
+    w.__OpenCodexSmartSchedulingSummary?.handleRouteEvent?.(message.event);
+    return true;
+  }
+
+  w.__OpenCodexSmartSchedulingBridgeDiagnostics = Object.freeze({
+    snapshot() {
+      // 只返回方向计数，不保留 RPC 内容、任务 ID 或用户输入。
+      return { ...smartSchedulingBridgeStats };
+    },
+  });
+
   function gatewayAuthToken() {
     try {
       return String(w.__OPEN_CODEX_RUNTIME_AUTH_TOKEN__ || "").trim();
@@ -1831,6 +1856,7 @@
       return true;
     }
     handleTokenUsageAppHostData(data);
+    handleSmartSchedulingAppHostData(data, "server");
     try {
       state.port.postMessage(data);
       if (data === null) closeAppHostRelay(state, "official_closed", false);
@@ -1879,6 +1905,8 @@
           });
           return;
         }
+        // 当前官方 Web 路由固定为根路径；展示模块需从本标签页发出的 RPC 识别正在查看的 thread。
+        handleSmartSchedulingAppHostData(portData, "client");
         queueAppHostRelayPayload(state, { type: "app-host-port-message", data: portData });
         if (portData === null) closeAppHostRelay(state, "browser_closed", false);
       });
@@ -2405,6 +2433,10 @@
 
   initializePersistedAtomSnapshot();
 
+  // 官方 preload 在 renderer 执行前同步记录该时间；Web 侧同样固定为页面 timeOrigin，不能落入异步 IPC。
+  const preloadStartedAtMs =
+    w.performance && Number.isFinite(w.performance.timeOrigin) ? w.performance.timeOrigin : Date.now();
+
   /** 把 Electron/Codex bridge API 挂到多个官方可能访问的全局对象上。 */
   function attachBridge(target) {
     target.invoke = invoke;
@@ -2457,6 +2489,8 @@
       if (file && typeof file === "object" && typeof file.path === "string") return file.path;
       return null;
     };
+    // 浏览器无法发起 Electron 原生文件拖拽，按官方同步布尔返回值契约明确降级。
+    target.startFileDrag = () => false;
     target.sendMessageFromView = async (payload) =>
       Promise.resolve().then(() => {
         if (payload && typeof payload === "object" && payload.type === "persisted-atom-sync-request") {
@@ -2509,6 +2543,11 @@
       subscribe(`codex_desktop:worker:${workerId}:for-view`, handler);
     target.getBuildFlavor = () => "prod";
     // 这些方法是当前官方 preload 明确暴露的能力；Web 侧给出等价或保守结果，避免 renderer 走缺失 IPC。
+    target.getPreloadStartedAtMs = () => preloadStartedAtMs;
+    // 侧栏快照必须同步返回；刷新时官方启动广播不会重放，不能再固定返回 null。
+    target.getInitialSidebarBootstrap = () => cfg.initialSidebarBootstrap ?? null;
+    // DeviceCheck 依赖桌面原生能力，Web 壳必须同步报告不支持，不能让 Promise 被误判为 true。
+    target.isDeviceCheckSupported = () => false;
     target.isIntelMacBuild = () => /macintosh|mac os x/i.test(navigator.userAgent) && /intel/i.test(navigator.userAgent);
     target.usesOwlAppShell = () => false;
     target.getFastModeRolloutMetrics = (params) =>
@@ -2861,6 +2900,7 @@
           }
           return;
         }
+        if (handleSmartSchedulingGatewayMessage(msg)) return;
         if (handleOpenCodexNotificationMessage(msg)) {
           if (WS_DEBUG_ENABLED) {
             maybeLogLargeOrSlowWsInbound({

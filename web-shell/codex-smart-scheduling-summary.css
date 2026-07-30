@@ -1,0 +1,18 @@
+.opencodex-smart-scheduling-summary-section [data-slot="thread-summary-panel-item"] {
+  cursor: default;
+  pointer-events: none;
+}
+
+.opencodex-smart-scheduling-summary-section [data-slot="thread-summary-panel-item-meta"] {
+  /* 保留官方摘要行的 flex 收缩规则，只放宽值列上限，避免计算成零宽度。 */
+  max-width: 75% !important;
+  overflow: hidden;
+}
+
+.opencodex-smart-scheduling-summary-model,
+.opencodex-smart-scheduling-summary-effort {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

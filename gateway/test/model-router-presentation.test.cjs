@@ -1,0 +1,75 @@
+const assert = require("node:assert/strict");
+const test = require("node:test");
+const { createSmartSchedulingPresentation } = require("../runtime/model-router/presentation.cjs");
+
+function fakeRouter() {
+  let listener = null;
+  return {
+    emit(event) {
+      listener?.(event);
+    },
+    onRouteStatus(nextListener) {
+      listener = nextListener;
+      return () => {
+        listener = null;
+      };
+    },
+    modelDisplayName(model) {
+      return model === "luna" ? "GPT-5.6-Luna" : model;
+    },
+  };
+}
+
+test("presentation correlates IPC and App Host turns and sends safe route state only to their client", () => {
+  const router = fakeRouter();
+  const sent = [];
+  const presentation = createSmartSchedulingPresentation({
+    modelRouter: router,
+    sendTo: (clientId, payload) => sent.push({ clientId, payload }),
+  });
+
+  presentation.observeAppHostFrame({
+    clientId: "client-1",
+    data: JSON.stringify({
+      payload: {
+        method: "turn/start",
+        params: { threadId: "thread-1", input: [{ type: "text", text: "private prompt" }] },
+      },
+    }),
+  });
+  presentation.observeIpcInvoke({
+    clientId: "client-2",
+    args: [
+      {
+        type: "mcp-request",
+        request: {
+          method: "turn/start",
+          params: { threadId: "thread-2", input: [{ type: "text", text: "another private prompt" }] },
+        },
+      },
+    ],
+  });
+  router.emit({ status: "classifying", threadId: "thread-1" });
+  router.emit({
+    status: "selected",
+    threadId: "thread-1",
+    route: { tier: "balanced", model: "luna", effort: "high", fallback: false, rationale: "private" },
+  });
+  router.emit({ status: "classifying", threadId: "thread-2" });
+  router.emit({ status: "selected", threadId: "unmapped", route: { model: "spark", effort: "low" } });
+
+  assert.equal(sent.length, 3);
+  assert.equal(sent[0].clientId, "client-1");
+  assert.equal(sent[0].payload.event.status, "classifying");
+  assert.deepEqual(sent[1].payload.event.route, {
+    tier: "balanced",
+    model: "luna",
+    displayName: "GPT-5.6-Luna",
+    effort: "high",
+    fallback: false,
+  });
+  assert.equal(sent[2].clientId, "client-2");
+  assert.equal(sent[2].payload.event.status, "classifying");
+  assert.equal(JSON.stringify(sent).includes("private"), false);
+  presentation.dispose();
+});

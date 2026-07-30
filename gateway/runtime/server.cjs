@@ -44,11 +44,13 @@ const {
 const { openFileTargetFromIpc } = require("./ipc/open-file-context.cjs");
 const { createPickedFilesService } = require("./ipc/picked-files.cjs");
 const { createStaticAssetService } = require("./http/static-assets.cjs");
+const { handleOpenCodexPluginApi } = require("./http/plugin-config.cjs");
 const { createWsHub } = require("./ipc/ws-hub.cjs");
 const { workspaceRootsFromIpcPayload } = require("./ipc/workspace-root-context.cjs");
 const { createWorkspaceRootsService } = require("./ipc/workspace-roots.cjs");
 const { diagnosticError, diagnosticLog, diagnosticWarn, sanitizeDiagnosticValue, shortId } = require("./core/diagnostics.cjs");
 const { markGatewaySilentQuit } = require("./lifecycle/quit-confirmation-suppressor.cjs");
+const { createGatewayPluginService } = require("./plugins/service.cjs");
 
 // server.cjs 只负责编排 HTTP/WS 生命周期；官方 Electron hook 细节放在 official-runtime.cjs。
 const LOCAL_DOWNLOAD_PATH_BODY_MAX_BYTES = 32 * 1024;
@@ -257,7 +259,7 @@ async function handleLocalDownloadPath(req, res, localFiles) {
   }
 }
 
-function installShutdownHandlers(server, localFiles, pickedFiles) {
+function installShutdownHandlers(server, localFiles, pickedFiles, pluginService) {
   let shuttingDown = false;
   function shutdown(signal) {
     if (shuttingDown) return;
@@ -265,6 +267,9 @@ function installShutdownHandlers(server, localFiles, pickedFiles) {
     // 退出时先释放短期 token 和待处理的官方内部请求，避免请求一直挂起。
     localFiles.dispose();
     if (pickedFiles && typeof pickedFiles.dispose === "function") pickedFiles.dispose();
+    if (pluginService && typeof pluginService.dispose === "function") {
+      pluginService.dispose(new Error("gateway shutting down"));
+    }
     rejectPendingInternalResponses(new Error("gateway shutting down"));
     const exit = () => {
       if (signal) {
@@ -306,7 +311,7 @@ async function listen(server) {
   });
 }
 
-function createRequestHandler({ localFiles, pickedFiles, staticAssets, workspaceRoots }) {
+function createRequestHandler({ localFiles, pickedFiles, pluginService, staticAssets, workspaceRoots }) {
   /**
    * 路由顺序很关键：
    * 1. 认证和 launcher 探活先处理。
@@ -383,6 +388,8 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets, workspace
       return handleTokenUsageRequest(req, res, url);
     }
 
+    if (await handleOpenCodexPluginApi(req, res, url, pluginService)) return;
+
     if (pathname === "/api/local-file/download-path" && req.method === "POST") {
       // 侧栏文件树右键下载入口：文件直接下发，目录先临时压缩再返回短期 token。
       return handleLocalDownloadPath(req, res, localFiles);
@@ -399,7 +406,7 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets, workspace
     }
 
     if (pathname === "/api/ipc/invoke" && req.method === "POST") {
-      return handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots);
+      return handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots, pluginService);
     }
 
     if (pathname === "/api/client-log" && req.method === "POST") {
@@ -433,7 +440,7 @@ function createRequestHandler({ localFiles, pickedFiles, staticAssets, workspace
   };
 }
 
-async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots) {
+async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots, pluginService) {
   /**
    * 浏览器把 Electron ipcRenderer.invoke/send 折叠成 HTTP POST。
    * gateway 在这里恢复 channel/args，并伪造 IpcMainEvent 交给官方 handler。
@@ -469,6 +476,8 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
     remoteAddress,
   };
   const suppressRoutineLog = shouldSuppressRoutineIpcLog(payload);
+  // 在请求进入官方 Main 前关联浏览器 client 与 thread，确保分类状态能定向回到发起页面。
+  pluginService?.smartSchedulingPresentation?.observeIpcInvoke({ channel, clientId, args });
   // 成功 IPC start/end 会跟随前端渲染频率放大；默认保留慢调用和失败日志，DEBUG 时再展开完整链路。
   if (DEBUG_LOGS && !suppressRoutineLog) diagnosticLog("gateway-ipc", "invoke_start", diagnosticBase);
   try {
@@ -558,14 +567,21 @@ async function createGateway() {
    * 4. 把 WebSocket hub 注入 runtime，用于官方异步回包转发。
    */
   ensureDir(REPORTS_DIR);
+  // 插件配置和路由服务必须先创建，才能在官方 bootstrap 拉起 App Server 的瞬间装饰其 stdio。
+  const pluginService = createGatewayPluginService({
+    getRuntimeIdentity() {
+      const bundle = getOfficialBundle();
+      return { version: bundle?.version, build: bundle?.build };
+    },
+  });
   // 先启动官方 runtime，确保后续 health/IPC 路由能看到官方 handler 注册状态。
-  await startOfficialRuntime();
+  await startOfficialRuntime({ decorateAppServerChild: pluginService.modelRouter.decorateAppServerChild });
 
   const workspaceRoots = createWorkspaceRootsService();
   const localFiles = createLocalFileService({ getWorkspaceRoots: workspaceRoots.workspaceRoots });
   const pickedFiles = createPickedFilesService();
   const staticAssets = createStaticAssetService({ getI18nSnapshot, getOfficialBundle });
-  const requestHandler = createRequestHandler({ localFiles, pickedFiles, staticAssets, workspaceRoots });
+  const requestHandler = createRequestHandler({ localFiles, pickedFiles, pluginService, staticAssets, workspaceRoots });
   const server = http.createServer((req, res) => {
     requestHandler(req, res).catch((error) => {
       diagnosticError("gateway", "request_failed", {
@@ -582,17 +598,21 @@ async function createGateway() {
     createAppHostRelay: createOfficialAppHostRelay,
     handleNotificationEvent: handleOfficialNotificationEvent,
     isAuthed,
+    observeAppHostFrame(frame) {
+      pluginService.smartSchedulingPresentation?.observeAppHostFrame(frame);
+    },
   });
+  pluginService.bindSmartSchedulingPresentation({ sendTo: webSocketHub.sendTo });
   // official-runtime 通过这个 hub 把官方 renderer 的异步消息转发给浏览器。
   setWsHub(webSocketHub);
-  installShutdownHandlers(server, localFiles, pickedFiles);
+  installShutdownHandlers(server, localFiles, pickedFiles, pluginService);
   await listen(server);
 
   diagnosticLog("gateway", "listening", { url: `http://${HOST}:${PORT}` });
   diagnosticLog("gateway", "health_endpoint", { url: `http://${HOST}:${PORT}/api/health` });
   diagnosticLog("gateway", "unknown_ipc_log", { path: path.relative(PROJECT_ROOT, UNKNOWN_IPC_PATH) });
 
-  return { localFiles, server, staticAssets, workspaceRoots, wsHub: webSocketHub };
+  return { localFiles, pluginService, server, staticAssets, workspaceRoots, wsHub: webSocketHub };
 }
 
 module.exports = { createGateway, createRequestHandler };

@@ -81,7 +81,7 @@ function wsCompressionOptions() {
 
 // ws-hub 不理解官方 IPC 协议，只负责维护连接和按 clientId 投递 JSON 消息。
 /** 创建 WebSocket hub，负责浏览器连接管理和 gateway 事件分发。 */
-function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAuthed }) {
+function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAuthed, observeAppHostFrame }) {
   if (!WebSocketServer) {
     throw new Error("The ws package is required for gateway websocket support.");
   }
@@ -541,6 +541,10 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       });
       return true;
     }
+    try {
+      // 观察器属于独立展示层；hub 仍只负责透明转发，不解析 App Server 协议或路由语义。
+      observeAppHostFrame?.({ clientId, data, direction: "client", portId });
+    } catch {}
     if (WS_DEBUG_ENABLED && typeof data === "string") recordAppHostTraffic(ws, "browser-to-official", portId, byteLength(data));
     relay.postMessage(data);
     // null 是关闭信号，发送给官方后即可从索引移除，后续 close 回调再到达也不会重复处理。

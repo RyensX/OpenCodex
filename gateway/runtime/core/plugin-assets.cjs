@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { WEB_SHELL_DIR, exists, isWithinRoot, readText } = require("./config.cjs");
 const { DEFAULT_LOCALE, EN_US, ZH_CN, normalizeLocale } = require("../../../shared/i18n/index.cjs");
+const { pluginManifestFile, readPluginManifest } = require("../plugins/manifest.cjs");
 
 const EXTERNAL_PLUGIN_DIRS_ENV = "OPENCODEX_PLUGIN_DIRS";
 const OPENCODEX_PLUGIN_URL_PREFIX = "/opencodex-plugins/";
@@ -149,21 +150,30 @@ function listPluginEntriesInRoot(root) {
     .map((entry) => {
       const pluginDirectory = pluginDir(root, entry.name);
       const entryFile = pluginEntryFile(root, entry.name);
-      if (!exists(entryFile) || !isWithinRoot(entryFile, root.rootDir)) return null;
+      const manifestFile = pluginManifestFile(pluginDirectory);
+      const hasEntryFile = exists(entryFile) && isWithinRoot(entryFile, root.rootDir);
+      const hasManifestFile = exists(manifestFile) && isWithinRoot(manifestFile, root.rootDir);
+      // 新插件可以只有声明式 manifest；旧插件仍然只需要 index.js，二者都不存在时才跳过目录。
+      if (!hasEntryFile && !hasManifestFile) return null;
       const pluginEntry = {
         name: entry.name,
         sourceId: root.sourceId,
         pluginDir: pluginDirectory,
         rootDir: root.rootDir,
-        entryFile,
+        entryFile: hasEntryFile ? entryFile : null,
+        manifestFile: hasManifestFile ? manifestFile : null,
         i18nFiles: [],
-        urlPath: `${root.sourceId}/${entry.name}/${PLUGIN_ENTRY_FILE}`,
+        urlPath: hasEntryFile ? `${root.sourceId}/${entry.name}/${PLUGIN_ENTRY_FILE}` : "",
       };
+      const manifest = hasManifestFile ? readPluginManifest(pluginEntry, manifestFile) : null;
+      // 纯 manifest 插件若声明无效，没有任何可加载内容，不能出现在目录中。
+      if (!hasEntryFile && !manifest) return null;
       const i18nFiles = pluginI18nFiles(pluginEntry).filter((file) => exists(file) && isWithinRoot(file, root.rootDir));
-      const versionFiles = [entryFile, ...i18nFiles];
+      const versionFiles = [hasEntryFile ? entryFile : null, hasManifestFile ? manifestFile : null, ...i18nFiles].filter(Boolean);
       return {
         ...pluginEntry,
         i18nFiles,
+        manifest,
         version: pluginVersionForFiles(versionFiles),
       };
     })
@@ -174,6 +184,12 @@ function listPluginEntriesInRoot(root) {
 function listPluginEntries() {
   // 内置插件始终先加载，外部插件按环境变量里的根目录顺序追加。
   return pluginRoots().flatMap(listPluginEntriesInRoot);
+}
+
+function listPluginManifests() {
+  return listPluginEntries()
+    .map((entry) => entry.manifest)
+    .filter(Boolean);
 }
 
 function pluginEntryFileFromRequestPath(reqPath) {
@@ -255,6 +271,7 @@ module.exports = {
   OPENCODEX_PLUGIN_URL_PREFIX,
   externalPluginRootDirsFromEnv,
   listPluginEntries,
+  listPluginManifests,
   pluginEntryFileFromRequestPath,
   pluginMessagesForLocale,
   withPluginI18nMessages,

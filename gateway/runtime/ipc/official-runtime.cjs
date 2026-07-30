@@ -49,6 +49,7 @@ const requestRoutes = new Map();
 const requestRouteSummaries = new Map();
 let officialBundle = null;
 let wsHub = null;
+let appServerChildDecorator = null;
 
 const officialIpc = {
   // 官方 main 调 ipcMain.handle/on 注册的 handler 会被这里记录，再由 HTTP IPC invoke 复用。
@@ -67,6 +68,8 @@ const appServerSpawnHook = {
   lastCommand: null,
   lastArgs: null,
   replacementBinaryPath: null,
+  decoratedCount: 0,
+  decoratorError: null,
   lastError: null,
 };
 
@@ -74,6 +77,11 @@ const COMPUTER_USE_AUTH_URLS = new Set([
   "computer-use-background-auth-read",
   "computer-use-background-auth-write",
 ]);
+const CHUNKED_MESSAGE_ACK_CHANNEL = "codex_desktop:chunked-message-ack";
+const CHUNKED_MESSAGE_MARKER = "codex-host-chunked-message-v1";
+const INITIAL_SIDEBAR_BOOTSTRAP_CHANNEL = "codex_desktop:get-initial-sidebar-bootstrap";
+let lastInitialSidebarBootstrap = null;
+let hasWarnedInitialSidebarBootstrapFailure = false;
 const COMPUTER_USE_INSTALLER_RELATIVE_PATH = [
   "computer-use",
   "Codex Computer Use.app",
@@ -316,11 +324,10 @@ function looksLikeOfficialCodexBinary(command, bundle, spawnOptions) {
 
 function isHiddenOfficialAppServerArgs(args) {
   /**
-   * 只识别官方 codex app-server 入口，不理解后续子命令或业务参数。
-   * 参数保持原样透传给官方 Desktop 的 codex 二进制，保证官方新增/修改 app-server 参数时自动兼容。
+   * 官方新版会在子命令前追加 `-c key=value` 等全局配置，因此不能假设 app-server 固定在第一个参数。
+   * 命令本身已经通过官方 codex 二进制校验，这里只定位独立参数，避免配置值中的普通文本误命中。
    */
-  if (!Array.isArray(args) || args[0] !== "app-server") return false;
-  return true;
+  return Array.isArray(args) && args.some((argument) => argument === "app-server");
 }
 
 function looksLikeComputerUseInstaller(command) {
@@ -371,12 +378,27 @@ function recordHiddenAppServerRedirect(launcher, command, normalizedArgs, replac
   });
 }
 
+function decorateHiddenAppServerChild(child) {
+  if (typeof appServerChildDecorator !== "function") return child;
+  try {
+    const decorated = appServerChildDecorator(child) || child;
+    appServerSpawnHook.decoratedCount += 1;
+    appServerSpawnHook.decoratorError = null;
+    return decorated;
+  } catch (error) {
+    // 装饰失败时保留官方原始连接，避免可选 Auto 能力影响 Codex 的基础可用性。
+    appServerSpawnHook.decoratorError = error instanceof Error ? error.message : String(error);
+    diagnosticWarn("official-runtime", "app_server_decorator_failed", { error: appServerSpawnHook.decoratorError });
+    return child;
+  }
+}
+
 function redirectHiddenAppServerSpawn(originalSpawn, bundle, self, command, args, options, rawArguments) {
   const spawnOptions = spawnOptionsFromArgs(args, options);
   const normalizedArgs = spawnArgList(args);
   if (looksLikeOfficialCodexBinary(command, bundle, spawnOptions) && isHiddenOfficialAppServerArgs(normalizedArgs)) {
     recordHiddenAppServerRedirect("spawn", command, normalizedArgs, bundle.codexBinaryPath);
-    return originalSpawn.call(self, bundle.codexBinaryPath, normalizedArgs, spawnOptions);
+    return decorateHiddenAppServerChild(originalSpawn.call(self, bundle.codexBinaryPath, normalizedArgs, spawnOptions));
   }
   const fileManagerPath = fileManagerPathFromSpawn(command, normalizedArgs);
   if (fileManagerPath && maybeInterceptRemoteFileManagerOpen(fileManagerPath)) {
@@ -391,7 +413,9 @@ function redirectHiddenAppServerExecFile(originalExecFile, bundle, self, command
   if (looksLikeOfficialCodexBinary(command, bundle, execOptions) && isHiddenOfficialAppServerArgs(normalizedArgs)) {
     const execCallback = execFileCallbackFromArgs(args, options, callback);
     recordHiddenAppServerRedirect("execFile", command, normalizedArgs, bundle.codexBinaryPath);
-    return originalExecFile.call(self, bundle.codexBinaryPath, normalizedArgs, execOptions, execCallback);
+    return decorateHiddenAppServerChild(
+      originalExecFile.call(self, bundle.codexBinaryPath, normalizedArgs, execOptions, execCallback)
+    );
   }
   if (looksLikeComputerUseInstaller(command)) {
     const execCallback = execFileCallbackFromArgs(args, options, callback);
@@ -478,6 +502,8 @@ function appServerSpawnHookStatus() {
     lastCommand: appServerSpawnHook.lastCommand,
     lastArgs: appServerSpawnHook.lastArgs,
     replacementBinaryPath: appServerSpawnHook.replacementBinaryPath,
+    decoratedCount: appServerSpawnHook.decoratedCount,
+    decoratorError: appServerSpawnHook.decoratorError,
     lastError: appServerSpawnHook.lastError,
   };
 }
@@ -915,6 +941,195 @@ function payloadFromArgs(args) {
   return args.length <= 1 ? (args[0] ?? null) : args;
 }
 
+function isOfficialChunkToken(token) {
+  if (!token || typeof token !== "object" || typeof token.type !== "string") return false;
+  if (["array-start", "object-start", "container-end", "string-end"].includes(token.type)) return true;
+  if (token.type === "string-start") return token.target === "key" || token.target === "value";
+  if (token.type === "key" || token.type === "string-chunk") return typeof token.value === "string";
+  if (token.type === "value") {
+    // 官方序列化器用省略 value 字段表达 undefined，不能把这类合法 token 当成协议损坏。
+    if (!("value" in token)) return true;
+    return (
+      token.value == null ||
+      typeof token.value === "boolean" ||
+      typeof token.value === "number" ||
+      typeof token.value === "string"
+    );
+  }
+  return false;
+}
+
+function isOfficialChunkedMessage(value) {
+  if (!value || typeof value !== "object") return false;
+  if (value.marker !== CHUNKED_MESSAGE_MARKER) return false;
+  if (typeof value.transferId !== "string") return false;
+  if (!Number.isSafeInteger(value.sequence) || typeof value.kind !== "string") return false;
+  if (value.kind === "start" || value.kind === "end") return true;
+  return value.kind === "chunk" && Array.isArray(value.tokens) && value.tokens.every(isOfficialChunkToken);
+}
+
+class OfficialChunkAssembler {
+  constructor() {
+    this.stack = [];
+    this.root = OfficialChunkAssembler.UNSET;
+    this.stringChunks = null;
+    this.stringTarget = null;
+  }
+
+  consume(tokens) {
+    for (const token of tokens) {
+      switch (token.type) {
+        case "array-start": {
+          const value = [];
+          this.saveValue(value);
+          this.stack.push({ type: "array", value });
+          break;
+        }
+        case "object-start": {
+          const value = {};
+          this.saveValue(value);
+          this.stack.push({ key: null, type: "object", value });
+          break;
+        }
+        case "container-end":
+          if (!this.stack.pop()) throw new Error("Chunked message contained an unmatched container end");
+          break;
+        case "key":
+          this.setKey(token.value);
+          break;
+        case "value":
+          this.saveValue(token.value);
+          break;
+        case "string-start":
+          if (this.stringChunks) throw new Error("Chunked message contained nested string chunks");
+          this.stringChunks = [];
+          this.stringTarget = token.target;
+          break;
+        case "string-chunk":
+          if (!this.stringChunks) throw new Error("Chunked message string chunk had no start token");
+          this.stringChunks.push(token.value);
+          break;
+        case "string-end": {
+          if (!this.stringChunks || !this.stringTarget) {
+            throw new Error("Chunked message string end had no start token");
+          }
+          const value = this.stringChunks.join("");
+          const target = this.stringTarget;
+          this.stringChunks = null;
+          this.stringTarget = null;
+          if (target === "key") this.setKey(value);
+          else this.saveValue(value);
+          break;
+        }
+      }
+    }
+  }
+
+  finish() {
+    if (
+      this.root === OfficialChunkAssembler.UNSET ||
+      this.stack.length > 0 ||
+      this.stringChunks != null
+    ) {
+      throw new Error("Chunked message ended before its value was complete");
+    }
+    return this.root;
+  }
+
+  setKey(key) {
+    const current = this.stack.at(-1);
+    if (!current || current.type !== "object" || current.key != null) {
+      throw new Error("Chunked message key was outside an object");
+    }
+    current.key = key;
+  }
+
+  saveValue(value) {
+    const current = this.stack.at(-1);
+    if (!current) {
+      if (this.root !== OfficialChunkAssembler.UNSET) {
+        throw new Error("Chunked message contained multiple root values");
+      }
+      this.root = value;
+      return;
+    }
+    if (current.type === "array") {
+      current.value.push(value);
+      return;
+    }
+    if (current.key == null) throw new Error("Chunked message object value had no key");
+    // defineProperty 避免 "__proto__" 这类合法数据键改变组装对象的原型。
+    Object.defineProperty(current.value, current.key, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    });
+    current.key = null;
+  }
+}
+
+OfficialChunkAssembler.UNSET = Symbol("official-chunk-unset");
+
+class OfficialChunkedMessageReceiver {
+  constructor() {
+    this.transfers = new Map();
+  }
+
+  receive(message) {
+    if (!isOfficialChunkedMessage(message)) return { type: "passthrough", message };
+    if (message.kind === "start") {
+      // 官方 preload 同一时刻只保留一条传输；新 start 到来时丢弃未完成的旧传输。
+      this.transfers.clear();
+      this.transfers.set(message.transferId, {
+        assembler: new OfficialChunkAssembler(),
+        nextSequence: message.sequence + 1,
+      });
+      return { type: "pending", acknowledgement: chunkAcknowledgement(message) };
+    }
+
+    const transfer = this.transfers.get(message.transferId);
+    if (!transfer || message.sequence !== transfer.nextSequence) {
+      this.transfers.delete(message.transferId);
+      return { type: "pending", acknowledgement: null };
+    }
+    transfer.nextSequence += 1;
+    if (message.kind === "chunk") {
+      transfer.assembler.consume(message.tokens);
+      return { type: "pending", acknowledgement: chunkAcknowledgement(message) };
+    }
+
+    this.transfers.delete(message.transferId);
+    return {
+      type: "complete",
+      acknowledgement: chunkAcknowledgement(message),
+      message: transfer.assembler.finish(),
+    };
+  }
+}
+
+function chunkAcknowledgement(message) {
+  return {
+    transferId: message.transferId,
+    sequence: message.sequence,
+  };
+}
+
+const officialChunkedMessageReceivers = new WeakMap();
+const fallbackOfficialChunkedMessageReceiver = new OfficialChunkedMessageReceiver();
+
+function officialChunkedMessageReceiverFor(sourceWebContents) {
+  if (!sourceWebContents || (typeof sourceWebContents !== "object" && typeof sourceWebContents !== "function")) {
+    return fallbackOfficialChunkedMessageReceiver;
+  }
+  let receiver = officialChunkedMessageReceivers.get(sourceWebContents);
+  if (!receiver) {
+    receiver = new OfficialChunkedMessageReceiver();
+    officialChunkedMessageReceivers.set(sourceWebContents, receiver);
+  }
+  return receiver;
+}
+
 function normalizeIpcArgs(args) {
   return Array.isArray(args) ? args : [args];
 }
@@ -1204,37 +1419,73 @@ function logUnknownIpc(kind, details) {
   } catch {}
 }
 
-function routeOfficialWebContentsSend(channel, args) {
+function acknowledgeOfficialChunkSoon(acknowledgement, sourceWebContents) {
+  if (!acknowledgement) return;
+  /**
+   * 官方 sender 会在 webContents.send 返回后才把当前分块标记为 delivered。
+  * ACK 必须排到下一轮事件循环，否则同步回调会因为 delivered 尚未置位而被忽略。
+  */
+  setImmediate(() => {
+    void invokeOfficialIpc(
+      CHUNKED_MESSAGE_ACK_CHANNEL,
+      [acknowledgement.transferId, acknowledgement.sequence],
+      {
+        // ChunkedMessageSender 以 webContents 为队列键，ACK 必须带回产生该分块的同一个 sender。
+        sender: sourceWebContents,
+      }
+    ).catch((error) => {
+      diagnosticWarn("official-ipc-route", "chunk_ack_failed", {
+        error: error instanceof Error ? error.message : String(error),
+        sequence: acknowledgement.sequence,
+        transferId: shortId(acknowledgement.transferId),
+      });
+    });
+  });
+}
+
+function routeOfficialWebContentsSend(channel, args, sourceWebContents = officialIpc.hiddenWebContents) {
   /**
    * 官方代码以为自己在给 Electron renderer 发消息。
    * gateway 需要把这些 webContents.send 拦下来，并转换成浏览器 WebSocket 消息。
    */
-  const payload = payloadFromArgs(args);
+  let routedArgs = args;
+  let payload = payloadFromArgs(routedArgs);
+  if (channel === MESSAGE_FOR_VIEW_CHANNEL) {
+    // 每个隐藏窗口都对应独立的官方 preload 接收器，不能让辅助窗口的新传输清空主窗口状态。
+    const chunked = officialChunkedMessageReceiverFor(sourceWebContents).receive(payload);
+    if (chunked.type !== "passthrough") {
+      acknowledgeOfficialChunkSoon(chunked.acknowledgement, sourceWebContents);
+      // 分块未完整前不能让 renderer 看到协议外壳；完成后再按原始消息参与 requestId 路由。
+      if (chunked.type === "pending") return true;
+      payload = chunked.message;
+      routedArgs = [payload];
+    }
+  }
   if (!wsHub) {
-    diagnosticWarn("official-ipc-route", "before_ws_ready", outgoingIpcDiagnosticSummary(channel, args));
+    diagnosticWarn("official-ipc-route", "before_ws_ready", outgoingIpcDiagnosticSummary(channel, routedArgs));
     logUnknownIpc("webcontents-send-before-ws-ready", {
       channel,
-      requestId: responseRouteIdFromOutgoing(channel, args),
-      args: summarizeIpcValue(args),
+      requestId: responseRouteIdFromOutgoing(channel, routedArgs),
+      args: summarizeIpcValue(routedArgs),
     });
     return false;
   }
 
   // 先按 requestId 找历史路由；没有 requestId 时再退回当前 AsyncLocalStorage 的 clientId。
-  const requestId = responseRouteIdFromOutgoing(channel, args);
+  const requestId = responseRouteIdFromOutgoing(channel, routedArgs);
   const mappedClientId = requestId ? requestRoutes.get(requestId) : "";
   const requestSummary = requestId ? requestRouteSummaries.get(requestId) : null;
   const store = (requestContext && requestContext.getStore && requestContext.getStore()) || {};
   const targetClientId = mappedClientId || (isTargetedOutgoing(channel, payload) ? store.clientId : "");
   const routeBase = {
-    ...outgoingIpcDiagnosticSummary(channel, args, requestSummary),
+    ...outgoingIpcDiagnosticSummary(channel, routedArgs, requestSummary),
     mapped: !!mappedClientId,
     targetClientId: shortId(targetClientId),
   };
   // 只对锁屏授权相关回包做结构化摘要，避免把大图标 dataURL 打进日志。
   logComputerUseAuthResponse(routeBase, payload);
   const suppressRouteDiagnostic = shouldSuppressRoutineRouteDiagnostic(routeBase);
-  if (requestId && mappedClientId && !shouldKeepRequestRoute(channel, args)) {
+  if (requestId && mappedClientId && !shouldKeepRequestRoute(channel, routedArgs)) {
     // 流式中间事件在 complete/error 前可能有多次分片，不能提前删除路由。
     requestRoutes.delete(requestId);
     requestRouteSummaries.delete(requestId);
@@ -1243,7 +1494,7 @@ function routeOfficialWebContentsSend(channel, args) {
     suppressDiagnostic: suppressRouteDiagnostic,
     diagnosticSummary: routeBase,
   };
-  if (targetClientId && wsHub.sendTo(targetClientId, { channel, payload, args }, wsDiagnosticOptions)) {
+  if (targetClientId && wsHub.sendTo(targetClientId, { channel, payload, args: routedArgs }, wsDiagnosticOptions)) {
     if (DEBUG_LOGS && !suppressRouteDiagnostic) {
       // 官方 IPC 定向成功投递会随每个请求回包出现，默认不落盘；DEBUG 时用于确认 requestId/clientId 路由。
       diagnosticLog("official-ipc-route", "send_to_client", { ...routeBase, route: "target" });
@@ -1251,7 +1502,7 @@ function routeOfficialWebContentsSend(channel, args) {
     return true;
   }
   // 没有 requestId 或 clientId 的通知类消息广播给所有在线浏览器。
-  const broadcastCount = wsHub.broadcast({ channel, payload, args }, wsDiagnosticOptions);
+  const broadcastCount = wsHub.broadcast({ channel, payload, args: routedArgs }, wsDiagnosticOptions);
   if (DEBUG_LOGS && !suppressRouteDiagnostic) {
     // 成功广播只是常规路由摘要，数量会随会话状态同步放大；默认压下，DEBUG 时用于追路由。
     diagnosticLog("official-ipc-route", "broadcast", {
@@ -1284,7 +1535,7 @@ function patchOfficialWebContents(webContents) {
   webContents.__opencodexOfficialGatewayPatched = true;
   const originalSend = webContents.send.bind(webContents);
   webContents.send = (channel, ...args) => {
-    routeOfficialWebContentsSend(String(channel), args);
+    routeOfficialWebContentsSend(String(channel), args, webContents);
     // 官方隐藏 renderer 不需要消费这些消息，避免 Web 发起的 requestId 再回到隐藏页。
     if (shouldSuppressHiddenRendererSend(String(channel), args)) return true;
     return originalSend(channel, ...args);
@@ -1292,7 +1543,7 @@ function patchOfficialWebContents(webContents) {
   if (typeof webContents.postMessage === "function") {
     const originalPostMessage = webContents.postMessage.bind(webContents);
     webContents.postMessage = (channel, message, transfer) => {
-      routeOfficialWebContentsSend(String(channel), [message]);
+      routeOfficialWebContentsSend(String(channel), [message], webContents);
       if (shouldSuppressHiddenRendererSend(String(channel), [message])) return true;
       return originalPostMessage(channel, message, transfer);
     };
@@ -1300,7 +1551,7 @@ function patchOfficialWebContents(webContents) {
   if (typeof webContents.sendToFrame === "function") {
     const originalSendToFrame = webContents.sendToFrame.bind(webContents);
     webContents.sendToFrame = (frameId, channel, ...args) => {
-      routeOfficialWebContentsSend(String(channel), args);
+      routeOfficialWebContentsSend(String(channel), args, webContents);
       if (shouldSuppressHiddenRendererSend(String(channel), args)) return true;
       return originalSendToFrame(frameId, channel, ...args);
     };
@@ -1308,7 +1559,7 @@ function patchOfficialWebContents(webContents) {
   if (webContents.mainFrame && typeof webContents.mainFrame.postMessage === "function") {
     const originalFramePostMessage = webContents.mainFrame.postMessage.bind(webContents.mainFrame);
     webContents.mainFrame.postMessage = (channel, message, transfer) => {
-      routeOfficialWebContentsSend(String(channel), [message]);
+      routeOfficialWebContentsSend(String(channel), [message], webContents);
       if (shouldSuppressHiddenRendererSend(String(channel), [message])) return true;
       return originalFramePostMessage(channel, message, transfer);
     };
@@ -1397,7 +1648,7 @@ function patchOfficialAppSingleton() {
 }
 
 function createOfficialIpcEvent(context = {}) {
-  const sender = officialIpc.hiddenWebContents;
+  const sender = context.sender || officialIpc.hiddenWebContents;
   if (!sender || sender.isDestroyed()) {
     throw new Error("Official BrowserWindow is not ready yet");
   }
@@ -1410,7 +1661,7 @@ function createOfficialIpcEvent(context = {}) {
     returnValue: undefined,
     reply(channel, ...args) {
       // ipcMain.on 风格的 handler 会调用 event.reply，这里也统一接到 WebSocket 转发链路。
-      routeOfficialWebContentsSend(String(channel), args);
+      routeOfficialWebContentsSend(String(channel), args, sender);
     },
     // MessagePort 类 IPC 需要保留官方 event.ports 语义，app-host RPC 首屏握手依赖它。
     ports: Array.isArray(context.ports) ? context.ports : [],
@@ -1662,6 +1913,7 @@ function buildGatewayStatus() {
 async function webConfigScript() {
   // 这个脚本由浏览器入口动态加载，避免把本机路径和端口写死到 web-shell 构建产物里。
   const i18n = withPluginI18nMessages(getI18nSnapshot());
+  const initialSidebarBootstrap = await initialSidebarBootstrapForRenderer();
   return `(() => {
   window.__CODEX_WEB_CONFIG__ = {
     gatewayBaseUrl: location.origin,
@@ -1678,12 +1930,44 @@ async function webConfigScript() {
     appServer: ${JSON.stringify({ kind: "official-electron-ipc", spawnHook: appServerSpawnHookStatus() })},
     sharedObjectSnapshot: ${JSON.stringify({ host_config: { id: "local", kind: "local" } })},
     // persistedAtomSnapshot 用于首屏同步：renderer 会很早请求它，此时 WebSocket 可能还没连上。
-    persistedAtomSnapshot: ${JSON.stringify(persistedAtomSnapshotForRenderer())}
+    persistedAtomSnapshot: ${JSON.stringify(persistedAtomSnapshotForRenderer())},
+    // 刷新页面时官方的一次性启动广播已经结束，必须把 main 的同步侧栏快照直接交给 preload bridge。
+    initialSidebarBootstrap: ${JSON.stringify(initialSidebarBootstrap)}
   };
 })();`;
 }
 
-function startOfficialRuntime() {
+/** 只接受最新版 renderer 能安全同步消费的 sidebar bootstrap 结构。 */
+function normalizeInitialSidebarBootstrap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  // renderer 会直接遍历 globalStateEntries；形态不完整时宁可回退 null，也不能再次触发首屏崩溃。
+  if (!Array.isArray(value.globalStateEntries)) return null;
+  return value;
+}
+
+/** 通过官方同步 IPC listener 读取首屏快照，并在短暂不可用时沿用最近一次有效结果。 */
+async function initialSidebarBootstrapForRenderer() {
+  try {
+    const bootstrap = normalizeInitialSidebarBootstrap(
+      await invokeOfficialIpc(INITIAL_SIDEBAR_BOOTSTRAP_CHANNEL)
+    );
+    if (bootstrap) {
+      lastInitialSidebarBootstrap = bootstrap;
+      hasWarnedInitialSidebarBootstrapFailure = false;
+    }
+    return bootstrap || lastInitialSidebarBootstrap;
+  } catch (error) {
+    if (!hasWarnedInitialSidebarBootstrapFailure) {
+      hasWarnedInitialSidebarBootstrapFailure = true;
+      diagnosticWarn("official-runtime", "initial_sidebar_bootstrap_unavailable", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return lastInitialSidebarBootstrap;
+  }
+}
+
+function startOfficialRuntime(options = {}) {
   /**
    * 官方 runtime 启动点：
    * - ensureOfficialBundle 负责从已安装 Codex/ChatGPT Desktop 抽取白名单资源。
@@ -1691,6 +1975,8 @@ function startOfficialRuntime() {
    * - hook 必须先安装，才能捕获 bootstrap 注册的 IPC handler、官方 app-server 子进程，并隐藏官方 UI。
    */
   const { ensureOfficialBundle } = requireOfficialBundleProvider();
+  appServerChildDecorator =
+    typeof options.decorateAppServerChild === "function" ? options.decorateAppServerChild : null;
   officialBundle = ensureOfficialBundle({ projectRoot: PROJECT_ROOT });
   alignOfficialElectronEnvironment(officialBundle);
   installAppServerSpawnHook(officialBundle);
@@ -1735,6 +2021,9 @@ module.exports = {
   webConfigScript,
   __test: {
     fileManagerPathFromSpawn,
+    normalizeInitialSidebarBootstrap,
+    OfficialChunkedMessageReceiver,
+    isHiddenOfficialAppServerArgs,
     shouldInterceptRemoteFileManagerStore,
   },
 };

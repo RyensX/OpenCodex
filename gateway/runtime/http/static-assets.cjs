@@ -21,6 +21,13 @@ const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
 const OPENCODEX_PLUGIN_SYSTEM_PATH = "/opencodex-plugin-system.js";
+const OPENCODEX_GATEWAY_PLUGIN_SWITCHES_PATH = "/opencodex-gateway-plugin-switches.js";
+const CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH = "/codex-smart-model-router-settings.css";
+const CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH = "/codex-smart-scheduling-injection-health.js";
+const CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH = "/codex-smart-model-router-settings.js";
+const CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH = "/codex-smart-model-router-composer.js";
+const CODEX_SMART_SCHEDULING_SUMMARY_CSS_PATH = "/codex-smart-scheduling-summary.css";
+const CODEX_SMART_SCHEDULING_SUMMARY_PATH = "/codex-smart-scheduling-summary.js";
 const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overlay.css";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
@@ -47,6 +54,25 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [FAVICON_PATH, path.join(WEB_SHELL_ASSETS_DIR, "icon.png")],
   [PWA_MANIFEST_PATH, path.join(WEB_SHELL_DIR, "manifest.webmanifest")],
   [OPENCODEX_PLUGIN_SYSTEM_PATH, path.join(WEB_SHELL_DIR, "opencodex-plugin-system.js")],
+  [
+    OPENCODEX_GATEWAY_PLUGIN_SWITCHES_PATH,
+    path.join(WEB_SHELL_DIR, "opencodex-gateway-plugin-switches.js"),
+  ],
+  [
+    CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH,
+    path.join(WEB_SHELL_DIR, "codex-smart-model-router-settings.css"),
+  ],
+  [
+    CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH,
+    path.join(WEB_SHELL_DIR, "codex-smart-scheduling-injection-health.js"),
+  ],
+  [CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH, path.join(WEB_SHELL_DIR, "codex-smart-model-router-settings.js")],
+  [CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH, path.join(WEB_SHELL_DIR, "codex-smart-model-router-composer.js")],
+  [
+    CODEX_SMART_SCHEDULING_SUMMARY_CSS_PATH,
+    path.join(WEB_SHELL_DIR, "codex-smart-scheduling-summary.css"),
+  ],
+  [CODEX_SMART_SCHEDULING_SUMMARY_PATH, path.join(WEB_SHELL_DIR, "codex-smart-scheduling-summary.js")],
   [OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH, path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
@@ -119,10 +145,16 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<meta name="apple-mobile-web-app-capable" content="yes">',
       '<meta name="apple-mobile-web-app-status-bar-style" content="default">',
       `<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH}">`,
+      `<link id="codex-smart-model-router-settings-styles" rel="stylesheet" href="${CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH}">`,
+      `<link id="codex-smart-scheduling-summary-styles" rel="stylesheet" href="${CODEX_SMART_SCHEDULING_SUMMARY_CSS_PATH}">`,
       `<link id="codex-web-workspace-root-picker-styles" rel="stylesheet" href="${CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH}">`,
       '<script src="/codex-web-config.js"></script>',
       `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
       `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
+      `<script src="${CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH}"></script>`,
+      `<script src="${CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH}"></script>`,
+      `<script src="${CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH}"></script>`,
+      `<script src="${CODEX_SMART_SCHEDULING_SUMMARY_PATH}"></script>`,
       `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
       `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
       `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
@@ -255,12 +287,20 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   }
 
   function createPluginLoaderScript() {
-    const pluginUrls = listPluginEntries().map(
-      (entry) => `${OPENCODEX_PLUGIN_URL_PREFIX}${entry.urlPath}?v=${entry.version}`
-    );
+    const entries = listPluginEntries();
+    const manifests = entries.map((entry) => entry.manifest).filter(Boolean);
+    const pluginUrls = entries
+      .filter((entry) => entry.entryFile && entry.urlPath)
+      .map((entry) => `${OPENCODEX_PLUGIN_URL_PREFIX}${entry.urlPath}?v=${entry.version}`);
     return `(() => {
+  const manifests = ${JSON.stringify(manifests)};
   const pluginUrls = ${JSON.stringify(pluginUrls)};
-  // loader 由 gateway 生成；刷新页面即可重新扫描 web-shell/plugins 下的插件目录。
+  // 声明式插件先注册元信息；它没有可执行入口，核心能力只由 gateway 的受信 feature 注册表绑定。
+  const pluginSystem = window.OpenCodexPluginSystem || window.__OpenCodexPluginSystem;
+  if (pluginSystem && typeof pluginSystem.registerPlugin === "function") {
+    for (const manifest of manifests) pluginSystem.registerPlugin(manifest);
+  }
+  // loader 由 gateway 生成；刷新页面即可重新扫描 web-shell/plugins 下的旧式脚本插件。
   function loadPlugin(url) {
     if (document.readyState === "loading") {
       document.write('<script src="' + url + '"><\\/script>');

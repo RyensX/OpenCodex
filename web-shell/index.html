@@ -21,6 +21,7 @@
     <script src="/codex-window-controls-overlay.js"></script>
     <script src="/opencodex-plugin-system.js"></script>
     <script src="/opencodex-plugin-loader.js"></script>
+    <script src="/opencodex-gateway-plugin-switches.js"></script>
     <style>
       :root {
         color-scheme: light;
@@ -489,6 +490,11 @@
         const notificationStatus = document.getElementById("setting-notification-status");
         const pluginSwitchInputs = new Map();
         let settingsCloseTimer = 0;
+        const gatewayPluginSwitches = window.OpenCodexGatewayPluginSwitches?.create({
+          pluginSystem,
+          plugins: pluginDefinitions,
+          request: gatewayPluginConfigRequest,
+        });
 
         function t(key, values) {
           const template = messages[key] || key;
@@ -514,7 +520,10 @@
 
         function pluginDefinitions() {
           if (pluginSystem && pluginSystem.plugins && typeof pluginSystem.plugins.list === "function") {
-            return pluginSystem.plugins.list();
+            // 登录页只接管智能调度的总开关；网关插件的详细配置仍留在认证后的 Codex 设置中。
+            return pluginSystem.plugins
+              .list()
+              .filter((plugin) => plugin.persistence !== "gateway" || plugin.feature === "smart-model-router");
           }
           return [];
         }
@@ -646,11 +655,32 @@
           }, 300);
         }
 
-        // 插件启用状态写入统一交给插件 host，具体 storageKey 由插件声明决定。
+        // 插件启用状态先写浏览器快照；网关插件由独立同步器在认证成功后提交。
         function updatePluginEnabled(pluginId, value) {
           if (pluginSystem && pluginSystem.plugins && typeof pluginSystem.plugins.setEnabled === "function") {
             pluginSystem.plugins.setEnabled(pluginId, value);
           }
+        }
+
+        async function gatewayPluginConfigRequest(path, options = {}) {
+          const response = await fetch(path, {
+            cache: "no-store",
+            credentials: "same-origin",
+            ...options,
+            headers: authHeaders({
+              accept: "application/json",
+              ...(options.body ? { "content-type": "application/json" } : {}),
+              ...(options.headers || {}),
+            }),
+          });
+          const value = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            const error = new Error(value.error || `HTTP ${response.status}`);
+            error.status = response.status;
+            error.value = value;
+            throw error;
+          }
+          return value;
         }
 
         function storedToken() {
@@ -894,6 +924,7 @@
           try {
             await login(passwordInput.value);
             passwordInput.value = "";
+            await gatewayPluginSwitches?.sync();
             await bootRenderer();
           } catch (error) {
             showLogin(localizedError(error));
@@ -912,6 +943,10 @@
           const input = event.target;
           if (!input || !input.dataset || !input.dataset.pluginId) return;
           updatePluginEnabled(input.dataset.pluginId, input.checked);
+          const plugin = pluginDefinitions().find((item) => item.id === input.dataset.pluginId);
+          if (plugin && plugin.persistence === "gateway") {
+            gatewayPluginSwitches?.markPending(plugin.id, input.checked);
+          }
         });
         notificationPermissionButton.addEventListener("change", async () => {
           if (!("Notification" in window) || typeof window.Notification.requestPermission !== "function") {
@@ -949,6 +984,7 @@
             }
             clearForceLogin();
             if (state.authenticated || state.authRequired === false) {
+              await gatewayPluginSwitches?.sync();
               await bootRenderer();
               return;
             }

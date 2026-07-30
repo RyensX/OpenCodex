@@ -8,6 +8,7 @@
   const settingDescriptors = new Map();
   const listeners = new Map();
   const activeScopes = new Map();
+  const SETTING_TYPES = new Set(["boolean", "string", "select", "model", "reasoning-effort"]);
 
   function hasOwn(object, key) {
     return Object.prototype.hasOwnProperty.call(object || {}, key);
@@ -36,14 +37,44 @@
   function normalizeSetting(plugin, setting, index) {
     if (!setting || !setting.id) return null;
     const order = Number(setting.order);
+    const type = SETTING_TYPES.has(setting.type) ? setting.type : "boolean";
+    const options = Array.isArray(setting.options)
+      ? setting.options
+          .map((option) =>
+            typeof option === "string"
+              ? { label: option, value: option }
+              : option && typeof option.value === "string"
+                ? {
+                    label: String(option.label || option.value),
+                    labelKey: String(option.labelKey || ""),
+                    value: option.value,
+                  }
+                : null
+          )
+          .filter(Boolean)
+      : [];
+    // 非布尔设置必须保留 manifest 中的原始标量默认值，不能再统一转换成 true/false。
+    const defaultValue =
+      type === "boolean"
+        ? setting.defaultValue !== false
+        : type === "select"
+          ? options.some((option) => option.value === setting.defaultValue)
+            ? setting.defaultValue
+            : options[0]?.value || ""
+          : typeof setting.defaultValue === "string"
+            ? setting.defaultValue
+            : "";
     return {
       pluginId: plugin.id,
       id: String(setting.id),
       storageKey: String(setting.storageKey || setting.id),
       labelKey: String(setting.labelKey || ""),
       label: String(setting.label || setting.id),
-      type: setting.type === "boolean" ? "boolean" : String(setting.type || "boolean"),
-      defaultValue: setting.defaultValue !== false,
+      description: String(setting.description || ""),
+      descriptionKey: String(setting.descriptionKey || ""),
+      type,
+      options,
+      defaultValue,
       surface: setting.surface || "web",
       order: Number.isFinite(order) ? order : 1000 + index,
     };
@@ -84,10 +115,13 @@
       desc: pluginDescription(plugin),
       descKey: String(plugin.descKey || ""),
       enableStorageKey: String(plugin.enableStorageKey || `plugin.${plugin.id}.enabled`),
+      feature: String(plugin.feature || ""),
       label: pluginLabel(plugin),
       labelKey: String(plugin.labelKey || ""),
       order: Number.isFinite(order) ? order : 1000 + plugins.size,
+      persistence: plugin.persistence === "gateway" ? "gateway" : "browser",
       settings: Array.isArray(plugin.settings) ? plugin.settings : [],
+      surface: String(plugin.surface || "web"),
     };
     plugins.set(normalized.id, normalized);
     normalized.settings.forEach((setting, index) => registerSetting(normalized, setting, index));
@@ -113,11 +147,15 @@
         descKey: plugin.descKey,
         enableStorageKey: plugin.enableStorageKey,
         enabled: isPluginEnabled(plugin.id),
+        feature: plugin.feature,
         id: plugin.id,
         label: plugin.label,
         labelKey: plugin.labelKey,
         name: plugin.name || plugin.id,
         order: plugin.order,
+        persistence: plugin.persistence,
+        settings: plugin.settings,
+        surface: plugin.surface,
       }))
       .sort((left, right) => left.order - right.order || left.label.localeCompare(right.label) || left.id.localeCompare(right.id));
   }
