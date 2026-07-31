@@ -29,7 +29,7 @@
     "zh-CN": {
       title: "智能调度",
       navLabel: "智能调度",
-      description: "配置分类器、失败回退和调度档位；内置档位仅可启停，自定义档位可添加、删除和调整。",
+      description: "配置分类器、失败回退和调度档位；内置档位可启停并调整模型和推理强度，自定义档位可添加、删除和调整。",
       disabled: "智能调度当前已关闭。可在 OpenCodex 登录页的“设置 → 插件”中开启。",
       loading: "正在读取智能调度配置…",
       missing: "未发现智能调度配置。",
@@ -39,9 +39,9 @@
       conflict: "配置已被其他页面修改，已加载最新版本，请重试。",
       failed: "保存失败",
       tiersTitle: "档位",
-      tiersDescription: "档位按能力从低到高排列；内置档位为只读默认项，只有已启用档位会参与分类。",
+      tiersDescription: "档位按能力从低到高排列；内置档位可调整模型和推理强度，只有已启用档位会参与分类。",
       addTier: "添加档位",
-      builtinTier: "内置 · 只读",
+      builtinTier: "内置",
       tierEnabled: "启用",
       tierName: "名称",
       tierPrompt: "分类提示词",
@@ -67,7 +67,7 @@
     "en-US": {
       title: "Smart scheduling",
       navLabel: "Smart scheduling",
-      description: "Configure the classifier, fallback, and scheduling tiers. Built-in tiers can only be enabled or disabled; custom tiers remain fully editable.",
+      description: "Configure the classifier, fallback, and scheduling tiers. Built-in tiers allow model and reasoning effort changes; custom tiers remain fully editable.",
       disabled: "Smart scheduling is off. Enable it from Settings → Plugins on the OpenCodex sign-in page.",
       loading: "Loading smart scheduling configuration…",
       missing: "Smart scheduling configuration was not found.",
@@ -77,9 +77,9 @@
       conflict: "Another page changed this configuration. The latest revision was loaded; please retry.",
       failed: "Could not save",
       tiersTitle: "Tiers",
-      tiersDescription: "Tiers are ordered from lowest to highest capability. Built-ins are read-only defaults, and only enabled tiers participate in classification.",
+      tiersDescription: "Tiers are ordered from lowest to highest capability. Built-ins allow model and reasoning effort changes, and only enabled tiers participate in classification.",
       addTier: "Add tier",
-      builtinTier: "Built in · Read only",
+      builtinTier: "Built in",
       tierEnabled: "Enabled",
       tierName: "Name",
       tierPrompt: "Classification prompt",
@@ -536,7 +536,7 @@
   }
 
   function editableTiers(plugin = routerPlugin()) {
-    // API 回传的 builtin/default 元数据由服务端维护，保存时只提交用户真正可编辑的字段。
+    // API 回传的 builtin/default 元数据由服务端维护，保存时只提交校验所需的档位字段。
     return (Array.isArray(plugin?.tiers) ? plugin.tiers : []).map((tier) => ({
       id: String(tier.id || ""),
       enabled: tier.enabled === true,
@@ -674,7 +674,6 @@
         { id: tierSettingId(tier.id, "model"), type: "model", label: c.tierModel },
         tier.model
       );
-      modelControl.control.disabled = tier.builtin === true;
       fields.appendChild(
         createTierField(c.tierModel, modelControl.control, {
           warning: modelControl.unavailable ? c.unavailable : "",
@@ -684,7 +683,6 @@
         { id: tierSettingId(tier.id, "effort"), type: "reasoning-effort", label: c.tierEffort },
         tier.effort
       );
-      effortControl.control.disabled = tier.builtin === true;
       fields.appendChild(createTierField(c.tierEffort, effortControl.control));
       fields.appendChild(
         createTierField(c.tierPrompt, createTierTextControl(tier, "prompt", true), { full: true })

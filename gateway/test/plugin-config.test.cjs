@@ -82,19 +82,16 @@ test("gateway plugin config validates types, writes atomically and detects revis
     () => store.update(plugin.id, { expectedRevision: 1, values: { fallbackModel: "auto" } }),
     /cannot target Auto/
   );
-  assert.throws(
-    () =>
-      store.update(plugin.id, {
-        expectedRevision: 1,
-        tiers: plugin.tiers.map((tier) =>
-          tier.id === "balanced" ? { ...tier, model: "custom-balanced" } : tier
-        ),
-      }),
-    /model cannot be modified/
+  const customizedBuiltins = store.plugin(plugin.id).tiers.map((tier) =>
+    tier.id === "balanced" ? { ...tier, model: "custom-balanced", effort: "high" } : tier
   );
+  const customized = store.update(plugin.id, { expectedRevision: 1, tiers: customizedBuiltins });
+  assert.equal(customized.revision, 2);
+  assert.equal(store.plugin(plugin.id).tiers.find((tier) => tier.id === "balanced").model, "custom-balanced");
+  assert.equal(store.plugin(plugin.id).tiers.find((tier) => tier.id === "balanced").effort, "high");
 });
 
-test("smart scheduling tiers support custom CRUD while protecting built-ins", (t) => {
+test("smart scheduling tiers support custom CRUD while protecting built-in structure", (t) => {
   const store = createPluginConfigStore({ filePath: tempFile(t), manifests: listPluginManifests() });
   const pluginId = "opencodex.smart-model-router";
   const initial = store.plugin(pluginId);
@@ -125,12 +122,7 @@ test("smart scheduling tiers support custom CRUD while protecting built-ins", (t
       }),
     /cannot be deleted/
   );
-  for (const [field, value] of [
-    ["name", "Renamed"],
-    ["prompt", "Different criteria"],
-    ["model", "different-model"],
-    ["effort", "high"],
-  ]) {
+  for (const [field, value] of [["name", "Renamed"], ["prompt", "Different criteria"]]) {
     assert.throws(
       () =>
         store.update(pluginId, {
@@ -142,6 +134,26 @@ test("smart scheduling tiers support custom CRUD while protecting built-ins", (t
       new RegExp(`${field} cannot be modified`)
     );
   }
+  assert.throws(
+    () =>
+      store.update(pluginId, {
+        expectedRevision: 1,
+        tiers: store
+          .plugin(pluginId)
+          .tiers.map((tier) => (tier.id === "balanced" ? { ...tier, model: "auto" } : tier)),
+      }),
+    /cannot target Auto/
+  );
+  assert.throws(
+    () =>
+      store.update(pluginId, {
+        expectedRevision: 1,
+        tiers: store
+          .plugin(pluginId)
+          .tiers.map((tier) => (tier.id === "balanced" ? { ...tier, effort: "adaptive" } : tier)),
+      }),
+    /effort is unsupported/
+  );
   const reorderedBuiltins = [...store.plugin(pluginId).tiers];
   [reorderedBuiltins[0], reorderedBuiltins[2]] = [reorderedBuiltins[2], reorderedBuiltins[0]];
   assert.throws(
@@ -169,7 +181,7 @@ test("smart scheduling tiers support custom CRUD while protecting built-ins", (t
   assert.equal(store.plugin(pluginId).tiers.some((tier) => tier.enabled), false);
 });
 
-test("legacy smart scheduling settings migrate to immutable built-in defaults", (t) => {
+test("legacy smart scheduling settings migrate to editable built-in route fields", (t) => {
   const filePath = tempFile(t);
   fs.writeFileSync(
     filePath,
@@ -181,6 +193,10 @@ test("legacy smart scheduling settings migrate to immutable built-in defaults", 
           enabled: true,
           values: {
             classifierEffort: "low",
+            economyModel: "legacy-economy",
+            balancedModel: "legacy-balanced",
+            complexModel: "legacy-complex",
+            frontierModel: "legacy-frontier",
             economyEffort: "low",
             balancedEffort: "medium",
             complexEffort: "max",
@@ -196,11 +212,15 @@ test("legacy smart scheduling settings migrate to immutable built-in defaults", 
   const values = plugin.values;
   const tiers = Object.fromEntries(plugin.tiers.map((tier) => [tier.id, tier]));
 
-  // 分类器保持 low；四个内置档位恢复只读默认值，失败回退仍按旧版规则迁移到 Auto。
+  // 分类器保持 low；旧版自定义路由字段迁入内置档位，旧默认强度和失败回退仍迁移到 Auto。
   assert.equal(values.classifierEffort, "low");
+  assert.equal(tiers.economy.model, "legacy-economy");
+  assert.equal(tiers.balanced.model, "legacy-balanced");
+  assert.equal(tiers.complex.model, "legacy-complex");
+  assert.equal(tiers.frontier.model, "legacy-frontier");
   assert.equal(tiers.economy.effort, "auto");
   assert.equal(tiers.balanced.effort, "auto");
-  assert.equal(tiers.complex.effort, "auto");
+  assert.equal(tiers.complex.effort, "max");
   assert.equal(tiers.frontier.effort, "auto");
   assert.equal(values.fallbackEffort, "auto");
   assert.equal("economyEffort" in values, false);

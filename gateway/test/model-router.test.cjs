@@ -100,6 +100,18 @@ test("resolver honors configured, tier, catalog default and nearest effort order
   });
   assert.equal(tierBuiltin.model, "gpt-5.6-luna");
 
+  const customizedBuiltins = defaultTierDefinitions();
+  Object.assign(customizedBuiltins[1], { model: "custom-balanced", effort: "high" });
+  const configuredBuiltin = resolveTierRoute({
+    tier: "balanced",
+    tiers: customizedBuiltins,
+    configValues: { fallbackModel: "fallback" },
+    models: [model("custom-balanced", ["medium", "high"]), model("fallback")],
+  });
+  // 内置档位进入运行时归一化后仍须保留用户设置的模型和强度。
+  assert.equal(configuredBuiltin.model, "custom-balanced");
+  assert.equal(configuredBuiltin.effort, "high");
+
   const catalogDefault = resolveTierRoute({
     tier: "balanced",
     tiers: defaultTierDefinitions(),

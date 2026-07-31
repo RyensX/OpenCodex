@@ -104,21 +104,30 @@ function normalizeTierDefinition(value, fallback = null) {
     prompt: builtin
       ? builtin.prompt
       : normalizedText(source.prompt, baseline.prompt || "", MAX_TIER_PROMPT_LENGTH),
-    model: builtin
-      ? builtin.model
-      : normalizedModel(source.model, baseline.model || BUILTIN_ROUTE_DEFAULTS.fallback.model),
-    effort: builtin
-      ? builtin.effort
-      : normalizedEffort(source.effort, baseline.effort || AUTO_REASONING_EFFORT),
+    // 内置档位仅开放路由参数；损坏或缺失的持久化值仍回退到代码内默认值。
+    model: normalizedModel(source.model, baseline.model || BUILTIN_ROUTE_DEFAULTS.fallback.model),
+    effort: normalizedEffort(source.effort, baseline.effort || AUTO_REASONING_EFFORT),
     failureFloor: builtin?.failureFloor === true,
     defaultModel: builtin?.defaultModel || "",
     defaultEffort: builtin?.defaultEffort || "medium",
   };
 }
 
-function legacyTierDefinitions() {
-  // 新版内置档位是只读模板，旧版对四档模型和强度的修改不再迁入，只保留统一的内置默认值。
-  return defaultTierDefinitions();
+function legacyTierDefinitions(legacyValues = {}) {
+  const values =
+    legacyValues && typeof legacyValues === "object" && !Array.isArray(legacyValues) ? legacyValues : {};
+  // 旧版扁平设置与新版可编辑字段一一对应，迁移时保留用户选择过的模型和推理强度。
+  return defaultTierDefinitions().map((tier) =>
+    normalizeTierDefinition(
+      {
+        id: tier.id,
+        enabled: tier.enabled,
+        model: values[`${tier.id}Model`],
+        effort: values[`${tier.id}Effort`],
+      },
+      tier
+    )
+  );
 }
 
 function restoreBuiltinTierOrder(tiers) {
@@ -175,13 +184,16 @@ function validateTierDefinitions(value) {
     if (typeof candidate.enabled !== "boolean") throw new Error(`Tier ${id} enabled must be a boolean`);
     const builtin = BUILTIN_TIER_BY_ID.get(id) || null;
     if (builtin) {
-      for (const field of ["name", "prompt", "model", "effort"]) {
+      for (const field of ["name", "prompt"]) {
         if (candidate[field] !== builtin[field]) {
           throw new Error(`Built-in tier ${id} ${field} cannot be modified`);
         }
       }
-      // 内置项只接收 enabled，其他展示和路由字段始终从代码内模板恢复。
-      return normalizeTierDefinition({ id, enabled: candidate.enabled }, builtin);
+      const model = validateRequiredString(candidate.model, `Tier ${id} model`, MAX_TIER_MODEL_LENGTH);
+      if (model.toLowerCase() === "auto") throw new Error(`Tier ${id} model cannot target Auto`);
+      if (!ALLOWED_TIER_EFFORTS.has(candidate.effort)) throw new Error(`Tier ${id} effort is unsupported`);
+      // 名称、提示词和结构元数据继续使用内置模板，仅持久化允许调整的路由字段。
+      return normalizeTierDefinition({ id, enabled: candidate.enabled, model, effort: candidate.effort }, builtin);
     }
     const name = validateRequiredString(candidate.name, `Tier ${id} name`, MAX_TIER_NAME_LENGTH);
     const prompt = validateRequiredString(candidate.prompt, `Tier ${id} prompt`, MAX_TIER_PROMPT_LENGTH);

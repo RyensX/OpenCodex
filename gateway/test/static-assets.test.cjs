@@ -347,6 +347,8 @@ test("smart scheduling settings localize and render dynamic tier controls", () =
   assert.equal(en["plugin.smartModelRouter.setting.effort"], "Reasoning effort");
   assert.equal(zh["plugin.smartModelRouter.tiers.add"], "添加档位");
   assert.equal(en["plugin.smartModelRouter.tier.prompt"], "Classification prompt");
+  assert.match(zh["plugin.smartModelRouter.tiers.description"], /内置档位可调整模型和推理强度/);
+  assert.equal(zh["plugin.smartModelRouter.tiers.builtin"], "内置");
   // 认证前插件页必须明确说明选择 Auto 后会同时自动选择模型与推理强度。
   assert.match(zh["plugin.smartModelRouter.desc"], /选择 Auto.*自动选择模型和推理强度/);
   assert.match(en["plugin.smartModelRouter.desc"], /Selecting Auto.*model and reasoning effort/);
@@ -382,7 +384,10 @@ test("smart scheduling settings localize and render dynamic tier controls", () =
   const settingsSource = fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8");
   assert.match(settingsSource, /function addTier\(\)/);
   assert.match(settingsSource, /function deleteTier\(tierId\)/);
+  // 内置档位的名称和提示词仍只读，但模型与推理强度不再由前端禁用。
   assert.match(settingsSource, /control\.disabled = tier\.builtin === true/);
+  assert.doesNotMatch(settingsSource, /modelControl\.control\.disabled = tier\.builtin === true/);
+  assert.doesNotMatch(settingsSource, /effortControl\.control\.disabled = tier\.builtin === true/);
   assert.match(settingsSource, /if \(!tier\.builtin\) \{/);
   assert.match(settingsSource, /body: JSON\.stringify\(\{ expectedRevision: snapshot\.revision, \.\.\.patch \}\)/);
 });
