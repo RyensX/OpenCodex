@@ -67,6 +67,59 @@ function model(id, effort, isDefault = false) {
   };
 }
 
+function createDelayedClassifierTransport() {
+  const observers = new Set();
+  let completionPredicate = null;
+  let resolveCompletion = null;
+  let resolveReady = null;
+  const ready = new Promise((resolve) => {
+    resolveReady = resolve;
+  });
+
+  return {
+    complete(text) {
+      const message = {
+        method: "turn/completed",
+        params: {
+          threadId: "delayed-classifier-thread",
+          turn: {
+            id: "delayed-classifier-turn",
+            status: "completed",
+            items: [{ type: "agentMessage", text }],
+          },
+        },
+      };
+      for (const observer of observers) observer(message);
+      assert.equal(completionPredicate?.(message), true);
+      resolveCompletion?.(message);
+    },
+    observeNotifications(listener) {
+      observers.add(listener);
+      return () => observers.delete(listener);
+    },
+    ready,
+    registerInternalThread() {},
+    async request(method) {
+      if (method === "thread/start") {
+        return { thread: { id: "delayed-classifier-thread", ephemeral: true } };
+      }
+      if (method === "turn/start") {
+        return { turn: { id: "delayed-classifier-turn" } };
+      }
+      // 中断、退订和删除是分类器的异步清理步骤，此测试不需要额外模拟状态。
+      return {};
+    },
+    unregisterInternalThread() {},
+    waitForNotification(predicate) {
+      completionPredicate = predicate;
+      resolveReady();
+      return new Promise((resolve) => {
+        resolveCompletion = resolve;
+      });
+    },
+  };
+}
+
 test("Auto turn is classified on the same App Server, rewritten, hidden and safely falls back", async (t) => {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-router-integration-"));
   t.after(() => fs.rmSync(runtimeDir, { force: true, recursive: true }));
@@ -374,4 +427,94 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
       ),
     true
   );
+});
+
+test("manual selection suppresses delayed route status after classification already started", async (t) => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-router-race-"));
+  t.after(() => fs.rmSync(runtimeDir, { force: true, recursive: true }));
+  const configStore = createPluginConfigStore({
+    filePath: path.join(runtimeDir, "plugins.json"),
+    manifests: listPluginManifests(),
+  });
+  configStore.update("opencodex.smart-model-router", {
+    expectedRevision: 0,
+    enabled: true,
+  });
+  const classifierTransport = createDelayedClassifierTransport();
+  const service = createSmartModelRouterService({
+    configStore,
+    stateFilePath: path.join(runtimeDir, "router-state.json"),
+    classifierOptions: { timeoutMs: 1_000, transport: classifierTransport },
+  });
+  t.after(() => service.dispose());
+  service.modelCatalog.addModels([
+    model("gpt-5.3-codex-spark", "low", true),
+    model("gpt-5.6-luna", ["medium", "high"]),
+    model("gpt-5.6-terra", "high"),
+    model("gpt-5.6-sol", "xhigh"),
+  ]);
+  service.stateStore.setThreadAuto("race-thread", true, {
+    model: "gpt-5.3-codex-spark",
+    effort: "low",
+  });
+
+  const routeStatuses = [];
+  service.onRouteStatus((event) => routeStatuses.push(event));
+  const routedTurnPromise = service.processClientMessage({
+    id: "race-turn",
+    method: "turn/start",
+    params: {
+      threadId: "race-thread",
+      model: "auto",
+      effort: "medium",
+      input: [{ type: "text", text: "Implement the race fix", text_elements: [] }],
+    },
+  });
+  await classifierTransport.ready;
+  assert.equal(routeStatuses.at(-1)?.status, "classifying");
+
+  // 分类尚未返回时切到手动模型，核心状态应立即清除展示资格。
+  await service.processClientMessage({
+    id: "race-manual",
+    method: "thread/settings/update",
+    params: {
+      threadId: "race-thread",
+      model: "gpt-5.6-terra",
+      effort: "high",
+    },
+  });
+  assert.equal(service.stateStore.isThreadAuto("race-thread"), false);
+  assert.equal(routeStatuses.at(-1)?.status, "cleared");
+
+  classifierTransport.complete(
+    JSON.stringify({
+      route: {
+        tier: "balanced",
+        effort: "high",
+        confidence: 0.9,
+        taskType: "code_generation",
+        rationale: "delayed result",
+      },
+    })
+  );
+  const routedTurn = await routedTurnPromise;
+  assert.equal(routedTurn.params.model, "gpt-5.6-luna");
+  assert.equal(routedTurn.params.effort, "high");
+  assert.equal(service.activeRoute("race-thread"), null);
+  assert.equal(routeStatuses.some((event) => event.status === "selected"), false);
+  assert.equal(routeStatuses.at(-1)?.status, "cleared");
+
+  service.processServerMessage({
+    id: "race-turn",
+    result: { turn: { id: "public-race-turn", status: "inProgress" } },
+  });
+  service.processServerMessage({
+    method: "turn/started",
+    params: {
+      threadId: "race-thread",
+      turn: { id: "public-race-turn", status: "inProgress" },
+    },
+  });
+  assert.equal(routeStatuses.some((event) => event.status === "started"), false);
+  assert.equal(routeStatuses.at(-1)?.status, "cleared");
 });

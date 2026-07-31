@@ -285,9 +285,17 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       threadId,
       route,
     });
-    emitRouteStatus({ status: "selected", threadId, route });
-    // 分类期间用户可能已经切回手动模型；此时仍完成已开始的当前回合，但不能覆盖新的手动状态。
-    if (stateStore.isThreadAuto(threadId)) stateStore.recordRoute(threadId, route);
+    const routeStillVisible = isEnabled() && stateStore.isThreadAuto(threadId);
+    if (routeStillVisible) {
+      stateStore.recordRoute(threadId, route);
+      emitRouteStatus({ status: "selected", threadId, route });
+    } else {
+      /**
+       * 分类期间用户可能已经切回手动模型。当前回合仍沿用已经算出的真实路由，
+       * 但展示层只能收到 cleared，不能让延迟 selected 覆盖新的手动状态。
+       */
+      emitRouteStatus({ status: "cleared", threadId });
+    }
     diagnosticLog("model-router", "route_selected", {
       tier: route.tier,
       model: route.model,
@@ -377,7 +385,12 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     const processed = virtualModel.processServerMessage(withRouteStatus);
     if (withRouteStatus?.method === "turn/started" && threadId) {
       const route = turnRouteStatus.activeRoute(threadId);
-      if (route) emitRouteStatus({ status: "started", threadId, route });
+      if (route && isEnabled() && stateStore.isThreadAuto(threadId)) {
+        emitRouteStatus({ status: "started", threadId, route });
+      } else if (route) {
+        // 手动状态下只保留本轮执行映射，不再把 started 暴露为可展示的 Auto 路由。
+        emitRouteStatus({ status: "cleared", threadId });
+      }
     } else if (["turn/completed", "turn/failed", "turn/interrupted"].includes(withRouteStatus?.method) && threadId) {
       // 回合结束只退出运行态；Auto 未关闭时，摘要继续展示刚完成的分类结果。
       emitCurrentAutoRoute(threadId);

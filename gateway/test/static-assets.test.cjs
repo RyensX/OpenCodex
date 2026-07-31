@@ -394,6 +394,7 @@ test("smart scheduling summary follows root-path task context while Auto remains
 
   // 独立分类复用官方摘要面板结构，所有文案读取插件 i18n，并覆盖三类终止路径。
   assert.match(source, /data-pip-obstacle="thread-summary-panel/);
+  assert.match(source, /data-radix-popper-content-wrapper/);
   assert.match(source, /plugin\.smartModelRouter\.summary\.title/);
   assert.match(source, /plugin\.smartModelRouter\.summary\.model/);
   assert.match(source, /plugin\.smartModelRouter\.summary\.effort/);
@@ -409,7 +410,10 @@ test("smart scheduling summary follows root-path task context while Auto remains
   assert.match(source, /visibleThreadId/);
   assert.match(source, /isAutoTurn/);
   assert.match(source, /PROTOCOL_ENVELOPE_KEYS/);
-  assert.match(source, /selectVisibleThread\(threadId\)/);
+  assert.match(source, /commitVisibleThread/);
+  assert.match(source, /pendingNavigationThreadId/);
+  assert.match(source, /handleMutations/);
+  assert.match(source, /invalidateHydration/);
   assert.match(source, /pending\?\.pending \|\| autoSelected/);
   assert.match(source, /pendingModelSelections/);
   assert.match(source, /\["selected", "started", "idle"\]/);
