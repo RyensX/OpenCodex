@@ -51,6 +51,15 @@ const SMART_SCHEDULING_PLUGIN_DIR = path.resolve(
   "plugins",
   "smart-model-router"
 );
+const TOKEN_USAGE_INLINE_PLUGIN = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "web-shell",
+  "plugins",
+  "token-usage-inline",
+  "index.js"
+);
 
 function makeTempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-static-assets-test-"));
@@ -434,6 +443,51 @@ test("smart scheduling summary follows root-path task context while Auto remains
   assert.match(source, /value\.displayName \|\| modelId/);
   assert.match(styles, /max-width: 75% !important/);
   assert.doesNotMatch(styles, /flex: 1 1 auto/);
+});
+
+test("inline token usage shares the assistant action group visibility", () => {
+  const source = fs.readFileSync(TOKEN_USAGE_INLINE_PLUGIN, "utf-8");
+
+  function functionDeclaration(name) {
+    const start = source.indexOf(`function ${name}(`);
+    assert.notEqual(start, -1, `missing ${name}`);
+    const bodyStart = source.indexOf("{", start);
+    let depth = 0;
+    for (let index = bodyStart; index < source.length; index += 1) {
+      if (source[index] === "{") depth += 1;
+      if (source[index] !== "}") continue;
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index + 1);
+    }
+    throw new Error(`unterminated ${name}`);
+  }
+
+  const { insertUsageBadge } = new Function(
+    `${functionDeclaration("directChildForInsert")}
+     ${functionDeclaration("insertUsageBadge")}
+     return { insertUsageBadge };`
+  )();
+  const element = () => ({
+    children: [],
+    parentElement: null,
+    appendChild(child) {
+      child.parentElement = this;
+      this.children.push(child);
+      return child;
+    },
+  });
+  const row = element();
+  const actionGroup = row.appendChild(element());
+  const forkWrapper = actionGroup.appendChild(element());
+  const forkButton = forkWrapper.appendChild(element());
+  const badge = element();
+
+  insertUsageBadge(row, forkButton, badge);
+
+  // badge 与按钮同处 action group，父级 opacity 变化会同时作用到二者。
+  assert.equal(badge.parentElement, actionGroup);
+  assert.deepEqual(actionGroup.children, [forkWrapper, badge]);
+  assert.match(source, /insertUsageBadge\(row, forkButton, badge\);/);
 });
 
 test("web shell exposes only the smart router gateway switch before authentication", () => {

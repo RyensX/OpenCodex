@@ -112,6 +112,12 @@
     return cursor && cursor.parentElement === row ? cursor : element;
   }
 
+  function insertUsageBadge(row, forkButton, badge) {
+    const actionGroup = directChildForInsert(row, forkButton);
+    // 官方 action group 统一控制按钮的 hover/focus 透明度；放入组内即可跟随其他操作一起显隐。
+    actionGroup.appendChild(badge);
+  }
+
   function idsForElement(element) {
     // 当前官方虚拟列表实际渲染 data-turn-key；content-search key 只在搜索适配器里使用。
     const turnElement = element?.closest("[data-turn-key]") || element?.closest("[data-content-search-turn-key]");
@@ -322,8 +328,7 @@
           badge = document.createElement("span");
           badge.setAttribute(BADGE_ATTR, "true");
           badge.className = "opencodex-token-usage-inline text-size-chat";
-          // 插到分叉按钮 wrapper 后面，保持和官方 action row 的按钮间距一致。
-          directChildForInsert(row, forkButton).after(badge);
+          insertUsageBadge(row, forkButton, badge);
         }
         renderUsageContent(badge, usage);
         diagnostics.lastRenderText = usageCompactText(usage);
