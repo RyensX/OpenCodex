@@ -797,6 +797,12 @@ function isOfficialHiddenWebContents(webContents) {
   return sameWebContents(webContents, officialIpc.hiddenWebContents);
 }
 
+function shouldBridgeOfficialWebContents(webContents, primaryWebContents) {
+  if (!webContents) return false;
+  if (!primaryWebContents || primaryWebContents.isDestroyed?.()) return true;
+  return sameWebContents(webContents, primaryWebContents);
+}
+
 function isHiddenOfficialDialogParent(parent) {
   // 官方新版会把目录选择器挂到 event.sender 对应窗口；OpenCodex 的官方窗口是隐藏后台窗口，不能作为可见弹窗 parent。
   if (!parent) return false;
@@ -1576,7 +1582,12 @@ function acknowledgeOfficialChunkSoon(acknowledgement, sourceWebContents) {
   });
 }
 
-function routeOfficialWebContentsSend(channel, args, sourceWebContents = officialIpc.hiddenWebContents) {
+function routeOfficialWebContentsSend(
+  channel,
+  args,
+  sourceWebContents = officialIpc.hiddenWebContents,
+  sourceTransport = "unknown"
+) {
   /**
    * 官方代码以为自己在给 Electron renderer 发消息。
    * gateway 需要把这些 webContents.send 拦下来，并转换成浏览器 WebSocket 消息。
@@ -1614,6 +1625,9 @@ function routeOfficialWebContentsSend(channel, args, sourceWebContents = officia
   const routeBase = {
     ...outgoingIpcDiagnosticSummary(channel, routedArgs, requestSummary),
     mapped: !!mappedClientId,
+    sourceTransport,
+    sourceWebContentsId:
+      sourceWebContents && typeof sourceWebContents.id === "number" ? sourceWebContents.id : null,
     targetClientId: shortId(targetClientId),
   };
   // 只对锁屏授权相关回包做结构化摘要，避免把大图标 dataURL 打进日志。
@@ -1669,7 +1683,7 @@ function patchOfficialWebContents(webContents) {
   webContents.__opencodexOfficialGatewayPatched = true;
   const originalSend = webContents.send.bind(webContents);
   webContents.send = (channel, ...args) => {
-    routeOfficialWebContentsSend(String(channel), args, webContents);
+    routeOfficialWebContentsSend(String(channel), args, webContents, "webContents.send");
     // 官方隐藏 renderer 不需要消费这些消息，避免 Web 发起的 requestId 再回到隐藏页。
     if (shouldSuppressHiddenRendererSend(String(channel), args)) return true;
     return originalSend(channel, ...args);
@@ -1677,7 +1691,12 @@ function patchOfficialWebContents(webContents) {
   if (typeof webContents.postMessage === "function") {
     const originalPostMessage = webContents.postMessage.bind(webContents);
     webContents.postMessage = (channel, message, transfer) => {
-      routeOfficialWebContentsSend(String(channel), [message], webContents);
+      routeOfficialWebContentsSend(
+        String(channel),
+        [message],
+        webContents,
+        "webContents.postMessage"
+      );
       if (shouldSuppressHiddenRendererSend(String(channel), [message])) return true;
       return originalPostMessage(channel, message, transfer);
     };
@@ -1685,7 +1704,7 @@ function patchOfficialWebContents(webContents) {
   if (typeof webContents.sendToFrame === "function") {
     const originalSendToFrame = webContents.sendToFrame.bind(webContents);
     webContents.sendToFrame = (frameId, channel, ...args) => {
-      routeOfficialWebContentsSend(String(channel), args, webContents);
+      routeOfficialWebContentsSend(String(channel), args, webContents, "webContents.sendToFrame");
       if (shouldSuppressHiddenRendererSend(String(channel), args)) return true;
       return originalSendToFrame(frameId, channel, ...args);
     };
@@ -1693,7 +1712,12 @@ function patchOfficialWebContents(webContents) {
   if (webContents.mainFrame && typeof webContents.mainFrame.postMessage === "function") {
     const originalFramePostMessage = webContents.mainFrame.postMessage.bind(webContents.mainFrame);
     webContents.mainFrame.postMessage = (channel, message, transfer) => {
-      routeOfficialWebContentsSend(String(channel), [message], webContents);
+      routeOfficialWebContentsSend(
+        String(channel),
+        [message],
+        webContents,
+        "mainFrame.postMessage"
+      );
       if (shouldSuppressHiddenRendererSend(String(channel), [message])) return true;
       return originalFramePostMessage(channel, message, transfer);
     };
@@ -1703,13 +1727,17 @@ function patchOfficialWebContents(webContents) {
 function registerOfficialWindow(win) {
   if (!win || win.__opencodexOfficialGatewayRegistered) return;
   win.__opencodexOfficialGatewayRegistered = true;
-  // 第一扇官方窗口作为 IPC event.sender；后续窗口仍统一隐藏，避免桌面上弹出界面。
-  if (!officialIpc.hiddenWindow || officialIpc.hiddenWindow.isDestroyed()) {
+  // 第一扇官方窗口对应主 renderer；avatarOverlay 等辅助窗口会收到同一批广播，不能再次桥接到同一个 Web 页面。
+  const shouldBridge = shouldBridgeOfficialWebContents(
+    win.webContents,
+    officialIpc.hiddenWebContents
+  );
+  if (shouldBridge) {
     officialIpc.hiddenWindow = win;
     officialIpc.hiddenWebContents = win.webContents;
   }
   hideOfficialWindow(win);
-  patchOfficialWebContents(win.webContents);
+  if (shouldBridge) patchOfficialWebContents(win.webContents);
   win.on("show", () => hideOfficialWindow(win));
   win.on("ready-to-show", () => hideOfficialWindow(win));
   win.on("closed", () => {
@@ -1795,7 +1823,7 @@ function createOfficialIpcEvent(context = {}) {
     returnValue: undefined,
     reply(channel, ...args) {
       // ipcMain.on 风格的 handler 会调用 event.reply，这里也统一接到 WebSocket 转发链路。
-      routeOfficialWebContentsSend(String(channel), args, sender);
+      routeOfficialWebContentsSend(String(channel), args, sender, "ipc-event.reply");
     },
     // MessagePort 类 IPC 需要保留官方 event.ports 语义，app-host RPC 首屏握手依赖它。
     ports: Array.isArray(context.ports) ? context.ports : [],
@@ -2166,6 +2194,7 @@ module.exports = {
     OfficialChunkedMessageReceiver,
     officialDesktopIpcSocketPaths,
     isHiddenOfficialAppServerArgs,
+    shouldBridgeOfficialWebContents,
     shouldInterceptRemoteFileManagerStore,
     threadListInvalidationEnvelope,
     threadListInvalidationForOfficialMessage,

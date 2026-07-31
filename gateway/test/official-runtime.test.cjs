@@ -22,6 +22,20 @@ function threadStreamStateMessage(conversationId, sourceClientId, change) {
   };
 }
 
+test("bridges only the primary official renderer to the Web client", () => {
+  const primary = { id: 1, isDestroyed: () => false };
+  const samePrimaryWrapper = { id: 1, isDestroyed: () => false };
+  const auxiliary = { id: 2, isDestroyed: () => false };
+
+  assert.equal(__test.shouldBridgeOfficialWebContents(primary, null), true);
+  assert.equal(__test.shouldBridgeOfficialWebContents(samePrimaryWrapper, primary), true);
+  assert.equal(__test.shouldBridgeOfficialWebContents(auxiliary, primary), false);
+  assert.equal(
+    __test.shouldBridgeOfficialWebContents(auxiliary, { id: 1, isDestroyed: () => true }),
+    true
+  );
+});
+
 test("remote file manager interception condition is target and host based", () => {
   assert.equal(
     __test.shouldInterceptRemoteFileManagerStore({
