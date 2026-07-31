@@ -91,8 +91,8 @@ function createHarness(iconPath) {
   svg.appendChild(icon);
 
   const document = {
-    addEventListener(type, handler) {
-      listeners.set(type, handler);
+    addEventListener(type, handler, capture = false) {
+      listeners.set(type, { capture, handler });
     },
     querySelector(selector) {
       if (selector === ".app-shell-left-panel") return panel;
@@ -103,7 +103,7 @@ function createHarness(iconPath) {
       return selector === "button" ? [newTaskButton, toggleButton] : [];
     },
     removeEventListener(type, handler) {
-      if (listeners.get(type) === handler) listeners.delete(type);
+      if (listeners.get(type)?.handler === handler) listeners.delete(type);
     },
   };
   const window = {
@@ -139,8 +139,11 @@ function createHarness(iconPath) {
   });
 
   return {
+    appendSidebarChild(element) {
+      scroll.appendChild(element);
+    },
     clickNewTask() {
-      listeners.get("click")({
+      listeners.get("click").handler({
         altKey: false,
         button: 0,
         ctrlKey: false,
@@ -149,6 +152,20 @@ function createHarness(iconPath) {
         shiftKey: false,
         target: icon,
       });
+    },
+    pointerDown(target, pointerType) {
+      let stopped = 0;
+      listeners.get("pointerdown").handler({
+        pointerType,
+        stopPropagation() {
+          stopped += 1;
+        },
+        target,
+      });
+      return stopped;
+    },
+    listenerCapture(type) {
+      return listeners.get(type)?.capture;
     },
     dispose,
     fallbackMessageCount: () => fallbackMessageCount,
@@ -181,5 +198,22 @@ test("mobile sidebar ignores unrelated sidebar icon buttons", () => {
   harness.clickNewTask();
   assert.equal(harness.pendingTimerCount(), 0);
   assert.equal(harness.toggleClickCount(), 0);
+  harness.dispose();
+});
+
+test("mobile sidebar keeps touch scrolling out of the official thread drag sensor", () => {
+  const harness = createHarness("M0 0 unrelated");
+  const threadRow = createElement("div", {
+    "data-app-action-sidebar-thread-id": "thread-1",
+    "data-app-action-sidebar-thread-kind": "local",
+    "data-app-action-sidebar-thread-row": "",
+  });
+  const unrelated = createElement("div");
+
+  harness.appendSidebarChild(threadRow);
+  assert.equal(harness.listenerCapture("pointerdown"), true);
+  assert.equal(harness.pointerDown(threadRow, "touch"), 1);
+  assert.equal(harness.pointerDown(threadRow, "mouse"), 0);
+  assert.equal(harness.pointerDown(unrelated, "touch"), 0);
   harness.dispose();
 });
