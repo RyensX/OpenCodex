@@ -3,7 +3,7 @@
   "productName": "OpenCodex",
   "main": "launcher/main.cjs",
   "author": "Ryens",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "OpenCodex is a middleware layer for Codex Desktop. It lets you use a phone, tablet, or another computer to access and operate Codex on a target machine through a browser, making it suitable for continuous AI Coding in LAN or remote LAN environments.",
   "private": true,
   "scripts": {
