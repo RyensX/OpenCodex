@@ -32,6 +32,7 @@ const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js"
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overlay.css";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
 const CODEX_BRIDGE_POLYFILL_PATH = "/codex-bridge-polyfill.js";
+const CODEX_MOBILE_SIDEBAR_SCROLL_PATH = "/codex-mobile-sidebar-scroll.js";
 const CODEX_REMOTE_FILE_ACTIONS_PATH = "/codex-remote-file-actions.js";
 const CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH = "/codex-workspace-root-picker.css";
 const CODEX_WORKSPACE_ROOT_PICKER_PATH = "/codex-workspace-root-picker.js";
@@ -76,6 +77,7 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH, path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
+  [CODEX_MOBILE_SIDEBAR_SCROLL_PATH, path.join(WEB_SHELL_DIR, "codex-mobile-sidebar-scroll.js")],
   [CODEX_BRIDGE_POLYFILL_PATH, path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js")],
   [CODEX_REMOTE_FILE_ACTIONS_PATH, path.join(WEB_SHELL_DIR, "codex-remote-file-actions.js")],
   [CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.css")],
@@ -157,6 +159,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       `<script src="${CODEX_SMART_SCHEDULING_SUMMARY_PATH}"></script>`,
       `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
       `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
+      `<script src="${CODEX_MOBILE_SIDEBAR_SCROLL_PATH}"></script>`,
       `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
       `<script src="${CODEX_REMOTE_FILE_ACTIONS_PATH}"></script>`,
       `<script src="${CODEX_WORKSPACE_ROOT_PICKER_PATH}"></script>`,

@@ -3,11 +3,19 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
 const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
 
 const WEB_SHELL_INDEX = path.resolve(__dirname, "..", "..", "web-shell", "index.html");
 const BRIDGE_POLYFILL = path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js");
+const MOBILE_SIDEBAR_SCROLL = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "web-shell",
+  "codex-mobile-sidebar-scroll.js"
+);
 const SMART_SCHEDULING_SETTINGS = path.resolve(
   __dirname,
   "..",
@@ -170,6 +178,42 @@ test("injects remote file actions after the bridge polyfill", (t) => {
     service.staticFile("/codex-remote-file-actions.js"),
     path.resolve(__dirname, "..", "..", "web-shell", "codex-remote-file-actions.js")
   );
+});
+
+test("mobile sidebar touch starts scrolling without activating the official drag sensor", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const service = createService(webviewDir);
+  const html = service.createRendererResponse();
+
+  assert.match(html, /<script src="\/codex-mobile-sidebar-scroll\.js"><\/script>/);
+  assert.equal(service.staticFile("/codex-mobile-sidebar-scroll.js"), MOBILE_SIDEBAR_SCROLL);
+  assert.equal(fs.existsSync(MOBILE_SIDEBAR_SCROLL), true);
+
+  const listeners = [];
+  const document = {
+    addEventListener(type, listener, capture) {
+      listeners.push({ capture, listener, type });
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(MOBILE_SIDEBAR_SCROLL, "utf-8"), { document });
+  vm.runInNewContext(fs.readFileSync(MOBILE_SIDEBAR_SCROLL, "utf-8"), { document });
+
+  assert.equal(listeners.length, 1);
+  assert.deepEqual({ capture: listeners[0].capture, type: listeners[0].type }, { capture: true, type: "pointerdown" });
+
+  let stopped = 0;
+  const threadRow = {};
+  listeners[0].listener({
+    pointerType: "touch",
+    stopPropagation() {
+      stopped += 1;
+    },
+    target: { closest: () => threadRow },
+  });
+  listeners[0].listener({ pointerType: "mouse", stopPropagation() { stopped += 1; }, target: { closest: () => threadRow } });
+  listeners[0].listener({ pointerType: "touch", stopPropagation() { stopped += 1; }, target: { closest: () => null } });
+
+  assert.equal(stopped, 1);
 });
 
 test("injects smart scheduling settings and summary into the authenticated renderer", (t) => {
