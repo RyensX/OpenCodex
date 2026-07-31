@@ -488,6 +488,11 @@ test("inline token usage shares the assistant action group visibility", () => {
   assert.equal(badge.parentElement, actionGroup);
   assert.deepEqual(actionGroup.children, [forkWrapper, badge]);
   assert.match(source, /insertUsageBadge\(row, forkButton, badge\);/);
+  // 字号和行高必须跟随官方时间戳的 text-xs，图标也同步缩小，不能回退到聊天正文尺寸。
+  assert.match(source, /badge\.className = "opencodex-token-usage-inline text-xs";/);
+  assert.doesNotMatch(source, /text-size-chat/);
+  assert.doesNotMatch(source, /line-height: 1\.25rem/);
+  assert.match(source, /height: 0\.75rem;[\s\S]*width: 0\.75rem;/);
 });
 
 test("web shell exposes only the smart router gateway switch before authentication", () => {

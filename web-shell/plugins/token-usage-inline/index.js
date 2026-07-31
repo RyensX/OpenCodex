@@ -265,7 +265,6 @@
           flex: 0 1 auto;
           font-variant-numeric: tabular-nums;
           height: 100%;
-          line-height: 1.25rem;
           margin-left: 0.125rem;
           max-width: min(34vw, 260px);
           min-width: 0;
@@ -286,9 +285,9 @@
         [${BADGE_ATTR}] .opencodex-token-usage-inline-icon {
           color: currentColor;
           flex: 0 0 auto;
-          height: 0.8125rem;
+          height: 0.75rem;
           opacity: 0.72;
-          width: 0.8125rem;
+          width: 0.75rem;
         }
         [${BADGE_ATTR}] .opencodex-token-usage-inline-icon path {
           fill: none;
@@ -327,7 +326,8 @@
         if (!badge) {
           badge = document.createElement("span");
           badge.setAttribute(BADGE_ATTR, "true");
-          badge.className = "opencodex-token-usage-inline text-size-chat";
+          // 字号复用官方时间戳的 text-xs，避免随聊天正文的字号设置一起放大。
+          badge.className = "opencodex-token-usage-inline text-xs";
           insertUsageBadge(row, forkButton, badge);
         }
         renderUsageContent(badge, usage);
