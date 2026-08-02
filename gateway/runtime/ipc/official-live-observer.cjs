@@ -1,4 +1,5 @@
 const net = require("node:net");
+const { randomUUID } = require("node:crypto");
 
 const IPC_FRAME_HEADER_BYTES = 4;
 const IPC_MAX_FRAME_BYTES = 256 * 1024 * 1024;
@@ -115,6 +116,10 @@ function createOfficialLiveObserver(options = {}) {
   const activeOwners = new Map();
   // 只保存可验证增量所需的 revision 元数据，不保存任何 snapshot/patch 内容。
   const activeRevisions = new Map();
+  const pendingThreads = new Set();
+  const latestStatuses = new Map();
+  const latestReadStates = new Map();
+  const followedThreads = new Set();
   let socket = null;
   let socketPathIndex = 0;
   let clientId = "";
@@ -122,6 +127,8 @@ function createOfficialLiveObserver(options = {}) {
   let stopped = false;
   let reconnectTimer = null;
   let parser = null;
+  // Desktop 会跨连接去重 requestId；实例 UUID 防止服务重启后 initialize 被静默丢弃。
+  const observerInstanceId = randomUUID();
   let initializeRequestId = 0;
   let reconnectAttempt = 0;
 
@@ -143,8 +150,48 @@ function createOfficialLiveObserver(options = {}) {
     });
   }
 
-  function clearActiveState() {
-    for (const ownerClientId of new Set(activeOwners.values())) {
+  function validThreadRuntimeStatus(status) {
+    if (!status || typeof status !== "object" || Array.isArray(status)) return null;
+    if (status.type === "active") {
+      return Array.isArray(status.activeFlags) ? { type: "active", activeFlags: [...status.activeFlags] } : null;
+    }
+    return ["idle", "notLoaded", "systemError"].includes(status.type) ? { type: status.type } : null;
+  }
+
+  function emitThreadStatusEvidence(conversationId, hostId, status) {
+    latestStatuses.set(threadKey(conversationId, hostId), status);
+    emit("thread-status-evidence", {
+      type: "mcp-notification",
+      hostId,
+      method: "thread/status/changed",
+      params: { threadId: conversationId, status },
+    });
+  }
+
+  function emitThreadReadState(conversationId, hostId, hasUnreadTurn, message = null) {
+    const payload = message
+      ? { ...message, params: { ...message.params, conversationId, hostId, hasUnreadTurn } }
+      : {
+          type: "broadcast",
+          method: "thread-read-state-changed",
+          params: { conversationId, hostId, hasUnreadTurn },
+        };
+    latestReadStates.set(threadKey(conversationId, hostId), payload);
+    emit("thread-read-state-changed", payload);
+  }
+
+  function markThreadPending(key) {
+    latestReadStates.delete(key);
+    if (pendingThreads.has(key)) return;
+    const thread = knownThreads.get(key);
+    if (!thread) return;
+    pendingThreads.add(key);
+    emitThreadStatusEvidence(thread.conversationId, thread.hostId, { type: "notLoaded" });
+  }
+
+  function clearActiveState({ publishPending = true } = {}) {
+    for (const [key, ownerClientId] of activeOwners) {
+      if (publishPending) markThreadPending(key);
       if (ownerClientId) emitOwnerDisconnected(ownerClientId);
     }
     activeOwners.clear();
@@ -177,13 +224,18 @@ function createOfficialLiveObserver(options = {}) {
 
   function sendFollowing(conversationId, hostId, following) {
     // observer 只允许 initialize 和 following 广播，绝不生成任何 thread-follower 控制请求。
-    return send({
+    const key = threadKey(conversationId, hostId);
+    if (following === followedThreads.has(key)) return true;
+    const sent = send({
       type: "broadcast",
       method: "thread-stream-following-changed",
       version: 1,
       sourceClientId: clientId,
       params: { conversationId, hostId, following },
     });
+    if (following && sent) followedThreads.add(key);
+    if (!following) followedThreads.delete(key);
+    return sent;
   }
 
   function resubscribeKnownThreads() {
@@ -204,6 +256,7 @@ function createOfficialLiveObserver(options = {}) {
         onError(new Error("Official live IPC initialize response did not include client id"));
         return;
       }
+      followedThreads.clear();
       resubscribeKnownThreads();
       return;
     }
@@ -211,6 +264,8 @@ function createOfficialLiveObserver(options = {}) {
     if (method === "ipc-connection-reset") {
       // reset 后只保留 knownThreads；旧 owner/revision 不能跨连接安全接收 patches。
       clearActiveState();
+      latestReadStates.clear();
+      followedThreads.clear();
       emitConnectionReset("peer-reset", message);
       resubscribeKnownThreads();
       return;
@@ -228,6 +283,16 @@ function createOfficialLiveObserver(options = {}) {
       return;
     }
 
+    if (method === "thread-read-state-changed") {
+      if (key && typeof params.hasUnreadTurn === "boolean") {
+        if (!knownThreads.has(key)) {
+          observeThread(conversationId, hostId);
+        }
+        emitThreadReadState(conversationId, hostId, params.hasUnreadTurn, message);
+      }
+      return;
+    }
+
     if (method === "thread-stream-state-changed") {
       if (!key) return;
       const change = params.change && typeof params.change === "object" ? params.change : null;
@@ -235,7 +300,10 @@ function createOfficialLiveObserver(options = {}) {
       // 首个 snapshot 可能早于 Web 首屏 catalog；patch 没有可用 baseRevision，不能跨 renderer 重放。
       if (!knownThreads.has(key) && change?.type !== "snapshot") return;
       if (change?.type === "snapshot") {
-        if (!knownThreads.has(key)) knownThreads.set(key, { conversationId, hostId });
+        if (!knownThreads.has(key)) {
+          knownThreads.set(key, { conversationId, hostId });
+          if (clientId) sendFollowing(conversationId, hostId, true);
+        }
         if (ownerClientId) activeOwners.set(key, ownerClientId);
         else activeOwners.delete(key);
         if (change.revision !== undefined && change.revision !== null) {
@@ -243,12 +311,23 @@ function createOfficialLiveObserver(options = {}) {
         } else {
           activeRevisions.delete(key);
         }
+        const status = validThreadRuntimeStatus(change.conversationState?.threadRuntimeStatus);
+        if (status) {
+          pendingThreads.delete(key);
+          emitThreadStatusEvidence(conversationId, hostId, status);
+        } else markThreadPending(key);
         emit(method, message);
         return;
       }
       if (change?.type !== "patches") return;
       if (activeOwners.get(key) !== ownerClientId) return;
-      if (!activeRevisions.has(key) || activeRevisions.get(key) !== change.baseRevision) return;
+      if (!activeRevisions.has(key) || activeRevisions.get(key) !== change.baseRevision) {
+        activeOwners.delete(key);
+        activeRevisions.delete(key);
+        markThreadPending(key);
+        sendFollowing(conversationId, hostId, true);
+        return;
+      }
       if (change.revision === undefined || change.revision === null) return;
       activeRevisions.set(key, change.revision);
       emit(method, message);
@@ -263,6 +342,7 @@ function createOfficialLiveObserver(options = {}) {
       let matched = false;
       for (const [thread, ownerClientId] of activeOwners.entries()) {
         if (ownerClientId !== params.clientId) continue;
+        markThreadPending(thread);
         activeOwners.delete(thread);
         activeRevisions.delete(thread);
         matched = true;
@@ -287,6 +367,7 @@ function createOfficialLiveObserver(options = {}) {
     const current = socket;
     socket = null;
     clientId = "";
+    followedThreads.clear();
     parser?.reset();
     parser = null;
     if (!current) return;
@@ -300,9 +381,11 @@ function createOfficialLiveObserver(options = {}) {
     if (socket !== current) return;
     socket = null;
     clientId = "";
+    followedThreads.clear();
     parser?.reset();
     parser = null;
     clearActiveState();
+    latestReadStates.clear();
     emitConnectionReset("socket-closed");
     scheduleReconnect();
   }
@@ -330,7 +413,7 @@ function createOfficialLiveObserver(options = {}) {
       initializeRequestId += 1;
       writeMessage({
         type: "request",
-        requestId: `opencodex-observer-init-${initializeRequestId}`,
+        requestId: `opencodex-observer-init-${observerInstanceId}-${initializeRequestId}`,
         method: "initialize",
         params: { clientType },
       });
@@ -348,31 +431,70 @@ function createOfficialLiveObserver(options = {}) {
     if (typeof conversationId !== "string" || conversationId.length === 0) return false;
     const normalizedHostId = typeof hostId === "string" && hostId ? hostId : DEFAULT_HOST_ID;
     const key = threadKey(conversationId, normalizedHostId);
-    knownThreads.set(key, { conversationId, hostId: normalizedHostId });
+    if (!knownThreads.has(key)) {
+      knownThreads.set(key, { conversationId, hostId: normalizedHostId });
+      markThreadPending(key);
+    }
     if (clientId) sendFollowing(conversationId, normalizedHostId, true);
     return true;
   }
 
+  function replayMessages() {
+    const statuses = [...latestStatuses]
+      .map(([key, status]) => ({ thread: knownThreads.get(key), status }))
+      .filter(({ thread }) => !!thread)
+      .map(({ thread: { conversationId, hostId }, status }) => ({
+        channel: "thread-status-evidence",
+        payload: {
+          type: "mcp-notification",
+          hostId,
+          method: "thread/status/changed",
+          params: { threadId: conversationId, status },
+        },
+      }));
+    const readStates = [...latestReadStates]
+      .filter(([key]) => knownThreads.has(key))
+      .map(([, payload]) => ({ channel: "thread-read-state-changed", payload }));
+    return [...statuses, ...readStates];
+  }
+
+  function forgetThread(conversationId, hostId = DEFAULT_HOST_ID) {
+    if (typeof conversationId !== "string" || conversationId.length === 0) return false;
+    const normalizedHostId = typeof hostId === "string" && hostId ? hostId : DEFAULT_HOST_ID;
+    const key = threadKey(conversationId, normalizedHostId);
+    if (!knownThreads.delete(key)) return false;
+    activeOwners.delete(key);
+    activeRevisions.delete(key);
+    pendingThreads.delete(key);
+    latestStatuses.delete(key);
+    latestReadStates.delete(key);
+    if (clientId) sendFollowing(conversationId, normalizedHostId, false);
+    followedThreads.delete(key);
+    return true;
+  }
+
   function observeSidebarBootstrap(bootstrap) {
-    const entries = bootstrap?.catalogSnapshot?.entries;
+    const snapshot = bootstrap?.catalogSnapshot;
+    const entries = snapshot?.entries;
     if (!Array.isArray(entries)) return 0;
+    const currentKeys = new Set();
+    for (const entry of entries) {
+      const conversationId = entry?.threadId || entry?.conversationId;
+      if (typeof conversationId !== "string" || conversationId.length === 0) continue;
+      const hostId = entry?.hostId || DEFAULT_HOST_ID;
+      currentKeys.add(threadKey(conversationId, hostId));
+    }
+    // 分页 catalog 只证明条目存在，不能把缺席误判为删除；完整快照才有资格收缩订阅集合。
+    if (snapshot.isComplete === true) {
+      for (const { conversationId, hostId } of [...knownThreads.values()]) {
+        if (!currentKeys.has(threadKey(conversationId, hostId))) forgetThread(conversationId, hostId);
+      }
+    }
     let observed = 0;
-    const visibleThreads = new Set();
     for (const entry of entries) {
       const conversationId = entry?.threadId || entry?.conversationId;
       const hostId = entry?.hostId || DEFAULT_HOST_ID;
-      if (observeThread(conversationId, hostId)) {
-        visibleThreads.add(threadKey(conversationId, hostId));
-        observed += 1;
-      }
-    }
-    // sidebar bootstrap 是可见任务真源；移除不再可见的订阅，避免 knownThreads 只增不减。
-    for (const [key, thread] of knownThreads.entries()) {
-      if (visibleThreads.has(key)) continue;
-      knownThreads.delete(key);
-      activeOwners.delete(key);
-      activeRevisions.delete(key);
-      if (clientId) sendFollowing(thread.conversationId, thread.hostId, false);
+      if (observeThread(conversationId, hostId)) observed += 1;
     }
     return observed;
   }
@@ -393,13 +515,15 @@ function createOfficialLiveObserver(options = {}) {
     started = false;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = null;
-    clearActiveState();
+    clearActiveState({ publishPending: false });
     closeSocket();
   }
 
   return {
     observeSidebarBootstrap,
     observeThread,
+    forgetThread,
+    replayMessages,
     refresh,
     start,
     stop,
@@ -407,6 +531,7 @@ function createOfficialLiveObserver(options = {}) {
       getActiveOwners: () => new Map(activeOwners),
       getClientId: () => clientId,
       getKnownThreads: () => new Map(knownThreads),
+      getPendingThreads: () => new Set(pendingThreads),
       handleMessage,
       encodeIpcFrame,
     },

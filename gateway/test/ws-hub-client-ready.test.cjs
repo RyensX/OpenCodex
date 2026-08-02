@@ -62,6 +62,44 @@ test("notifies runtime listeners after a browser client completes hello", async 
   assert.deepEqual(readyClients, ["ready-client"]);
 });
 
+test("notifies runtime listeners again when the renderer is ready for replay", async (t) => {
+  const server = http.createServer();
+  const hub = createWsHub(server, {
+    createAppHostRelay() {},
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  const readyClients = [];
+  let resolveRendererReady;
+  const rendererReady = new Promise((resolve) => {
+    resolveRendererReady = resolve;
+  });
+  hub.onClientReady(({ clientId }) => {
+    readyClients.push(clientId);
+    if (readyClients.length === 2) resolveRendererReady();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  t.after(async () => {
+    socket.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  socket.send(JSON.stringify({ type: "hello", clientId: "renderer-ready-client" }));
+  await waitForMessage(socket, (message) => message.type === "hello-ack");
+  socket.send(JSON.stringify({ type: "thread-status-renderer-ready", clientId: "renderer-ready-client" }));
+
+  await Promise.race([
+    rendererReady,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for renderer ready")), 200)),
+  ]);
+  assert.deepEqual(readyClients, ["renderer-ready-client", "renderer-ready-client"]);
+});
+
 test("restores app-host downlink before the first post-reconnect data frame", async (t) => {
   const server = http.createServer();
   const relays = [];

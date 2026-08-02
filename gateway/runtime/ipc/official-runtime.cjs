@@ -38,6 +38,11 @@ const {
 } = require("../electron/official-notification-hook.cjs");
 const { hiddenTrayHookStatus, installOfficialTrayHook } = require("../electron/official-tray-hook.cjs");
 const { createOfficialLiveObserver } = require("./official-live-observer.cjs");
+const {
+  createTranscriptStatusObserver,
+  readLatestTranscriptStatus,
+  resolveTranscriptPath,
+} = require("./transcript-status-observer.cjs");
 
 const { app, ipcMain } = electron;
 
@@ -68,17 +73,46 @@ function officialDesktopIpcSocketPaths(platform = process.platform) {
   ];
 }
 
+function officialLiveObserverEnvelope(message) {
+  const payload = message?.payload;
+  if (payload?.type === "mcp-notification") {
+    return { channel: MESSAGE_FOR_VIEW_CHANNEL, payload, args: [payload] };
+  }
+  if (
+    !payload ||
+    (payload.type !== "broadcast" &&
+      !(message?.channel === "ipc-connection-reset" && payload.type === "ipc-connection-reset"))
+  ) {
+    return null;
+  }
+  const broadcast = { ...payload, type: "ipc-broadcast" };
+  // targetClientIds 属于 observer socket；浏览器 renderer 有自己的 client identity。
+  delete broadcast.targetClientIds;
+  return { channel: MESSAGE_FOR_VIEW_CHANNEL, payload: broadcast, args: [broadcast] };
+}
+
 const officialLiveObserver = createOfficialLiveObserver({
   socketPaths: officialDesktopIpcSocketPaths(),
-  publish(payload) {
-    if (wsHub) wsHub.broadcast(payload, { suppressDiagnostic: true });
-    // peer snapshot 也会改变 recent-conversations-meta；沿用官方 renderer 的 invalidation 协议。
-    scheduleThreadListEventSync(payload.channel, [payload.payload]);
+  publish(message) {
+    // 运行状态由可重放的 transcript lifecycle 唯一负责；IPC notLoaded 不能覆盖已持久化的 active。
+    if (message?.channel === "thread-status-evidence") return;
+    const envelope = officialLiveObserverEnvelope(message);
+    scheduleThreadListEventSync(envelope?.channel, envelope?.args);
+    evictSidebarCatalogForOfficialMessage(envelope?.channel, envelope?.args);
+    if (wsHub && envelope) wsHub.broadcast(envelope, { suppressDiagnostic: true });
   },
   onError(error) {
     diagnosticWarn("official-live-observer", "observer_error", {
       error: error instanceof Error ? error.message : String(error),
     });
+  },
+});
+
+const transcriptStatusObserver = createTranscriptStatusObserver({
+  resolveSessionFile: (threadId) => resolveTranscriptPath(threadId),
+  publish(message) {
+    const envelope = officialLiveObserverEnvelope(message);
+    if (wsHub && envelope) wsHub.broadcast(envelope, { suppressDiagnostic: true });
   },
 });
 
@@ -111,6 +145,7 @@ const COMPUTER_USE_AUTH_URLS = new Set([
 const CHUNKED_MESSAGE_ACK_CHANNEL = "codex_desktop:chunked-message-ack";
 const CHUNKED_MESSAGE_MARKER = "codex-host-chunked-message-v1";
 const INITIAL_SIDEBAR_BOOTSTRAP_CHANNEL = "codex_desktop:get-initial-sidebar-bootstrap";
+const UNREAD_THREAD_IDS_BY_HOST_KEY = "unread-thread-ids-by-host-v1";
 let lastInitialSidebarBootstrap = null;
 let hasWarnedInitialSidebarBootstrapFailure = false;
 const COMPUTER_USE_INSTALLER_RELATIVE_PATH = [
@@ -546,8 +581,86 @@ function setWsHub(nextWsHub) {
   // Web config 首次加载可能早于浏览器 WS hello；页面真正注册后再重发一次 following，确保快照不丢。
   removeWsClientReadyListener =
     typeof nextWsHub?.onClientReady === "function"
-      ? nextWsHub.onClientReady(() => officialLiveObserver.refresh())
+      ? nextWsHub.onClientReady(({ clientId }) => {
+          officialLiveObserver.refresh();
+          sendOfficialThreadStatuses(clientId, nextWsHub, officialLiveObserver);
+        })
       : null;
+}
+
+function sendOfficialThreadStatuses(
+  clientId,
+  hub = wsHub,
+  observer = officialLiveObserver,
+  unreadThreadIdsByHost = persistedAtomSnapshotForRenderer()[UNREAD_THREAD_IDS_BY_HOST_KEY],
+  statusObserver = transcriptStatusObserver
+) {
+  if (!clientId || typeof hub?.sendTo !== "function" || typeof observer?.replayMessages !== "function") return 0;
+  let sent = 0;
+  const replayMessages = [
+    ...observer.replayMessages().filter((message) => message?.channel !== "thread-status-evidence"),
+  ];
+  for (const message of replayMessages) {
+    const envelope = officialLiveObserverEnvelope(message);
+    if (envelope && hub.sendTo(clientId, envelope, { suppressDiagnostic: true })) sent += 1;
+  }
+  sent += sendTranscriptThreadStatuses(clientId, hub, statusObserver);
+  if (unreadThreadIdsByHost && typeof unreadThreadIdsByHost === "object") {
+    const liveReadKeys = new Set(
+      replayMessages.flatMap((message) => {
+        const params = message?.payload?.params;
+        return message?.payload?.method === "thread-read-state-changed" && params?.conversationId
+          ? [`${params.hostId || "local"}\0${params.conversationId}`]
+          : [];
+      })
+    );
+    for (const message of statusObserver?.replayMessages?.() || []) {
+      const params = message?.payload?.params;
+      const threadId = params?.threadId;
+      const hostId = message?.payload?.hostId || "local";
+      if (!threadId || liveReadKeys.has(`${hostId}\0${threadId}`)) continue;
+      const unreadIds = unreadThreadIdsByHost[hostId];
+      const readState = {
+        type: "broadcast",
+        method: "thread-read-state-changed",
+        params: { conversationId: threadId, hostId, hasUnreadTurn: Array.isArray(unreadIds) && unreadIds.includes(threadId) },
+      };
+      const envelope = officialLiveObserverEnvelope({ payload: readState });
+      if (envelope && hub.sendTo(clientId, envelope, { suppressDiagnostic: true })) sent += 1;
+    }
+    const payload = {
+      key: UNREAD_THREAD_IDS_BY_HOST_KEY,
+      value: unreadThreadIdsByHost,
+      deleted: false,
+    };
+    if (
+      hub.sendTo(
+        clientId,
+        { channel: "persisted-atom-updated", payload, args: [payload] },
+        { suppressDiagnostic: true }
+      )
+    ) {
+      sent += 1;
+    }
+  }
+  return sent;
+}
+
+function sendTranscriptThreadStatuses(clientId, hub = wsHub, statusObserver = transcriptStatusObserver) {
+  if (!clientId || typeof hub?.sendTo !== "function" || typeof statusObserver?.replayMessages !== "function") return 0;
+  let sent = 0;
+  for (const message of statusObserver.replayMessages()) {
+    const envelope = officialLiveObserverEnvelope(message);
+    if (envelope && hub.sendTo(clientId, envelope, { suppressDiagnostic: true })) sent += 1;
+  }
+  return sent;
+}
+
+function scheduleOfficialThreadStatuses(clientId, schedule = setTimeout, send = sendOfficialThreadStatuses) {
+  if (!clientId || typeof schedule !== "function" || typeof send !== "function") return false;
+  const timer = schedule(() => send(clientId), 1_000);
+  timer?.unref?.();
+  return true;
 }
 
 function getOfficialBundle() {
@@ -1509,6 +1622,236 @@ function threadListInvalidationRequest() {
   return { type: "query-cache-invalidate", queryKey: ["recent-conversations-meta"] };
 }
 
+function catalogSourceFromThread(source) {
+  if (typeof source === "string") return { kind: source, detail: null };
+  if (source && typeof source.custom === "string") return { kind: "custom", detail: source.custom };
+  return null;
+}
+
+function catalogEntryFromThreadListItem(thread, hostId) {
+  if (
+    typeof thread?.id !== "string" ||
+    !thread.id ||
+    thread.ephemeral ||
+    thread.parentThreadId != null ||
+    thread.threadSource === "ambient_suggestions" ||
+    thread.threadSource === "pull_request_fix_automation" ||
+    !Number.isFinite(thread.updatedAt)
+  ) {
+    return null;
+  }
+  const source = catalogSourceFromThread(thread.source);
+  if (!source || source.kind === "exec") return null;
+  const cwd = typeof thread.cwd === "string" ? thread.cwd : "";
+  const titleCandidate = [thread.name || "", cwd, thread.id]
+    .map((value) => String(value).replace(/\s+/g, " ").trim())
+    .find(Boolean);
+  const displayTitle =
+    titleCandidate.length <= 80 ? titleCandidate : `${titleCandidate.slice(0, 79).trimEnd()}\u2026`;
+  return {
+    hostId,
+    threadId: thread.id,
+    displayTitle,
+    sourceCreatedAt: Number.isFinite(thread.createdAt) ? thread.createdAt : thread.updatedAt,
+    sourceUpdatedAt: thread.updatedAt,
+    cwd,
+    sourceKind: source.kind,
+    sourceDetail: source.detail,
+    threadSource: thread.threadSource ?? null,
+    modelProvider: typeof thread.modelProvider === "string" ? thread.modelProvider : "",
+    gitBranch: thread.gitInfo?.branch ?? null,
+  };
+}
+
+const SIDEBAR_BOOTSTRAP_RECENT_LIMIT = 50;
+
+function mergeThreadListIntoSidebarBootstrap(bootstrap, hostId, threads) {
+  const snapshot = bootstrap?.catalogSnapshot;
+  if (!snapshot || !Array.isArray(snapshot.entries) || !Array.isArray(snapshot.hosts)) return bootstrap;
+  const entriesByKey = new Map(snapshot.entries.map((entry) => [`${entry.hostId}\0${entry.threadId}`, entry]));
+  for (const thread of threads) {
+    const entry = catalogEntryFromThreadListItem(thread, hostId);
+    if (entry) entriesByKey.set(`${hostId}\0${entry.threadId}`, entry);
+  }
+  // thread/list 可能只是单页；一旦混入分页结果，catalog 与该 host 都不能再沿用 complete 语义。
+  const hosts = snapshot.hosts.some((host) => host?.hostId === hostId)
+    ? snapshot.hosts.map((host) => (host?.hostId === hostId ? { ...host, isComplete: false } : host))
+    : [...snapshot.hosts, { hostId, isComplete: false }];
+  const pinnedValue = bootstrap.globalStateEntries?.find((entry) => entry?.key === "pinned-thread-ids")?.value;
+  const pinnedThreadIds = new Set(Array.isArray(pinnedValue) ? pinnedValue : []);
+  const sortedEntries = [...entriesByKey.values()].sort(
+    (a, b) =>
+      b.sourceUpdatedAt - a.sourceUpdatedAt ||
+      b.sourceCreatedAt - a.sourceCreatedAt ||
+      a.hostId.localeCompare(b.hostId) ||
+      a.threadId.localeCompare(b.threadId)
+  );
+  return {
+    ...bootstrap,
+    catalogSnapshot: {
+      ...snapshot,
+      isComplete: false,
+      revision: (Number.isFinite(snapshot.revision) ? snapshot.revision : 0) + 1,
+      hosts,
+      entries: sortedEntries.filter(
+        (entry, index) => index < SIDEBAR_BOOTSTRAP_RECENT_LIMIT || pinnedThreadIds.has(entry.threadId)
+      ),
+    },
+  };
+}
+
+function evictSidebarCatalogFromOfficialMessage(bootstrap, channel, args) {
+  if (channel !== MESSAGE_FOR_VIEW_CHANNEL) return bootstrap;
+  const payload = payloadFromArgs(args);
+  if (!payload || typeof payload !== "object") return bootstrap;
+  const method = String(payload.method || "");
+  const isEviction =
+    (payload.type === "mcp-notification" && (method === "thread/archived" || method === "thread/deleted")) ||
+    (payload.type === "ipc-broadcast" && method === "thread-archived");
+  if (!isEviction) return bootstrap;
+  const params = payload.params && typeof payload.params === "object" ? payload.params : {};
+  const threadId =
+    (typeof params.threadId === "string" && params.threadId) ||
+    (typeof params.conversationId === "string" && params.conversationId) ||
+    (typeof params.thread?.id === "string" && params.thread.id) ||
+    "";
+  if (!threadId) return bootstrap;
+  const hostId =
+    (typeof payload.hostId === "string" && payload.hostId) ||
+    (typeof params.hostId === "string" && params.hostId) ||
+    "";
+  const snapshot = bootstrap?.catalogSnapshot;
+  if (!snapshot || !Array.isArray(snapshot.entries)) return bootstrap;
+  const entries = snapshot.entries.filter((entry) => {
+    const entryThreadId = entry?.threadId || entry?.conversationId;
+    return entryThreadId !== threadId || (hostId && entry?.hostId !== hostId);
+  });
+  if (entries.length === snapshot.entries.length) return bootstrap;
+  return {
+    ...bootstrap,
+    catalogSnapshot: {
+      ...snapshot,
+      revision: (Number.isFinite(snapshot.revision) ? snapshot.revision : 0) + 1,
+      entries,
+    },
+  };
+}
+
+function evictSidebarCatalogForOfficialMessage(channel, args) {
+  const next = evictSidebarCatalogFromOfficialMessage(lastInitialSidebarBootstrap, channel, args);
+  if (next === lastInitialSidebarBootstrap) return false;
+  lastInitialSidebarBootstrap = next;
+  officialLiveObserver.observeSidebarBootstrap(next);
+  transcriptStatusObserver.observeSidebarBootstrap(next);
+  return true;
+}
+
+function observeLiveThreadsFromAppServerResponse(
+  channel,
+  payload,
+  requestSummary,
+  observer = officialLiveObserver,
+  statusObserver = observer === officialLiveObserver ? transcriptStatusObserver : null
+) {
+  if (!isStructuredThreadListResponse(channel, payload, requestSummary)) return 0;
+  const hostId = typeof payload.hostId === "string" && payload.hostId ? payload.hostId : "local";
+  return observeThreadListResult(payload.message.result.data, hostId, observer, statusObserver);
+}
+
+function isStructuredThreadListResponse(channel, payload, requestSummary) {
+  return (
+    channel === MESSAGE_FOR_VIEW_CHANNEL &&
+    requestSummary?.requestMethod === "thread/list" &&
+    payload?.type === "mcp-response" &&
+    Array.isArray(payload?.message?.result?.data)
+  );
+}
+
+function observeThreadListResult(threads, hostId = "local", observer = officialLiveObserver, statusObserver = null) {
+  if (!lastInitialSidebarBootstrap) {
+    lastInitialSidebarBootstrap = {
+      catalogSnapshot: { revision: 0, isComplete: false, hosts: [], entries: [] },
+      globalStateEntries: [],
+    };
+  }
+  lastInitialSidebarBootstrap = mergeThreadListIntoSidebarBootstrap(
+    lastInitialSidebarBootstrap,
+    hostId,
+    threads
+  );
+  statusObserver?.observeSidebarBootstrap?.(lastInitialSidebarBootstrap);
+  if (typeof observer.observeSidebarBootstrap === "function") {
+    return observer.observeSidebarBootstrap(lastInitialSidebarBootstrap);
+  }
+  let observed = 0;
+  for (const thread of threads) {
+    if (typeof thread?.id !== "string" || !thread.id) continue;
+    if (observer.observeThread(thread.id, hostId)) observed += 1;
+  }
+  return observed;
+}
+
+function createAppHostThreadListTracker(onThreadList = observeThreadListResult) {
+  const pendingThreadLists = new Set();
+  const requestKey = (id) =>
+    typeof id === "string" || typeof id === "number" ? `${typeof id}:${String(id)}` : "";
+
+  return {
+    observeRequest(data) {
+      const message = parseJsonLike(data);
+      const key = requestKey(message?.id);
+      if (!key || message?.method !== "thread/list") return false;
+      pendingThreadLists.add(key);
+      return true;
+    },
+    observeResponse(data) {
+      const message = parseJsonLike(data);
+      const key = requestKey(message?.id);
+      if (!key || !pendingThreadLists.delete(key) || !Array.isArray(message?.result?.data)) return null;
+      return onThreadList(message.result.data, "local") || 0;
+    },
+  };
+}
+
+function authoritativeThreadListResponse(data, statusObserver) {
+  if (typeof statusObserver?.replayMessages !== "function") return data;
+  const statuses = new Map(
+    statusObserver.replayMessages().flatMap((message) => {
+      const params = message?.payload?.params;
+      return typeof params?.threadId === "string" && params.status
+        ? [[params.threadId, params.status]]
+        : [];
+    })
+  );
+  const message = parseJsonLike(data);
+  if (!Array.isArray(message?.result?.data) || statuses.size === 0) return data;
+  return JSON.stringify({
+    ...message,
+    result: {
+      ...message.result,
+      data: message.result.data.map((thread) =>
+        statuses.has(thread?.id) ? { ...thread, status: statuses.get(thread.id) } : thread
+      ),
+    },
+  });
+}
+
+function forwardAppHostResponse(
+  data,
+  tracker,
+  forward,
+  replayStatuses,
+  statusObserver = transcriptStatusObserver
+) {
+  const observed = tracker.observeResponse(data);
+  // app-host 自己的 runtime status 不是 Desktop 的权威状态，不能覆盖 transcript lifecycle。
+  if (parseJsonLike(data)?.method !== "thread/status/changed") {
+    forward(observed === null ? data : authoritativeThreadListResponse(data, statusObserver));
+  }
+  if (observed !== null) replayStatuses();
+  return observed ?? 0;
+}
+
 let threadListEventSyncScheduled = false;
 
 function runThreadListInvalidation(logEvent, details = {}) {
@@ -1620,6 +1963,8 @@ function routeOfficialWebContentsSend(
   const requestId = responseRouteIdFromOutgoing(channel, routedArgs);
   const mappedClientId = requestId ? requestRoutes.get(requestId) : "";
   const requestSummary = requestId ? requestRouteSummaries.get(requestId) : null;
+  const appliedThreadList = isStructuredThreadListResponse(channel, payload, requestSummary);
+  observeLiveThreadsFromAppServerResponse(channel, payload, requestSummary);
   const store = (requestContext && requestContext.getStore && requestContext.getStore()) || {};
   const targetClientId = mappedClientId || (isTargetedOutgoing(channel, payload) ? store.clientId : "");
   const routeBase = {
@@ -1643,6 +1988,7 @@ function routeOfficialWebContentsSend(
     diagnosticSummary: routeBase,
   };
   if (targetClientId && wsHub.sendTo(targetClientId, { channel, payload, args: routedArgs }, wsDiagnosticOptions)) {
+    if (appliedThreadList) scheduleOfficialThreadStatuses(targetClientId);
     if (DEBUG_LOGS && !suppressRouteDiagnostic) {
       // 官方 IPC 定向成功投递会随每个请求回包出现，默认不落盘；DEBUG 时用于确认 requestId/clientId 路由。
       diagnosticLog("official-ipc-route", "send_to_client", { ...routeBase, route: "target" });
@@ -1942,7 +2288,12 @@ function createOfficialAppHostRelay(options = {}) {
       return;
     }
     try {
-      onMessage && onMessage(data);
+      forwardAppHostResponse(
+        data,
+        threadListTracker,
+        (message) => onMessage && onMessage(message),
+        () => scheduleOfficialThreadStatuses(clientId)
+      );
     } catch (error) {
       diagnosticWarn("official-app-host", "forward_to_browser_failed", {
         clientId: shortId(clientId),
@@ -2121,6 +2472,7 @@ async function initialSidebarBootstrapForRenderer() {
     if (effectiveBootstrap) {
       // 只从 Web 首屏侧栏已知条目订阅，避免 observer 读取或跟踪用户不可见的 thread。
       officialLiveObserver.observeSidebarBootstrap(effectiveBootstrap);
+      transcriptStatusObserver.observeSidebarBootstrap(effectiveBootstrap);
     }
     return effectiveBootstrap;
   } catch (error) {
@@ -2166,6 +2518,7 @@ function rejectPendingInternalResponses(error) {
   // 当前没有 gateway 自己发起的官方 IPC 请求；保留出口让 shutdown 路径无需关心内部实现。
   void error;
   officialLiveObserver.stop();
+  transcriptStatusObserver.stop();
 }
 
 function listOfficialIpcChannels() {
@@ -2190,11 +2543,23 @@ module.exports = {
   webConfigScript,
   __test: {
     fileManagerPathFromSpawn,
+    evictSidebarCatalogFromOfficialMessage,
+    mergeThreadListIntoSidebarBootstrap,
+    createTranscriptStatusObserver,
+    createAppHostThreadListTracker,
+    forwardAppHostResponse,
     normalizeInitialSidebarBootstrap,
+    observeLiveThreadsFromAppServerResponse,
     OfficialChunkedMessageReceiver,
+    officialLiveObserverEnvelope,
     officialDesktopIpcSocketPaths,
     isHiddenOfficialAppServerArgs,
     shouldBridgeOfficialWebContents,
+    patchOfficialWebContents,
+    readLatestTranscriptStatus,
+    resolveTranscriptPath,
+    scheduleOfficialThreadStatuses,
+    sendOfficialThreadStatuses,
     shouldInterceptRemoteFileManagerStore,
     threadListInvalidationEnvelope,
     threadListInvalidationForOfficialMessage,
