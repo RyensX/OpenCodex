@@ -1,7 +1,9 @@
 const { EventEmitter } = require("events");
-const Module = require("module");
 const { DEBUG_LOGS } = require("../core/config.cjs");
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
+const {
+  registerOfficialElectronModuleOverride,
+} = require("./official-electron-module-hook.cjs");
 
 const NOTIFICATION_EVENT_TYPE = "opencodex:notification-event";
 const NOTIFICATION_SHOW_TYPE = "opencodex:notification";
@@ -27,8 +29,6 @@ const state = {
 
 const notifications = new Map();
 let publishNotification = null;
-let electronRequireWrapper = null;
-let originalModuleLoad = null;
 
 function nextNotificationId() {
   return `notification-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -97,40 +97,8 @@ function publish(payload) {
   }
 }
 
-function createElectronRequireWrapper(electronModule, NotificationClass) {
-  /**
-   * Electron 的 module.exports 在部分版本里把 Notification 定义成不可重写属性。
-   * 不能直接改原对象；这里创建一个以原 electron 为原型的浅包装对象，只覆盖 Notification。
-   */
-  const wrapper = Object.create(electronModule);
-  Object.defineProperty(wrapper, "Notification", {
-    configurable: true,
-    enumerable: true,
-    writable: true,
-    value: NotificationClass,
-  });
-  wrapper.__opencodexNativeNotification = electronModule.Notification;
-  wrapper.__opencodexOfficialGatewayNotificationPatched = true;
-  return wrapper;
-}
-
-function installElectronRequireHook(electronModule, NotificationClass) {
-  if (state.requireHookInstalled) return true;
-  originalModuleLoad = originalModuleLoad || Module._load;
-  electronRequireWrapper = createElectronRequireWrapper(electronModule, NotificationClass);
-  Module._load = function opencodexNotificationModuleLoad(request, parent, isMain) {
-    const loaded = originalModuleLoad.apply(this, arguments);
-    if (request === "electron" && loaded === electronModule) return electronRequireWrapper;
-    return loaded;
-  };
-  state.requireHookInstalled = true;
-  return true;
-}
-
 function installOfficialNotificationHook(electronModule, options = {}) {
-  if (!electronModule || state.installed || electronModule.__opencodexOfficialGatewayNotificationPatched) {
-    return officialNotificationHookStatus();
-  }
+  if (!electronModule || state.installed) return officialNotificationHookStatus();
 
   const NativeNotification = electronModule.Notification;
   if (typeof NativeNotification !== "function") {
@@ -214,9 +182,21 @@ function installOfficialNotificationHook(electronModule, options = {}) {
 
   GatewayNotification.isSupported = () => true;
   Object.setPrototypeOf(GatewayNotification, NativeNotification);
-  installElectronRequireHook(electronModule, GatewayNotification);
+  const registerElectronOverride =
+    typeof options.registerElectronOverride === "function"
+      ? options.registerElectronOverride
+      : registerOfficialElectronModuleOverride;
+  try {
+    registerElectronOverride(electronModule, "Notification", GatewayNotification);
+  } catch (error) {
+    state.lastError = error instanceof Error ? error.message : String(error);
+    diagnosticWarn("official-notification", "notification_hook_failed", { error: state.lastError });
+    return officialNotificationHookStatus();
+  }
 
+  state.requireHookInstalled = true;
   state.installed = true;
+  state.lastError = null;
   if (DEBUG_LOGS) diagnosticLog("official-notification", "notification_hook_installed", { strategy: "module_load_wrapper" });
   return officialNotificationHookStatus();
 }

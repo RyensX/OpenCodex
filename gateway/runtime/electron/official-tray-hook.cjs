@@ -1,5 +1,8 @@
 const { EventEmitter } = require("events");
 const { diagnosticLog, diagnosticWarn } = require("../core/diagnostics.cjs");
+const {
+  registerOfficialElectronModuleOverride,
+} = require("./official-electron-module-hook.cjs");
 
 const state = {
   installed: false,
@@ -10,29 +13,8 @@ const state = {
   lastError: null,
 };
 
-function assignElectronTray(electronModule, TrayClass) {
-  try {
-    electronModule.Tray = TrayClass;
-  } catch {}
-  if (electronModule.Tray === TrayClass) return true;
-  try {
-    Object.defineProperty(electronModule, "Tray", {
-      configurable: true,
-      enumerable: true,
-      writable: true,
-      value: TrayClass,
-    });
-    return electronModule.Tray === TrayClass;
-  } catch (error) {
-    state.lastError = error instanceof Error ? error.message : String(error);
-    return false;
-  }
-}
-
-function installOfficialTrayHook(electronModule) {
-  if (!electronModule || state.installed || electronModule.__opencodexOfficialGatewayTrayPatched) {
-    return hiddenTrayHookStatus();
-  }
+function installOfficialTrayHook(electronModule, options = {}) {
+  if (!electronModule || state.installed) return hiddenTrayHookStatus();
 
   const NativeTray = electronModule.Tray;
   if (typeof NativeTray !== "function") {
@@ -67,6 +49,7 @@ function installOfficialTrayHook(electronModule) {
     destroy() {
       if (this.destroyed) return;
       this.destroyed = true;
+      this.emit("destroyed");
       this.removeAllListeners();
       state.destroyedCount += 1;
       state.lastDestroyedAt = new Date().toISOString();
@@ -77,6 +60,19 @@ function installOfficialTrayHook(electronModule) {
 
     isDestroyed() {
       return this.destroyed;
+    }
+
+    isReady() {
+      return !this.destroyed;
+    }
+
+    whenReady() {
+      // 隐藏托盘不创建原生资源，因此构造完成后即可视为 ready。
+      return Promise.resolve();
+    }
+
+    getGUID() {
+      return this.guid || null;
     }
 
     setImage(image) {
@@ -131,16 +127,21 @@ function installOfficialTrayHook(electronModule) {
   }
 
   Object.setPrototypeOf(HiddenTray, NativeTray);
-  electronModule.__opencodexNativeTray = NativeTray;
-  electronModule.__opencodexOfficialGatewayTrayPatched = true;
-
-  if (!assignElectronTray(electronModule, HiddenTray)) {
-    diagnosticWarn("official-tray", "tray_patch_failed", { error: state.lastError || "assign_failed" });
+  const registerElectronOverride =
+    typeof options.registerElectronOverride === "function"
+      ? options.registerElectronOverride
+      : registerOfficialElectronModuleOverride;
+  try {
+    registerElectronOverride(electronModule, "Tray", HiddenTray);
+  } catch (error) {
+    state.lastError = error instanceof Error ? error.message : String(error);
+    diagnosticWarn("official-tray", "tray_patch_failed", { error: state.lastError });
     return hiddenTrayHookStatus();
   }
 
   state.installed = true;
-  diagnosticLog("official-tray", "tray_hook_installed");
+  state.lastError = null;
+  diagnosticLog("official-tray", "tray_hook_installed", { strategy: "module_load_wrapper" });
   return hiddenTrayHookStatus();
 }
 

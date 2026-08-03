@@ -36,6 +36,9 @@ const {
   installOfficialNotificationHook,
   officialNotificationHookStatus,
 } = require("../electron/official-notification-hook.cjs");
+const {
+  officialElectronModuleHookStatus,
+} = require("../electron/official-electron-module-hook.cjs");
 const { hiddenTrayHookStatus, installOfficialTrayHook } = require("../electron/official-tray-hook.cjs");
 const { createOfficialLiveObserver } = require("./official-live-observer.cjs");
 
@@ -2065,6 +2068,7 @@ function buildGatewayStatus() {
     officialBundle: officialBundleStatus(),
     officialIpc: officialIpcStatus(),
     officialAppServer: appServerSpawnHookStatus(),
+    officialElectronModule: officialElectronModuleHookStatus(),
     officialNotification: officialNotificationHookStatus(),
     officialTray: hiddenTrayHookStatus(),
     i18n: getI18nSnapshot(),
