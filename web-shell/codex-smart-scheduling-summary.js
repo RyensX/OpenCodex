@@ -34,6 +34,10 @@
     model: messages["plugin.smartModelRouter.summary.model"] || (isEnglish ? "Model" : "模型"),
     effort:
       messages["plugin.smartModelRouter.summary.effort"] || (isEnglish ? "Reasoning effort" : "推理强度"),
+    status: messages["plugin.smartModelRouter.summary.status"] || (isEnglish ? "Routing status" : "调度状态"),
+    fallback:
+      messages["plugin.smartModelRouter.summary.fallback"] ||
+      (isEnglish ? "failure" : "失败回退"),
     determining:
       messages["plugin.smartModelRouter.summary.determining"] || (isEnglish ? "Determining…" : "正在判断…"),
   };
@@ -379,7 +383,7 @@
     const content = document.createElement("div");
     content.className = "relative z-0 mt-0.5 overflow-hidden";
     const items = document.createElement("div");
-    items.className = "flex flex-col gap-0.5 px-3.5";
+    items.className = "opencodex-smart-scheduling-summary-items flex flex-col gap-0.5 px-3.5";
     items.append(
       createItem(copy.model, "opencodex-smart-scheduling-summary-model"),
       createItem(copy.effort, "opencodex-smart-scheduling-summary-effort")
@@ -410,8 +414,22 @@
       createSection();
     const model = section.querySelector(".opencodex-smart-scheduling-summary-model");
     const effort = section.querySelector(".opencodex-smart-scheduling-summary-effort");
+    const items = section.querySelector(".opencodex-smart-scheduling-summary-items");
+    const fallbackItem = section.querySelector('[data-opencodex-smart-scheduling-fallback-item="true"]');
     if (model && model.textContent !== route.model) model.textContent = route.model;
     if (effort && effort.textContent !== route.effort) effort.textContent = route.effort;
+    if (route.fallback === true) {
+      // 失败回退是本轮分类的结果，只有明确失败时才添加状态行，成功时不占用摘要空间。
+      const item = fallbackItem || createItem(copy.status, "opencodex-smart-scheduling-summary-fallback");
+      const value = item.querySelector(".opencodex-smart-scheduling-summary-fallback");
+      if (value && value.textContent !== copy.fallback) value.textContent = copy.fallback;
+      if (!fallbackItem) {
+        item.setAttribute("data-opencodex-smart-scheduling-fallback-item", "true");
+        if (items) items.appendChild(item);
+      }
+    } else if (fallbackItem) {
+      fallbackItem.remove();
+    }
     const tooltip = `${copy.model}: ${route.model}\n${copy.effort}: ${route.effort}`;
     if (section.title !== tooltip) section.title = tooltip;
     if (!section.isConnected) container.prepend(section);

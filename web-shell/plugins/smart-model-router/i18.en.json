@@ -29,6 +29,8 @@
   "plugin.smartModelRouter.summary.title": "Smart scheduling",
   "plugin.smartModelRouter.summary.model": "Model",
   "plugin.smartModelRouter.summary.effort": "Reasoning effort",
+  "plugin.smartModelRouter.summary.status": "Routing status",
+  "plugin.smartModelRouter.summary.fallback": "failure",
   "plugin.smartModelRouter.summary.determining": "Determining…",
   "plugin.smartModelRouter.health.title": "Feature health",
   "plugin.smartModelRouter.health.checking": "Checking injection status…",

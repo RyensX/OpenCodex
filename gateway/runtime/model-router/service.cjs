@@ -77,7 +77,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       tier: previous.lastTier,
       model: previous.lastModel,
       effort: previous.lastEffort,
-      fallback: false,
+      fallback: previous.lastFallback === true,
     };
   }
 

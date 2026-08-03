@@ -233,13 +233,14 @@ test("auto state survives restart and clear keeps the last concrete route", (t) 
   const first = createAutoStateStore({ filePath });
   first.setDefaultAuto(true, { model: "spark", effort: "low" });
   first.setThreadAuto("thread-1", true, { model: "terra", effort: "high" });
-  first.recordRoute("thread-1", { tier: "complex", model: "terra", effort: "high" });
+  first.recordRoute("thread-1", { tier: "complex", model: "terra", effort: "high", fallback: true });
   first.recordStatus("thread-1", "failed");
 
   const second = createAutoStateStore({ filePath });
   assert.equal(second.isDefaultAuto(), true);
   assert.equal(second.isThreadAuto("thread-1"), true);
   assert.equal(second.threadState("thread-1").lastTier, "complex");
+  assert.equal(second.threadState("thread-1").lastFallback, true);
   second.clearAllAuto();
   assert.equal(second.isDefaultAuto(), false);
   assert.equal(second.isThreadAuto("thread-1"), false);

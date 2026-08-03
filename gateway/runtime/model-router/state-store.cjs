@@ -18,6 +18,7 @@ function normalizeRouteState(value) {
     lastModel: typeof source.lastModel === "string" ? source.lastModel : "",
     lastEffort: typeof source.lastEffort === "string" ? source.lastEffort : "",
     lastTier: typeof source.lastTier === "string" ? source.lastTier : "",
+    lastFallback: source.lastFallback === true,
     lastStatus: typeof source.lastStatus === "string" ? source.lastStatus : "",
     updatedAt: Number.isFinite(Number(source.updatedAt)) ? Number(source.updatedAt) : 0,
   };
@@ -121,6 +122,7 @@ function createAutoStateStore({ filePath }) {
         lastTier: String(route?.tier || ""),
         lastModel: String(route?.model || ""),
         lastEffort: String(route?.effort || ""),
+        lastFallback: route?.fallback === true,
       });
     },
     recordStatus(threadId, status) {

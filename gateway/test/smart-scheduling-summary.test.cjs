@@ -342,6 +342,9 @@ function createHarness() {
         model: document.querySelector(".opencodex-smart-scheduling-summary-model")?.textContent || "",
       };
     },
+    fallbackSummaryValue() {
+      return document.querySelector(".opencodex-smart-scheduling-summary-fallback")?.textContent || "";
+    },
     summaryVisible() {
       return !!document.querySelector(SUMMARY_SELECTOR);
     },
@@ -388,12 +391,42 @@ test("smart scheduling summary mounts in pinned and overlay panels and remounts 
     const root = harness.mountSummary(mode);
     assert.equal(harness.summaryVisible(), true, `${mode} panel should contain the custom section`);
     assert.deepEqual(harness.summaryValues(), { effort: "high", model: "Luna" });
+    assert.equal(harness.fallbackSummaryValue(), "");
 
     harness.unmountSummary(root);
     assert.equal(harness.summaryVisible(), false);
     harness.mountSummary(mode);
     assert.equal(harness.summaryVisible(), true, `${mode} panel should remount the custom section`);
   }
+});
+
+test("smart scheduling summary only shows the fallback status for failed classification", async () => {
+  const harness = createHarness();
+  await harness.ready();
+  harness.sendViewMessage({ type: "navigate-to-route", path: "/local/thread-fallback" });
+  harness.handleRouteEvent({ threadId: "thread-fallback", status: "selected" });
+  await resolveRoute(harness, "thread-fallback", {
+    displayName: "Spark",
+    effort: "low",
+    model: "spark",
+    fallback: false,
+  });
+  harness.mountSummary("pinned");
+  assert.equal(harness.fallbackSummaryValue(), "");
+
+  harness.handleRouteEvent({
+    threadId: "thread-fallback",
+    status: "selected",
+    route: { displayName: "Spark", effort: "low", model: "spark", fallback: true },
+  });
+  assert.equal(harness.fallbackSummaryValue(), "失败回退");
+
+  harness.handleRouteEvent({
+    threadId: "thread-fallback",
+    status: "selected",
+    route: { displayName: "Luna", effort: "high", model: "luna", fallback: false },
+  });
+  assert.equal(harness.fallbackSummaryValue(), "");
 });
 
 test("root-routed new Auto task renders directly in an otherwise empty official overlay", async () => {

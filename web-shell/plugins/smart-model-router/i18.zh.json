@@ -29,6 +29,8 @@
   "plugin.smartModelRouter.summary.title": "智能调度",
   "plugin.smartModelRouter.summary.model": "模型",
   "plugin.smartModelRouter.summary.effort": "推理强度",
+  "plugin.smartModelRouter.summary.status": "调度状态",
+  "plugin.smartModelRouter.summary.fallback": "失败回退",
   "plugin.smartModelRouter.summary.determining": "正在判断…",
   "plugin.smartModelRouter.health.title": "功能健康",
   "plugin.smartModelRouter.health.checking": "正在检查注入状态…",
