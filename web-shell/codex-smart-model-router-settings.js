@@ -25,91 +25,7 @@
     "py-[var(--padding-row-y)] text-sm group hover:bg-token-list-hover-background",
     "focus:bg-token-list-hover-background cursor-interaction flex flex-col",
   ].join(" ");
-  const copy = {
-    "zh-CN": {
-      title: "智能调度",
-      navLabel: "智能调度",
-      description: "配置分类器、失败回退和调度档位；内置档位可启停并调整模型和推理强度，自定义档位可添加、删除和调整。",
-      disabled: "智能调度当前已关闭。可在 OpenCodex 登录页的“设置 → 插件”中开启。",
-      loading: "正在读取智能调度配置…",
-      missing: "未发现智能调度配置。",
-      unavailable: "当前账号暂时不可用，实际路由时会自动回退。",
-      unavailableSuffix: "（暂不可用）",
-      saved: "已保存",
-      conflict: "配置已被其他页面修改，已加载最新版本，请重试。",
-      failed: "保存失败",
-      tiersTitle: "档位",
-      tiersDescription: "档位按能力从低到高排列；内置档位可调整模型和推理强度，只有已启用档位会参与分类。",
-      addTier: "添加档位",
-      builtinTier: "内置",
-      tierEnabled: "启用",
-      tierName: "名称",
-      tierPrompt: "分类提示词",
-      tierModel: "模型",
-      tierEffort: "推理强度",
-      moveTierUp: "上移",
-      moveTierDown: "下移",
-      deleteTier: "删除",
-      deleteTierConfirm: "确定删除这个自定义档位吗？",
-      newTierName: "自定义档位",
-      newTierPrompt: "描述什么任务应当选择此档位。",
-      noEnabledTiers: "当前没有启用档位，Auto 将直接使用失败回退。",
-      groups: {
-        display: "显示",
-        classifier: "分类器",
-        economy: "经济",
-        balanced: "均衡",
-        complex: "复杂",
-        frontier: "前沿",
-        fallback: "失败回退",
-      },
-    },
-    "en-US": {
-      title: "Smart scheduling",
-      navLabel: "Smart scheduling",
-      description: "Configure the classifier, fallback, and scheduling tiers. Built-in tiers allow model and reasoning effort changes; custom tiers remain fully editable.",
-      disabled: "Smart scheduling is off. Enable it from Settings → Plugins on the OpenCodex sign-in page.",
-      loading: "Loading smart scheduling configuration…",
-      missing: "Smart scheduling configuration was not found.",
-      unavailable: "Temporarily unavailable for this account; routing will fall back automatically.",
-      unavailableSuffix: " (unavailable)",
-      saved: "Saved",
-      conflict: "Another page changed this configuration. The latest revision was loaded; please retry.",
-      failed: "Could not save",
-      tiersTitle: "Tiers",
-      tiersDescription: "Tiers are ordered from lowest to highest capability. Built-ins allow model and reasoning effort changes, and only enabled tiers participate in classification.",
-      addTier: "Add tier",
-      builtinTier: "Built in",
-      tierEnabled: "Enabled",
-      tierName: "Name",
-      tierPrompt: "Classification prompt",
-      tierModel: "Model",
-      tierEffort: "Reasoning effort",
-      moveTierUp: "Move up",
-      moveTierDown: "Move down",
-      deleteTier: "Delete",
-      deleteTierConfirm: "Delete this custom tier?",
-      newTierName: "Custom tier",
-      newTierPrompt: "Describe which tasks should select this tier.",
-      noEnabledTiers: "No tiers are enabled. Auto will use the fallback route directly.",
-      groups: {
-        display: "Display",
-        classifier: "Classifier",
-        economy: "Economy",
-        balanced: "Balanced",
-        complex: "Complex",
-        frontier: "Frontier",
-        fallback: "Fallback",
-      },
-    },
-  };
-  const locale = String(w.__CODEX_WEB_CONFIG__?.locale || document.documentElement.lang || "zh-CN")
-    .toLowerCase()
-    .startsWith("en")
-    ? "en-US"
-    : "zh-CN";
   const messages = w.__CODEX_WEB_CONFIG__?.messages || {};
-  const fallbackCopy = copy[locale];
   let snapshot = { revision: 0, plugins: [] };
   let models = [];
   let active = false;
@@ -122,47 +38,47 @@
   let activeChoicePopover = null;
   let updateQueue = Promise.resolve();
 
-  function localized(key, fallback) {
+  function localized(key) {
+    return (key && typeof messages[key] === "string" && messages[key]) || key || "";
+  }
+
+  function configuredText(key, fallback) {
     return (key && typeof messages[key] === "string" && messages[key]) || fallback || key || "";
   }
 
-  // 页面自身的标题、说明和状态文案也从插件语言包读取；内置文案只用于资源缺失时兜底。
+  // 设置页的固定文案统一读取插件语言包，避免语言包和脚本各维护一份文案。
   const c = {
-    ...fallbackCopy,
-    title: localized("plugin.smartModelRouter.label", fallbackCopy.title),
-    navLabel: localized("plugin.smartModelRouter.label", fallbackCopy.navLabel),
-    description: localized("plugin.smartModelRouter.settings.description", fallbackCopy.description),
-    disabled: localized("plugin.smartModelRouter.settings.disabled", fallbackCopy.disabled),
-    loading: localized("plugin.smartModelRouter.settings.loading", fallbackCopy.loading),
-    missing: localized("plugin.smartModelRouter.settings.missing", fallbackCopy.missing),
-    unavailable: localized("plugin.smartModelRouter.settings.unavailable", fallbackCopy.unavailable),
-    unavailableSuffix: localized(
-      "plugin.smartModelRouter.settings.unavailableSuffix",
-      fallbackCopy.unavailableSuffix
-    ),
-    saved: localized("plugin.smartModelRouter.settings.saved", fallbackCopy.saved),
-    conflict: localized("plugin.smartModelRouter.settings.conflict", fallbackCopy.conflict),
-    failed: localized("plugin.smartModelRouter.settings.failed", fallbackCopy.failed),
-    tiersTitle: localized("plugin.smartModelRouter.tiers.title", fallbackCopy.tiersTitle),
-    tiersDescription: localized("plugin.smartModelRouter.tiers.description", fallbackCopy.tiersDescription),
-    addTier: localized("plugin.smartModelRouter.tiers.add", fallbackCopy.addTier),
-    builtinTier: localized("plugin.smartModelRouter.tiers.builtin", fallbackCopy.builtinTier),
-    tierEnabled: localized("plugin.smartModelRouter.tier.enabled", fallbackCopy.tierEnabled),
-    tierName: localized("plugin.smartModelRouter.tier.name", fallbackCopy.tierName),
-    tierPrompt: localized("plugin.smartModelRouter.tier.prompt", fallbackCopy.tierPrompt),
-    tierModel: localized("plugin.smartModelRouter.tier.model", fallbackCopy.tierModel),
-    tierEffort: localized("plugin.smartModelRouter.tier.effort", fallbackCopy.tierEffort),
-    moveTierUp: localized("plugin.smartModelRouter.tier.moveUp", fallbackCopy.moveTierUp),
-    moveTierDown: localized("plugin.smartModelRouter.tier.moveDown", fallbackCopy.moveTierDown),
-    deleteTier: localized("plugin.smartModelRouter.tier.delete", fallbackCopy.deleteTier),
-    deleteTierConfirm: localized("plugin.smartModelRouter.tier.deleteConfirm", fallbackCopy.deleteTierConfirm),
-    newTierName: localized("plugin.smartModelRouter.tier.newName", fallbackCopy.newTierName),
-    newTierPrompt: localized("plugin.smartModelRouter.tier.newPrompt", fallbackCopy.newTierPrompt),
-    noEnabledTiers: localized("plugin.smartModelRouter.tiers.noneEnabled", fallbackCopy.noEnabledTiers),
+    title: localized("plugin.smartModelRouter.label"),
+    navLabel: localized("plugin.smartModelRouter.label"),
+    description: localized("plugin.smartModelRouter.settings.description"),
+    disabled: localized("plugin.smartModelRouter.settings.disabled"),
+    loading: localized("plugin.smartModelRouter.settings.loading"),
+    missing: localized("plugin.smartModelRouter.settings.missing"),
+    unavailable: localized("plugin.smartModelRouter.settings.unavailable"),
+    unavailableSuffix: localized("plugin.smartModelRouter.settings.unavailableSuffix"),
+    saved: localized("plugin.smartModelRouter.settings.saved"),
+    conflict: localized("plugin.smartModelRouter.settings.conflict"),
+    failed: localized("plugin.smartModelRouter.settings.failed"),
+    tiersTitle: localized("plugin.smartModelRouter.tiers.title"),
+    tiersDescription: localized("plugin.smartModelRouter.tiers.description"),
+    addTier: localized("plugin.smartModelRouter.tiers.add"),
+    builtinTier: localized("plugin.smartModelRouter.tiers.builtin"),
+    tierEnabled: localized("plugin.smartModelRouter.tier.enabled"),
+    tierName: localized("plugin.smartModelRouter.tier.name"),
+    tierPrompt: localized("plugin.smartModelRouter.tier.prompt"),
+    tierModel: localized("plugin.smartModelRouter.tier.model"),
+    tierEffort: localized("plugin.smartModelRouter.tier.effort"),
+    moveTierUp: localized("plugin.smartModelRouter.tier.moveUp"),
+    moveTierDown: localized("plugin.smartModelRouter.tier.moveDown"),
+    deleteTier: localized("plugin.smartModelRouter.tier.delete"),
+    deleteTierConfirm: localized("plugin.smartModelRouter.tier.deleteConfirm"),
+    newTierName: localized("plugin.smartModelRouter.tier.newName"),
+    newTierPrompt: localized("plugin.smartModelRouter.tier.newPrompt"),
+    noEnabledTiers: localized("plugin.smartModelRouter.tiers.noneEnabled"),
     groups: Object.fromEntries(
       GROUPS.map((group) => [
         group,
-        localized(`plugin.smartModelRouter.group.${group}`, fallbackCopy.groups[group]),
+        localized(`plugin.smartModelRouter.group.${group}`),
       ])
     ),
   };
@@ -448,7 +364,7 @@
     const control = createElement("button", "opencodex-router-setting-control opencodex-router-switch");
     control.type = "button";
     control.setAttribute("role", "switch");
-    control.setAttribute("aria-label", localized(setting.labelKey, setting.label || setting.id));
+    control.setAttribute("aria-label", configuredText(setting.labelKey, setting.label || setting.id));
     control.appendChild(createElement("span", "opencodex-router-switch-thumb"));
     setBooleanControlState(control, configuredValue === true);
     control.addEventListener("click", () => {
@@ -486,7 +402,7 @@
         for (const option of setting.options || []) {
           choices.push({
             value: option.value,
-            label: localized(option.labelKey, option.label || option.value),
+            label: configuredText(option.labelKey, option.label || option.value),
             detail: "",
           });
         }
@@ -503,7 +419,7 @@
       control.setAttribute("aria-haspopup", "menu");
       control.setAttribute("aria-expanded", "false");
       control.dataset.state = "closed";
-      control.setAttribute("aria-label", localized(setting.labelKey, setting.label || setting.id));
+      control.setAttribute("aria-label", configuredText(setting.labelKey, setting.label || setting.id));
       const selectChoice = (choice) => emitChoiceChange(control, setting, choice);
       control.addEventListener("click", () => {
         if (activeChoicePopover?.button === control) {
@@ -548,7 +464,7 @@
   }
 
   function tierDisplayName(tier) {
-    if (tier?.builtin && tier.name === tier.defaultName) return localized(tier.nameKey, tier.name);
+    if (tier?.builtin && tier.name === tier.defaultName) return configuredText(tier.nameKey, tier.name);
     return String(tier?.name || tier?.id || "");
   }
 
@@ -721,9 +637,9 @@
         const row = createElement("div", "opencodex-router-setting-row");
         const settingText = createElement("span", "opencodex-router-setting-text");
         settingText.appendChild(
-          createElement("span", "opencodex-router-setting-label", localized(setting.labelKey, setting.label || setting.id))
+          createElement("span", "opencodex-router-setting-label", configuredText(setting.labelKey, setting.label || setting.id))
         );
-        const settingDescription = localized(setting.descriptionKey, setting.description || "");
+        const settingDescription = configuredText(setting.descriptionKey, setting.description || "");
         if (settingDescription) {
           settingText.appendChild(createElement("span", "opencodex-router-setting-description", settingDescription));
         }

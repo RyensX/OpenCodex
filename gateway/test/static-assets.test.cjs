@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
+const { pluginMessagesForLocale } = require("../runtime/core/plugin-assets.cjs");
 const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
 
 const WEB_SHELL_INDEX = path.resolve(__dirname, "..", "..", "web-shell", "index.html");
@@ -391,6 +392,20 @@ test("smart scheduling settings localize and render dynamic tier controls", () =
   assert.equal(manifest.settings.some((setting) => setting.id === "balancedModel"), false);
   assert.equal(manifest.settings.find((setting) => setting.id === "fallbackModel").labelKey, "plugin.smartModelRouter.setting.model");
   const settingsSource = fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8");
+  // 设置页固定文案必须只来自插件语言包，避免脚本重新引入一套中英文 copy 兜底。
+  assert.doesNotMatch(settingsSource, /\bconst copy\s*=/);
+  assert.doesNotMatch(settingsSource, /\bfallbackCopy\b/);
+  assert.match(settingsSource, /function localized\(key\)/);
+  assert.deepEqual(Object.keys(zh).sort(), Object.keys(en).sort());
+  const sourceMessageKeys = [...settingsSource.matchAll(/localized\("([^"]+)"\)/g)].map((match) => match[1]);
+  const manifestMessageKeys = manifest.settings.flatMap((setting) => [setting.labelKey, setting.descriptionKey]).filter(Boolean);
+  const tierGroupMessageKeys = ["display", "classifier", "economy", "balanced", "complex", "frontier", "fallback"].map(
+    (group) => `plugin.smartModelRouter.group.${group}`
+  );
+  for (const key of [...new Set([...sourceMessageKeys, ...manifestMessageKeys, ...tierGroupMessageKeys])]) {
+    assert.equal(typeof zh[key], "string", `missing Chinese plugin message: ${key}`);
+    assert.equal(typeof en[key], "string", `missing English plugin message: ${key}`);
+  }
   assert.match(settingsSource, /function addTier\(\)/);
   assert.match(settingsSource, /function deleteTier\(tierId\)/);
   // 内置档位的名称和提示词仍只读，但模型与推理强度不再由前端禁用。
@@ -399,6 +414,26 @@ test("smart scheduling settings localize and render dynamic tier controls", () =
   assert.doesNotMatch(settingsSource, /effortControl\.control\.disabled = tier\.builtin === true/);
   assert.match(settingsSource, /if \(!tier\.builtin\) \{/);
   assert.match(settingsSource, /body: JSON\.stringify\(\{ expectedRevision: snapshot\.revision, \.\.\.patch \}\)/);
+});
+
+test("plugin i18n falls back to Chinese when the current locale omits a key", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-plugin-i18n-fallback-test-"));
+  const pluginDir = path.join(root, "only-chinese-plugin");
+  const messageKey = "plugin.onlyChinesePlugin.fallback";
+  fs.mkdirSync(pluginDir);
+  fs.writeFileSync(path.join(pluginDir, "index.js"), "(function () {})();");
+  fs.writeFileSync(path.join(pluginDir, "i18.zh.json"), JSON.stringify({ [messageKey]: "中文默认文案" }));
+
+  const previousRoots = process.env.OPENCODEX_PLUGIN_DIRS;
+  try {
+    // 临时外部插件只提供中文语言包，用来验证英文环境会继承中文默认文案。
+    process.env.OPENCODEX_PLUGIN_DIRS = root;
+    assert.equal(pluginMessagesForLocale("en-US")[messageKey], "中文默认文案");
+  } finally {
+    if (previousRoots === undefined) delete process.env.OPENCODEX_PLUGIN_DIRS;
+    else process.env.OPENCODEX_PLUGIN_DIRS = previousRoots;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("smart scheduling summary follows root-path task context while Auto remains enabled", () => {
