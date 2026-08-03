@@ -357,6 +357,11 @@ test("smart scheduling settings localize and render dynamic tier controls", () =
   assert.equal(en["plugin.smartModelRouter.setting.effort"], "Reasoning effort");
   assert.equal(zh["plugin.smartModelRouter.tiers.add"], "添加档位");
   assert.equal(en["plugin.smartModelRouter.tier.prompt"], "Classification prompt");
+  assert.equal(
+    zh["plugin.smartModelRouter.settings.description"],
+    "智能调度会在模型列表中加入 Auto。选择 Auto 后，系统会根据每轮任务自动选择合适的模型和推理强度，以适应不同使用场景，减少额度消耗和等待时间。"
+  );
+  assert.match(en["plugin.smartModelRouter.settings.description"], /adds Auto to the model list/);
   assert.match(zh["plugin.smartModelRouter.tiers.description"], /内置档位可调整模型和推理强度/);
   assert.equal(zh["plugin.smartModelRouter.tiers.builtin"], "内置");
   // 认证前插件页必须明确说明选择 Auto 后会同时自动选择模型与推理强度。
