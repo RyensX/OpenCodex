@@ -25,10 +25,10 @@ const TASK_TYPES = Object.freeze([
 
 const BUILTIN_ROUTE_DEFAULTS = Object.freeze({
   classifier: Object.freeze({ model: "gpt-5.3-codex-spark", effort: "low" }),
-  economy: Object.freeze({ model: "gpt-5.3-codex-spark", effort: "low" }),
-  balanced: Object.freeze({ model: "gpt-5.6-luna", effort: "medium" }),
-  complex: Object.freeze({ model: "gpt-5.6-terra", effort: "high" }),
-  frontier: Object.freeze({ model: "gpt-5.6-sol", effort: "xhigh" }),
+  economy: Object.freeze({ model: "gpt-5.6-luna", effort: "auto" }),
+  balanced: Object.freeze({ model: "gpt-5.6-luna", effort: "max" }),
+  complex: Object.freeze({ model: "gpt-5.6-sol", effort: "max" }),
+  frontier: Object.freeze({ model: "gpt-5.6-sol", effort: "ultra" }),
   fallback: Object.freeze({ model: "gpt-5.3-codex-spark", effort: "low" }),
 });
 

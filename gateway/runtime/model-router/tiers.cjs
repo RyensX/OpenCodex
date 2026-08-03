@@ -54,7 +54,8 @@ function builtinTierDefinition(tierId) {
     nameKey: `plugin.smartModelRouter.group.${tierId}`,
     prompt: copy.prompt,
     model: route.model,
-    effort: AUTO_REASONING_EFFORT,
+    // 只有经济档位交给分类器动态选择强度，其余内置档位使用固定默认强度。
+    effort: route.effort,
     failureFloor: copy.failureFloor === true,
     defaultModel: route.model,
     defaultEffort: route.effort,
