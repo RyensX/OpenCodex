@@ -521,6 +521,8 @@
           detail: {
             enabled: plugin?.enabled === true,
             showRouteInSummary: plugin?.values?.showRouteInSummary !== false,
+            // 档位名称变更后同步给摘要，确保自定义档位不会继续显示旧名称。
+            tiers: Array.isArray(plugin?.tiers) ? plugin.tiers : undefined,
           },
         })
       );

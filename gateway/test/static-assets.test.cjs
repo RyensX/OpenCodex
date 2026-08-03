@@ -371,7 +371,7 @@ test("smart scheduling settings localize and render dynamic tier controls", () =
   assert.equal(zh["plugin.smartModelRouter.summary.title"], "智能调度");
   assert.equal(zh["plugin.smartModelRouter.summary.model"], "模型");
   assert.equal(zh["plugin.smartModelRouter.summary.effort"], "推理强度");
-  assert.equal(zh["plugin.smartModelRouter.summary.status"], "调度状态");
+  assert.equal(zh["plugin.smartModelRouter.summary.status"], "调度结果");
   assert.equal(zh["plugin.smartModelRouter.summary.fallback"], "失败回退");
   assert.equal(zh["plugin.smartModelRouter.summary.determining"], "正在判断…");
   assert.equal(
@@ -381,7 +381,7 @@ test("smart scheduling settings localize and render dynamic tier controls", () =
   assert.equal(en["plugin.smartModelRouter.summary.title"], "Smart scheduling");
   assert.equal(en["plugin.smartModelRouter.summary.model"], "Model");
   assert.equal(en["plugin.smartModelRouter.summary.effort"], "Reasoning effort");
-  assert.equal(en["plugin.smartModelRouter.summary.status"], "Routing status");
+  assert.equal(en["plugin.smartModelRouter.summary.status"], "Scheduling result");
   assert.equal(en["plugin.smartModelRouter.summary.fallback"], "failure");
   assert.equal(en["plugin.smartModelRouter.summary.determining"], "Determining…");
   assert.equal(zh["plugin.smartModelRouter.health.title"], "功能健康");

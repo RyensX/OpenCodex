@@ -11,7 +11,7 @@
 
 .opencodex-smart-scheduling-summary-model,
 .opencodex-smart-scheduling-summary-effort,
-.opencodex-smart-scheduling-summary-fallback {
+.opencodex-smart-scheduling-summary-result {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

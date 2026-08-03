@@ -155,7 +155,12 @@ function createHarness() {
   document.documentElement.appendChild(body);
 
   const window = {
-    __CODEX_WEB_CONFIG__: { locale: "zh-CN", messages: {} },
+    __CODEX_WEB_CONFIG__: {
+      locale: "zh-CN",
+      messages: {
+        "plugin.smartModelRouter.group.balanced": "均衡",
+      },
+    },
     __OpenCodexSmartModelRouterComposer: { autoSelected: false },
     addEventListener(type, handler) {
       windowListeners.set(type, handler);
@@ -194,6 +199,20 @@ function createHarness() {
                 enabled: true,
                 feature: "smart-model-router",
                 values: { showRouteInSummary: true },
+                tiers: [
+                  {
+                    id: "balanced",
+                    builtin: true,
+                    name: "Balanced",
+                    defaultName: "Balanced",
+                    nameKey: "plugin.smartModelRouter.group.balanced",
+                  },
+                  {
+                    id: "custom-tier",
+                    builtin: false,
+                    name: "自定义档位",
+                  },
+                ],
               },
             ],
           };
@@ -342,8 +361,8 @@ function createHarness() {
         model: document.querySelector(".opencodex-smart-scheduling-summary-model")?.textContent || "",
       };
     },
-    fallbackSummaryValue() {
-      return document.querySelector(".opencodex-smart-scheduling-summary-fallback")?.textContent || "";
+    resultSummaryValue() {
+      return document.querySelector(".opencodex-smart-scheduling-summary-result")?.textContent || "";
     },
     summaryVisible() {
       return !!document.querySelector(SUMMARY_SELECTOR);
@@ -391,7 +410,7 @@ test("smart scheduling summary mounts in pinned and overlay panels and remounts 
     const root = harness.mountSummary(mode);
     assert.equal(harness.summaryVisible(), true, `${mode} panel should contain the custom section`);
     assert.deepEqual(harness.summaryValues(), { effort: "high", model: "Luna" });
-    assert.equal(harness.fallbackSummaryValue(), "");
+    assert.equal(harness.resultSummaryValue(), "正在判断…");
 
     harness.unmountSummary(root);
     assert.equal(harness.summaryVisible(), false);
@@ -400,7 +419,7 @@ test("smart scheduling summary mounts in pinned and overlay panels and remounts 
   }
 });
 
-test("smart scheduling summary only shows the fallback status for failed classification", async () => {
+test("smart scheduling summary shows the selected tier or fallback result", async () => {
   const harness = createHarness();
   await harness.ready();
   harness.sendViewMessage({ type: "navigate-to-route", path: "/local/thread-fallback" });
@@ -409,24 +428,32 @@ test("smart scheduling summary only shows the fallback status for failed classif
     displayName: "Spark",
     effort: "low",
     model: "spark",
+    tier: "balanced",
     fallback: false,
   });
   harness.mountSummary("pinned");
-  assert.equal(harness.fallbackSummaryValue(), "");
+  assert.equal(harness.resultSummaryValue(), "均衡");
 
   harness.handleRouteEvent({
     threadId: "thread-fallback",
     status: "selected",
-    route: { displayName: "Spark", effort: "low", model: "spark", fallback: true },
+    route: { displayName: "Spark", effort: "low", model: "spark", tier: "balanced", fallback: true },
   });
-  assert.equal(harness.fallbackSummaryValue(), "失败回退");
+  assert.equal(harness.resultSummaryValue(), "失败回退");
 
   harness.handleRouteEvent({
     threadId: "thread-fallback",
     status: "selected",
-    route: { displayName: "Luna", effort: "high", model: "luna", fallback: false },
+    route: { displayName: "Luna", effort: "high", model: "luna", tier: "balanced", fallback: false },
   });
-  assert.equal(harness.fallbackSummaryValue(), "");
+  assert.equal(harness.resultSummaryValue(), "均衡");
+
+  harness.handleRouteEvent({
+    threadId: "thread-fallback",
+    status: "selected",
+    route: { displayName: "Luna", effort: "high", model: "luna", tier: "custom-tier", fallback: false },
+  });
+  assert.equal(harness.resultSummaryValue(), "自定义档位");
 });
 
 test("root-routed new Auto task renders directly in an otherwise empty official overlay", async () => {

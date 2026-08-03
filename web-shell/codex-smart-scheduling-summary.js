@@ -34,7 +34,7 @@
     model: messages["plugin.smartModelRouter.summary.model"] || (isEnglish ? "Model" : "模型"),
     effort:
       messages["plugin.smartModelRouter.summary.effort"] || (isEnglish ? "Reasoning effort" : "推理强度"),
-    status: messages["plugin.smartModelRouter.summary.status"] || (isEnglish ? "Routing status" : "调度状态"),
+    status: messages["plugin.smartModelRouter.summary.status"] || (isEnglish ? "Scheduling result" : "调度结果"),
     fallback:
       messages["plugin.smartModelRouter.summary.fallback"] ||
       (isEnglish ? "failure" : "失败回退"),
@@ -42,6 +42,7 @@
       messages["plugin.smartModelRouter.summary.determining"] || (isEnglish ? "Determining…" : "正在判断…"),
   };
   const activeRoutes = new Map();
+  const tierNames = new Map();
   const pendingTurnStarts = new Map();
   const pendingModelSelections = new Map();
   const hydrateSequences = new Map();
@@ -68,6 +69,28 @@
     } catch {
       return raw;
     }
+  }
+
+  function updateTierNames(tiers) {
+    tierNames.clear();
+    for (const tier of Array.isArray(tiers) ? tiers : []) {
+      const tierId = normalizedId(tier?.id);
+      const configuredName = normalizedId(tier?.name);
+      if (!tierId || !configuredName) continue;
+      // 内置档位使用当前语言包名称，自定义档位使用用户配置的名称。
+      const localizedName = tier?.builtin === true ? messages[tier.nameKey] : "";
+      tierNames.set(tierId, normalizedId(localizedName) || configuredName);
+    }
+  }
+
+  function tierDisplayName(tierId) {
+    const normalizedTierId = normalizedId(tierId);
+    if (!normalizedTierId) return "";
+    return (
+      tierNames.get(normalizedTierId) ||
+      normalizedId(messages[`plugin.smartModelRouter.group.${normalizedTierId}`]) ||
+      normalizedTierId
+    );
   }
 
   function resolvedThreadId(value) {
@@ -386,7 +409,8 @@
     items.className = "opencodex-smart-scheduling-summary-items flex flex-col gap-0.5 px-3.5";
     items.append(
       createItem(copy.model, "opencodex-smart-scheduling-summary-model"),
-      createItem(copy.effort, "opencodex-smart-scheduling-summary-effort")
+      createItem(copy.effort, "opencodex-smart-scheduling-summary-effort"),
+      createItem(copy.status, "opencodex-smart-scheduling-summary-result")
     );
     content.appendChild(items);
     section.append(header, content);
@@ -414,23 +438,12 @@
       createSection();
     const model = section.querySelector(".opencodex-smart-scheduling-summary-model");
     const effort = section.querySelector(".opencodex-smart-scheduling-summary-effort");
-    const items = section.querySelector(".opencodex-smart-scheduling-summary-items");
-    const fallbackItem = section.querySelector('[data-opencodex-smart-scheduling-fallback-item="true"]');
+    const result = section.querySelector(".opencodex-smart-scheduling-summary-result");
     if (model && model.textContent !== route.model) model.textContent = route.model;
     if (effort && effort.textContent !== route.effort) effort.textContent = route.effort;
-    if (route.fallback === true) {
-      // 失败回退是本轮分类的结果，只有明确失败时才添加状态行，成功时不占用摘要空间。
-      const item = fallbackItem || createItem(copy.status, "opencodex-smart-scheduling-summary-fallback");
-      const value = item.querySelector(".opencodex-smart-scheduling-summary-fallback");
-      if (value && value.textContent !== copy.fallback) value.textContent = copy.fallback;
-      if (!fallbackItem) {
-        item.setAttribute("data-opencodex-smart-scheduling-fallback-item", "true");
-        if (items) items.appendChild(item);
-      }
-    } else if (fallbackItem) {
-      fallbackItem.remove();
-    }
-    const tooltip = `${copy.model}: ${route.model}\n${copy.effort}: ${route.effort}`;
+    const resultText = route.fallback === true ? copy.fallback : tierDisplayName(route.tier) || copy.determining;
+    if (result && result.textContent !== resultText) result.textContent = resultText;
+    const tooltip = `${copy.model}: ${route.model}\n${copy.effort}: ${route.effort}\n${copy.status}: ${resultText}`;
     if (section.title !== tooltip) section.title = tooltip;
     if (!section.isConnected) container.prepend(section);
   }
@@ -803,6 +816,7 @@
   }
 
   function applyConfiguration(detail) {
+    if (Array.isArray(detail?.tiers)) updateTierNames(detail.tiers);
     pluginEnabled = detail?.enabled === true;
     displayEnabled = detail?.showRouteInSummary !== false;
     if (!pluginEnabled || !displayEnabled) {
@@ -829,6 +843,7 @@
       applyConfiguration({
         enabled: plugin?.enabled === true,
         showRouteInSummary: plugin?.values?.showRouteInSummary !== false,
+        tiers: plugin?.tiers,
       });
       configurationRetryCount = 0;
       if (configurationRetryTimer) {
