@@ -94,6 +94,9 @@
       let markedAppShell = null;
       let largestObservedLayoutHeight = 0;
       let lastDebugState = null;
+      let previousKeyboardVisible = false;
+      let wasAtBottomBeforeFocus = false;
+      let userHasScrolled = false;
       const settleTimers = new Set();
 
       const isEnabled = () => context.plugin.isEnabled();
@@ -148,9 +151,16 @@
         if (document.body) document.body.scrollTop = 0;
       };
 
+      const threadScrollIsAtBottom = () => {
+        const scroller = threadScrollElement();
+        if (!isElement(scroller)) return false;
+        // 官方 thread 使用 flex-col-reverse，底部位置的 scrollTop 接近 0。
+        return Math.abs(Number(scroller.scrollTop || 0)) <= 2;
+      };
+
       const settleThreadScroll = () => {
         const scroller = threadScrollElement();
-        if (!isElement(scroller) || !activeEditableElement()) return;
+        if (!isElement(scroller) || !activeEditableElement()) return false;
         // 官方 thread 使用 flex-col-reverse，scrollTop=0 才是贴底。
         try {
           scroller.scrollTo({ top: 0, behavior: "auto" });
@@ -160,6 +170,7 @@
           } catch {}
         }
         scroller.scrollTop = 0;
+        return true;
       };
 
       const elementDebug = (element) => {
@@ -280,9 +291,10 @@
             box-sizing: border-box !important;
             width: 100vw !important;
             max-width: 100vw !important;
-            height: var(--opencodex-ios-app-height) !important;
-            min-height: var(--opencodex-ios-app-height) !important;
-            max-height: var(--opencodex-ios-app-height) !important;
+            /* html 保留完整布局视口，不能用可视高度裁剪带 offsetTop 的应用壳。 */
+            height: 100% !important;
+            min-height: 100% !important;
+            max-height: none !important;
             overflow: hidden !important;
             overflow-x: hidden !important;
             overscroll-behavior: none !important;
@@ -293,27 +305,39 @@
           }
 
           html[data-opencodex-ios-fix="true"] body {
-            /* iOS 底部地址栏会压缩 visualViewport，这里固定到实际可视高度。 */
-            position: fixed !important;
-            top: var(--opencodex-ios-visual-viewport-offset-top, 0px) !important;
-            right: 0 !important;
-            bottom: auto !important;
-            left: 0 !important;
+            /* body/#root 只提供完整祖先空间，可视几何统一交给最外层 app shell。 */
+            position: static !important;
             box-sizing: border-box !important;
             width: 100% !important;
             max-width: 100vw !important;
-            height: var(--opencodex-ios-app-height) !important;
-            min-height: var(--opencodex-ios-app-height) !important;
-            max-height: var(--opencodex-ios-app-height) !important;
+            height: 100% !important;
+            min-height: 0 !important;
+            max-height: none !important;
             overflow: hidden !important;
             overflow-x: hidden !important;
             overscroll-behavior: none !important;
           }
 
-          html[data-opencodex-ios-fix="true"] #root,
-          html[data-opencodex-ios-fix="true"] [data-opencodex-ios-app-shell="true"] {
-            /* 官方根容器常带 100vh/100dvh，高度必须直接覆盖到 visualViewport。 */
+          html[data-opencodex-ios-fix="true"] #root {
             box-sizing: border-box !important;
+            position: relative !important;
+            width: 100% !important;
+            max-width: 100vw !important;
+            height: 100% !important;
+            min-height: 0 !important;
+            max-height: none !important;
+            overflow: hidden !important;
+            overflow-x: hidden !important;
+          }
+
+          html[data-opencodex-ios-fix="true"] [data-opencodex-ios-app-shell="true"] {
+            /* 只有 app shell 同时消费 visualViewport 的顶部偏移和可视高度。 */
+            box-sizing: border-box !important;
+            position: fixed !important;
+            top: var(--opencodex-ios-visual-viewport-offset-top, 0px) !important;
+            right: 0 !important;
+            bottom: auto !important;
+            left: 0 !important;
             width: 100% !important;
             max-width: 100vw !important;
             height: var(--opencodex-ios-app-height) !important;
@@ -354,6 +378,7 @@
             height: 100% !important;
             max-height: 100% !important;
             overflow-y: auto !important;
+            touch-action: pan-y;
             overscroll-behavior: contain !important;
             scroll-padding-bottom: 0px !important;
             -webkit-overflow-scrolling: touch;
@@ -392,6 +417,7 @@
         root.style.removeProperty("--opencodex-ios-keyboard-inset-bottom");
         clearAppShellMark();
         lastDebugState = null;
+        previousKeyboardVisible = false;
       };
 
       const viewportMetrics = () => {
@@ -451,6 +477,8 @@
         root.style.setProperty("--opencodex-ios-keyboard-inset-bottom", cssPixel(metrics.keyboardInset));
         syncAppShellMark(true);
 
+        const keyboardJustOpened = metrics.keyboardVisible && !previousKeyboardVisible;
+
         lastDebugState = {
           keyboardInset: roundedNumber(metrics.keyboardInset),
           keyboardOpening: metrics.keyboardOpening,
@@ -462,10 +490,14 @@
           visualHeight: roundedNumber(metrics.visualHeight),
         };
 
-        if (metrics.keyboardVisible || metrics.editable) {
+        if (metrics.editable) {
           resetDocumentScroll();
+        }
+        if (keyboardJustOpened && wasAtBottomBeforeFocus && !userHasScrolled) {
+          // 只在键盘首次打开且用户原本贴底时校准一次，流式 DOM 更新不得覆盖用户上滚意图。
           settleThreadScroll();
         }
+        previousKeyboardVisible = metrics.keyboardVisible;
       };
 
       const clearSettleTimers = () => {
@@ -497,13 +529,13 @@
       const observeAppTree = () => {
         if (mutationObserver || !document.body || typeof w.MutationObserver !== "function") return;
         mutationObserver = new w.MutationObserver(() => {
+          // app shell 稳定挂载后忽略流式消息的子树变化，避免每个 token 都触发布局测量。
+          if (isElement(markedAppShell) && markedAppShell !== rootElement() && markedAppShell.isConnected) return;
           if (mutationSettleTimer) w.clearTimeout(mutationSettleTimer);
-          // 官方 renderer 会分批挂载节点，稍后统一定位 app shell，减少重复测量。
-          mutationSettleTimer = w.setTimeout(scheduleViewportUpdate, 50);
+          // DOM 变化只重新定位 app shell，不能在流式输出期间改变任何滚动位置。
+          mutationSettleTimer = w.setTimeout(() => syncAppShellMark(isActive()), 50);
         });
         mutationObserver.observe(document.body, {
-          attributeFilter: ["class", "style"],
-          attributes: true,
           childList: true,
           subtree: true,
         });
@@ -511,6 +543,8 @@
 
       const handleFocusIn = () => {
         if (activeEditableElement()) {
+          wasAtBottomBeforeFocus = threadScrollIsAtBottom();
+          userHasScrolled = false;
           // 键盘动画开始前先进入 keyboard-visible 状态，避免 iOS 自动滚动留下旧布局空白。
           keyboardOpeningUntilMs = Date.now() + KEYBOARD_OPENING_GUARD_MS;
         }
@@ -520,6 +554,22 @@
       const handleFocusOut = () => {
         keyboardOpeningUntilMs = 0;
         scheduleViewportUpdate();
+      };
+
+      const handleThreadScrollIntent = (event) => {
+        if (!isActive() || !activeEditableElement()) return;
+        const scroller = threadScrollElement();
+        const target = event?.target;
+        if (!isElement(scroller) || !target || (target !== scroller && !scroller.contains(target))) return;
+        if (isElement(target) && target.closest(`${EDITABLE_SELECTOR},${COMPOSER_SELECTOR}`)) return;
+        // 手势一旦落在消息区，就停止本次聚焦周期的自动贴底。
+        userHasScrolled = true;
+      };
+
+      const handleThreadScroll = (event) => {
+        if (event?.isTrusted && event.target === threadScrollElement() && activeEditableElement()) {
+          userHasScrolled = true;
+        }
       };
 
       const disposePreference = context.events.on("plugin:enabled-changed", (payload) => {
@@ -534,6 +584,9 @@
       w.visualViewport?.addEventListener("scroll", scheduleViewportUpdate, { passive: true });
       document.addEventListener("focusin", handleFocusIn, true);
       document.addEventListener("focusout", handleFocusOut, true);
+      document.addEventListener("touchstart", handleThreadScrollIntent, { capture: true, passive: true });
+      document.addEventListener("wheel", handleThreadScrollIntent, { capture: true, passive: true });
+      document.addEventListener("scroll", handleThreadScroll, true);
 
       return () => {
         disposePreference();
@@ -547,6 +600,9 @@
         w.visualViewport?.removeEventListener("scroll", scheduleViewportUpdate, { passive: true });
         document.removeEventListener("focusin", handleFocusIn, true);
         document.removeEventListener("focusout", handleFocusOut, true);
+        document.removeEventListener("touchstart", handleThreadScrollIntent, { capture: true, passive: true });
+        document.removeEventListener("wheel", handleThreadScrollIntent, { capture: true, passive: true });
+        document.removeEventListener("scroll", handleThreadScroll, true);
         if (style.parentNode) style.parentNode.removeChild(style);
         if (w[DEBUG_GLOBAL] === debugSnapshot) delete w[DEBUG_GLOBAL];
         clearViewportState();

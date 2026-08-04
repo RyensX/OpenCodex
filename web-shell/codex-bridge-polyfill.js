@@ -212,8 +212,187 @@
     }
   }
 
+  let browserClipboardCapability = null;
+
+  /** 在局域网 HTTP 和受限权限环境中把复制保留在当前浏览器，不转发到宿主机剪贴板。 */
+  function installBrowserClipboard() {
+    const nav = w.navigator;
+    if (!nav || w.__OpenCodexBrowserClipboardInstalled) return;
+
+    const nativeClipboard = nav.clipboard || null;
+    const nativeWriteText =
+      nativeClipboard && typeof nativeClipboard.writeText === "function"
+        ? nativeClipboard.writeText.bind(nativeClipboard)
+        : null;
+    const nativeWrite =
+      nativeClipboard && typeof nativeClipboard.write === "function"
+        ? nativeClipboard.write.bind(nativeClipboard)
+        : null;
+    const nativeReadText =
+      nativeClipboard && typeof nativeClipboard.readText === "function"
+        ? nativeClipboard.readText.bind(nativeClipboard)
+        : null;
+    const nativeRead =
+      nativeClipboard && typeof nativeClipboard.read === "function"
+        ? nativeClipboard.read.bind(nativeClipboard)
+        : null;
+
+    const diagnostics = {
+      secureContext: w.isSecureContext === true,
+      asyncClipboard: !!nativeWriteText,
+      origin: location.origin,
+      installed: false,
+      lastPath: null,
+      lastError: null,
+    };
+    w.__OpenCodexClipboardDiagnostics = diagnostics;
+
+    const recordClipboardPath = (path, error) => {
+      diagnostics.lastPath = path;
+      diagnostics.lastError = error ? (error instanceof Error ? error.message : String(error)) : null;
+      try {
+        clientDiagnostic("clipboard-write", {
+          path,
+          secureContext: diagnostics.secureContext,
+          asyncClipboard: diagnostics.asyncClipboard,
+          errorName: error && error.name ? String(error.name) : "",
+        });
+      } catch {}
+    };
+
+    const legacySelectionCopy = (text) => {
+      if (!document.body || typeof document.execCommand !== "function") return false;
+      const active = document.activeElement;
+      const selection = typeof w.getSelection === "function" ? w.getSelection() : null;
+      const savedRanges = [];
+      if (selection) {
+        for (let index = 0; index < selection.rangeCount; index += 1) {
+          savedRanges.push(selection.getRangeAt(index).cloneRange());
+        }
+      }
+
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.setAttribute("aria-hidden", "true");
+      textarea.style.position = "fixed";
+      textarea.style.top = "0";
+      textarea.style.left = "-9999px";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+
+      let copied = false;
+      try {
+        textarea.focus({ preventScroll: true });
+        textarea.select();
+        textarea.setSelectionRange(0, textarea.value.length);
+        copied = document.execCommand("copy") === true;
+      } catch {}
+      textarea.remove();
+
+      try {
+        selection?.removeAllRanges();
+        for (const range of savedRanges) selection?.addRange(range);
+        active?.focus?.({ preventScroll: true });
+      } catch {}
+      return copied;
+    };
+
+    const showManualCopyDialog = (text) => {
+      // prompt 的文本框在移动浏览器中可长按选择，作为最后一级无权限回退。
+      try {
+        w.prompt(t("web.clipboard.manualCopy"), text);
+      } catch {}
+    };
+
+    const writeText = async (value, options = {}) => {
+      const text = String(value ?? "");
+      let nativeError = null;
+      if (!options.skipNative && diagnostics.secureContext && nativeWriteText) {
+        try {
+          await nativeWriteText(text);
+          recordClipboardPath("async-clipboard", null);
+          return;
+        } catch (error) {
+          nativeError = error;
+        }
+      }
+      if (legacySelectionCopy(text)) {
+        recordClipboardPath("legacy-selection-copy", nativeError);
+        return;
+      }
+      showManualCopyDialog(text);
+      recordClipboardPath("manual-copy-dialog", nativeError);
+    };
+
+    const plainTextFromClipboardItems = async (items) => {
+      for (const item of Array.from(items || [])) {
+        if (!item || typeof item.getType !== "function") continue;
+        const types = Array.from(item.types || []);
+        if (!types.includes("text/plain")) continue;
+        try {
+          const blob = await item.getType("text/plain");
+          if (blob && typeof blob.text === "function") return await blob.text();
+        } catch {}
+      }
+      return null;
+    };
+
+    const writeItems = async (items) => {
+      let nativeError = null;
+      if (nativeWrite) {
+        try {
+          await nativeWrite(items);
+          recordClipboardPath("async-clipboard", null);
+          return;
+        } catch (error) {
+          nativeError = error;
+        }
+      }
+      const plainText = await plainTextFromClipboardItems(items);
+      if (plainText !== null) return writeText(plainText, { skipNative: true });
+      recordClipboardPath("async-clipboard-unsupported", nativeError);
+      throw nativeError || new Error("Clipboard items do not contain text/plain");
+    };
+
+    browserClipboardCapability = Object.freeze({ writeText });
+    w.browserClipboard = browserClipboardCapability;
+
+    const replacement = { writeText };
+    // 安全上下文保留读取和富文本写入能力；HTTP 下故意不暴露 write，让官方 helper 降级到纯文本 writeText。
+    if (diagnostics.secureContext) {
+      if (nativeWrite) replacement.write = writeItems;
+      if (nativeReadText) replacement.readText = (...args) => nativeReadText(...args);
+      if (nativeRead) replacement.read = (...args) => nativeRead(...args);
+    }
+
+    try {
+      Object.defineProperty(nav, "clipboard", {
+        configurable: true,
+        value: replacement,
+      });
+      diagnostics.installed = nav.clipboard === replacement;
+    } catch {
+      try {
+        Object.defineProperty(nativeClipboard, "writeText", {
+          configurable: true,
+          value: writeText,
+        });
+        if (diagnostics.secureContext && nativeWrite) {
+          Object.defineProperty(nativeClipboard, "write", {
+            configurable: true,
+            value: writeItems,
+          });
+        }
+        diagnostics.installed = nativeClipboard?.writeText === writeText;
+      } catch {}
+    }
+    w.__OpenCodexBrowserClipboardInstalled = diagnostics.installed;
+  }
+
   installLocaleOverride();
   installRandomUUIDPolyfill();
+  installBrowserClipboard();
 
   /**
    * Electron 的 <webview> 在浏览器里不存在。
@@ -2476,6 +2655,11 @@
     target.windowType = "electron";
     target.openExternal = (url) => openExternal(url);
     target.setWindowTitle = (title) => setWindowTitle(title);
+    // 兼容官方 preload 的常见剪贴板形态，所有写入均落在当前浏览器。
+    target.clipboard = browserClipboardCapability;
+    target.writeText = (value) => browserClipboardCapability.writeText(value);
+    target.copyText = target.writeText;
+    target.copyToClipboard = target.writeText;
     target.getAccount = () => invoke("account-info");
     target.addAuthStatusCallback = (callback) => {
       if (typeof callback !== "function") return () => {};
@@ -2753,6 +2937,8 @@
         return {
           ipcRenderer: w.electronBridge,
           shell: { openExternal },
+          // Renderer 中遗留的 Electron clipboard 调用同样写入当前浏览器。
+          clipboard: browserClipboardCapability,
           contextBridge: { exposeInMainWorld() {} },
         };
       }

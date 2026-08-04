@@ -68,18 +68,41 @@
       style.textContent = `
         @media (max-width: 820px), (pointer: coarse) {
           html[data-opencodex-mobile-keyboard-optimization="true"]:not([data-opencodex-ios-keyboard-optimization="true"]),
-          html[data-opencodex-mobile-keyboard-optimization="true"]:not([data-opencodex-ios-keyboard-optimization="true"]) body,
-          html[data-opencodex-mobile-keyboard-optimization="true"]:not([data-opencodex-ios-keyboard-optimization="true"]) #root {
-            height: var(--codex-visual-viewport-height, 100dvh) !important;
-            min-height: var(--codex-visual-viewport-height, 100dvh) !important;
-            max-height: var(--codex-visual-viewport-height, 100dvh) !important;
+          html[data-opencodex-mobile-keyboard-optimization="true"]:not([data-opencodex-ios-keyboard-optimization="true"]) body {
+            /* 祖先保持完整布局视口，避免 visualViewport.offsetTop 把底部裁出可滚动范围。 */
+            height: 100% !important;
+            min-height: 0 !important;
+            max-height: none !important;
             overflow: hidden;
+          }
+
+          html[data-opencodex-mobile-keyboard-optimization="true"]:not([data-opencodex-ios-keyboard-optimization="true"]) #root {
+            /* 现代移动浏览器只让应用根节点消费动态视口高度。 */
+            height: 100dvh !important;
+            min-height: 0 !important;
+            max-height: 100dvh !important;
+            overflow: hidden;
+          }
+
+          @supports not (height: 100dvh) {
+            html[data-opencodex-mobile-keyboard-optimization="true"]:not([data-opencodex-ios-keyboard-optimization="true"]) #root {
+              height: var(--codex-visual-viewport-height, 100vh) !important;
+              max-height: var(--codex-visual-viewport-height, 100vh) !important;
+            }
           }
 
           html[data-opencodex-mobile-keyboard-optimization="true"] body {
             width: 100%;
             touch-action: pan-x pan-y;
             overscroll-behavior: none;
+          }
+
+          html[data-opencodex-mobile-keyboard-optimization="true"] .thread-scroll-container {
+            min-height: 0 !important;
+            overflow-y: auto !important;
+            touch-action: pan-y;
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
           }
 
           html[data-opencodex-mobile-keyboard-optimization="true"] input,
@@ -183,12 +206,6 @@
         w.setTimeout(run, 240);
       };
 
-      const preventZoomGesture = (event) => {
-        if (!isEnabled() || !isMobile()) return;
-        if (event.touches && event.touches.length < 2) return;
-        event.preventDefault();
-      };
-
       const rememberManualFocusIntent = (event) => {
         const target = event && event.target;
         if (!target || typeof target.closest !== "function") return;
@@ -237,9 +254,6 @@
       w.visualViewport?.addEventListener("scroll", scheduleViewportUpdate, { passive: true });
       document.addEventListener("focusin", scheduleViewportUpdate, true);
       document.addEventListener("input", scheduleViewportUpdate, true);
-      document.addEventListener("touchmove", preventZoomGesture, { passive: false });
-      document.addEventListener("gesturestart", preventZoomGesture, { passive: false });
-      document.addEventListener("gesturechange", preventZoomGesture, { passive: false });
       document.addEventListener("pointerdown", rememberManualFocusIntent, true);
       document.addEventListener("touchstart", rememberManualFocusIntent, true);
 
@@ -252,9 +266,6 @@
         w.visualViewport?.removeEventListener("scroll", scheduleViewportUpdate, { passive: true });
         document.removeEventListener("focusin", scheduleViewportUpdate, true);
         document.removeEventListener("input", scheduleViewportUpdate, true);
-        document.removeEventListener("touchmove", preventZoomGesture, { passive: false });
-        document.removeEventListener("gesturestart", preventZoomGesture, { passive: false });
-        document.removeEventListener("gesturechange", preventZoomGesture, { passive: false });
         document.removeEventListener("pointerdown", rememberManualFocusIntent, true);
         document.removeEventListener("touchstart", rememberManualFocusIntent, true);
         if (style.parentNode) style.parentNode.removeChild(style);

@@ -83,6 +83,7 @@
   "web.auth.logoutGatewayFailed": "退出认证失败：{error}",
   "web.remoteFile.downloadFile": "下载文件",
   "web.remoteFile.downloadFailed": "无法下载该文件。",
+  "web.clipboard.manualCopy": "浏览器无法自动写入剪贴板，请长按选择并复制以下内容：",
   "web.settings.open": "设置",
   "web.settings.title": "设置",
   "web.settings.close": "关闭设置",
