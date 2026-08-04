@@ -315,7 +315,8 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
 
   classifierText = JSON.stringify({
     route: {
-      tier: "balanced",
+      // 当前只有经济档位使用自动推理强度，缺失 effort 应触发失败回退。
+      tier: "economy",
       confidence: 0.9,
       taskType: "code_generation",
       rationale: "missing automatic effort",
@@ -517,4 +518,202 @@ test("manual selection suppresses delayed route status after classification alre
   });
   assert.equal(routeStatuses.some((event) => event.status === "started"), false);
   assert.equal(routeStatuses.at(-1)?.status, "cleared");
+});
+
+test("classification history count controls hydration, caching, invalidation and retry", async (t) => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-router-history-"));
+  t.after(() => fs.rmSync(runtimeDir, { force: true, recursive: true }));
+  const configStore = createPluginConfigStore({
+    filePath: path.join(runtimeDir, "plugins.json"),
+    manifests: listPluginManifests(),
+  });
+  const service = createSmartModelRouterService({
+    configStore,
+    stateFilePath: path.join(runtimeDir, "router-state.json"),
+    classifierOptions: { timeoutMs: 1_000 },
+  });
+  service.modelCatalog.addModels([
+    model("gpt-5.3-codex-spark", "low", true),
+    model("gpt-5.6-luna", ["low", "max"]),
+    model("gpt-5.6-sol", ["max", "ultra"]),
+  ]);
+  const fake = fakeChild();
+  service.decorateAppServerChild(fake.child);
+  t.after(() => {
+    service.dispose();
+    fake.child.emit("close");
+  });
+
+  const userTurn = (text) => ({
+    status: "completed",
+    items: [{ type: "userMessage", content: [{ type: "text", text }] }],
+  });
+  const serverHistory = new Map([
+    ["history-thread", [5, 4, 3, 2, 1].map((index) => userTurn(`history-${index}`))],
+    ["manual-thread", [2, 1].map((index) => userTurn(`manual-history-${index}`))],
+    ["retry-thread", [userTurn("retry-history-1")]],
+    ["external-thread", [4, 3, 2, 1].map((index) => userTurn(`external-history-${index}`))],
+  ]);
+  const historyRequests = [];
+  const classifierContexts = [];
+  let classifierSequence = 0;
+  let retryReadCount = 0;
+
+  observeLines(fake.serverInput, (message) => {
+    const internal = typeof message.id === "string" && message.id.startsWith("opencodex.router:");
+    if (!internal) return;
+    if (message.method === "thread/turns/list") {
+      const threadId = String(message.params?.threadId || "");
+      historyRequests.push({ threadId, limit: message.params?.limit });
+      if (threadId === "retry-thread" && retryReadCount++ === 0) {
+        fake.serverOutput.write(`${JSON.stringify({ id: message.id, error: { message: "history unavailable" } })}\n`);
+        return;
+      }
+      const data = (serverHistory.get(threadId) || []).slice(0, Number(message.params?.limit || 0));
+      fake.serverOutput.write(`${JSON.stringify({ id: message.id, result: { data, nextCursor: null } })}\n`);
+      return;
+    }
+    if (message.method === "thread/start") {
+      classifierSequence += 1;
+      fake.serverOutput.write(
+        `${JSON.stringify({ id: message.id, result: { thread: { id: `history-classifier-${classifierSequence}`, ephemeral: true } } })}\n`
+      );
+      return;
+    }
+    if (message.method === "turn/start") {
+      const prompt = String(message.params?.input?.[0]?.text || "");
+      classifierContexts.push(JSON.parse(prompt.split("\n\n").at(-1)));
+      const turnId = `history-classifier-turn-${classifierSequence}`;
+      const classification = JSON.stringify({
+        route: {
+          tier: "economy",
+          effort: "low",
+          confidence: 0.95,
+          taskType: "question",
+          rationale: "history test",
+        },
+      });
+      fake.serverOutput.write(
+        `${JSON.stringify({ id: message.id, result: { turn: { id: turnId } } })}\n${JSON.stringify({
+          method: "turn/completed",
+          params: {
+            threadId: message.params.threadId,
+            turn: {
+              id: turnId,
+              status: "completed",
+              items: [{ type: "agentMessage", text: classification }],
+            },
+          },
+        })}\n`
+      );
+      return;
+    }
+    fake.serverOutput.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+  });
+
+  const startTurn = (threadId, id, text, modelId = "auto") =>
+    service.processClientMessage({
+      id,
+      method: "turn/start",
+      params: {
+        threadId,
+        model: modelId,
+        effort: "low",
+        input: [{ type: "text", text, text_elements: [] }],
+      },
+    });
+
+  await startTurn("history-thread", "history-turn-1", "current-1");
+  await startTurn("history-thread", "history-turn-2", "current-2");
+  assert.deepEqual(
+    historyRequests.filter((request) => request.threadId === "history-thread"),
+    [{ threadId: "history-thread", limit: 3 }]
+  );
+  assert.deepEqual(classifierContexts[0].recentUserInputs.map((entry) => entry.text), [
+    "history-3",
+    "history-4",
+    "history-5",
+  ]);
+  // 第二轮命中缓存，并使用第一轮追加后的最近三条历史用户消息。
+  assert.deepEqual(classifierContexts[1].recentUserInputs.map((entry) => entry.text), [
+    "history-4",
+    "history-5",
+    "current-1",
+  ]);
+  assert.equal(classifierContexts[1].current.text, "current-2");
+
+  configStore.update("opencodex.smart-model-router", {
+    expectedRevision: 0,
+    values: { classifierHistoryCount: "5" },
+  });
+  await startTurn("history-thread", "history-turn-3", "current-3");
+  assert.deepEqual(
+    historyRequests.filter((request) => request.threadId === "history-thread"),
+    [
+      { threadId: "history-thread", limit: 3 },
+      { threadId: "history-thread", limit: 5 },
+    ]
+  );
+  assert.deepEqual(classifierContexts[2].recentUserInputs.map((entry) => entry.text), [
+    "history-1",
+    "history-2",
+    "history-3",
+    "history-4",
+    "history-5",
+  ]);
+
+  await startTurn("manual-thread", "manual-turn", "manual-current", "gpt-5.3-codex-spark");
+  await startTurn("manual-thread", "manual-auto-turn", "manual-auto-current");
+  assert.deepEqual(
+    historyRequests.filter((request) => request.threadId === "manual-thread"),
+    [{ threadId: "manual-thread", limit: 5 }]
+  );
+  assert.deepEqual(classifierContexts[3].recentUserInputs.map((entry) => entry.text), [
+    "manual-history-1",
+    "manual-history-2",
+  ]);
+
+  await startTurn("retry-thread", "retry-turn-1", "retry-current-1");
+  await startTurn("retry-thread", "retry-turn-2", "retry-current-2");
+  assert.deepEqual(
+    historyRequests.filter((request) => request.threadId === "retry-thread"),
+    [
+      { threadId: "retry-thread", limit: 5 },
+      { threadId: "retry-thread", limit: 5 },
+    ]
+  );
+  assert.deepEqual(classifierContexts[4].recentUserInputs, []);
+  assert.deepEqual(classifierContexts[5].recentUserInputs.map((entry) => entry.text), ["retry-history-1"]);
+
+  await service.processClientMessage({
+    id: "stale-external-history",
+    method: "thread/turns/list",
+    params: {
+      threadId: "external-thread",
+      cursor: null,
+      limit: 5,
+      sortDirection: "desc",
+      itemsView: "full",
+    },
+  });
+  configStore.update("opencodex.smart-model-router", {
+    expectedRevision: 1,
+    values: { classifierHistoryCount: "4" },
+  });
+  // 配置切换前发起的页面历史响应不能在清理后重新填充旧代次缓存。
+  service.processServerMessage({
+    id: "stale-external-history",
+    result: { data: serverHistory.get("external-thread"), nextCursor: null },
+  });
+  await startTurn("external-thread", "external-auto-turn", "external-current");
+  assert.deepEqual(
+    historyRequests.filter((request) => request.threadId === "external-thread"),
+    [{ threadId: "external-thread", limit: 4 }]
+  );
+  assert.deepEqual(classifierContexts[6].recentUserInputs.map((entry) => entry.text), [
+    "external-history-1",
+    "external-history-2",
+    "external-history-3",
+    "external-history-4",
+  ]);
 });

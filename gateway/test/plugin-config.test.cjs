@@ -61,7 +61,8 @@ test("gateway plugin config validates types, writes atomically and detects revis
   assert.equal(plugin.values.classifierEffort, "low");
   assert.equal(plugin.values.showRouteInSummary, true);
   assert.deepEqual(plugin.tiers.map((tier) => tier.id), ["economy", "balanced", "complex", "frontier"]);
-  assert.equal(plugin.tiers.every((tier) => tier.builtin && tier.enabled && tier.effort === "auto"), true);
+  assert.equal(plugin.tiers.every((tier) => tier.builtin && tier.enabled), true);
+  assert.deepEqual(plugin.tiers.map((tier) => tier.effort), ["auto", "max", "max", "ultra"]);
   assert.equal(plugin.values.fallbackEffort, "auto");
 
   const updated = store.update(plugin.id, {
@@ -70,7 +71,7 @@ test("gateway plugin config validates types, writes atomically and detects revis
   });
   assert.equal(updated.revision, 1);
   assert.equal(store.plugin(plugin.id).tiers.find((tier) => tier.id === "balanced").model, "gpt-5.6-luna");
-  assert.equal(store.plugin(plugin.id).tiers.find((tier) => tier.id === "balanced").effort, "auto");
+  assert.equal(store.plugin(plugin.id).tiers.find((tier) => tier.id === "balanced").effort, "max");
   assert.equal(fs.existsSync(filePath), true);
   assert.equal(fs.readdirSync(path.dirname(filePath)).some((name) => name.endsWith(".tmp")), false);
 
@@ -89,6 +90,58 @@ test("gateway plugin config validates types, writes atomically and detects revis
   assert.equal(customized.revision, 2);
   assert.equal(store.plugin(plugin.id).tiers.find((tier) => tier.id === "balanced").model, "custom-balanced");
   assert.equal(store.plugin(plugin.id).tiers.find((tier) => tier.id === "balanced").effort, "high");
+});
+
+test("smart scheduling history count defaults to three and validates select bounds", (t) => {
+  const filePath = tempFile(t);
+  const manifests = listPluginManifests();
+  const store = createPluginConfigStore({ filePath, manifests });
+  const pluginId = "opencodex.smart-model-router";
+  assert.equal(store.plugin(pluginId).values.classifierHistoryCount, "3");
+
+  const minimum = store.update(pluginId, {
+    expectedRevision: 0,
+    values: { classifierHistoryCount: "1" },
+  });
+  assert.equal(minimum.revision, 1);
+  assert.equal(store.plugin(pluginId).values.classifierHistoryCount, "1");
+
+  const maximum = store.update(pluginId, {
+    expectedRevision: 1,
+    values: { classifierHistoryCount: "20" },
+  });
+  assert.equal(maximum.revision, 2);
+  assert.equal(store.plugin(pluginId).values.classifierHistoryCount, "20");
+  for (const invalidValue of ["0", "21", "invalid"]) {
+    assert.throws(
+      () =>
+        store.update(pluginId, {
+          expectedRevision: 2,
+          values: { classifierHistoryCount: invalidValue },
+        }),
+      /unsupported value/
+    );
+  }
+  assert.equal(createPluginConfigStore({ filePath, manifests }).plugin(pluginId).values.classifierHistoryCount, "20");
+
+  const legacyFilePath = tempFile(t);
+  // 旧版持久化文档没有该字段时，由 manifest 默认值补齐，不需要提升配置 schema。
+  fs.writeFileSync(
+    legacyFilePath,
+    JSON.stringify({
+      schemaVersion: 3,
+      revision: 4,
+      plugins: {
+        [pluginId]: {
+          enabled: true,
+          values: { classifierModel: "gpt-5.3-codex-spark" },
+        },
+      },
+    })
+  );
+  const legacyStore = createPluginConfigStore({ filePath: legacyFilePath, manifests });
+  assert.equal(legacyStore.snapshot().revision, 4);
+  assert.equal(legacyStore.plugin(pluginId).values.classifierHistoryCount, "3");
 });
 
 test("smart scheduling tiers support custom CRUD while protecting built-in structure", (t) => {

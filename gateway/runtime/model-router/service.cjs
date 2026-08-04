@@ -1,7 +1,12 @@
 const { diagnosticLog, diagnosticWarn } = require("../core/diagnostics.cjs");
 const { createClassifier } = require("./classifier.cjs");
 const { createModelCatalog } = require("./catalog.cjs");
-const { createRoutingContext, summarizeUserInput, userInputsFromTurns } = require("./context.cjs");
+const {
+  createRoutingContext,
+  normalizeHistoryUserInputLimit,
+  summarizeUserInput,
+  userInputsFromTurns,
+} = require("./context.cjs");
 const {
   AUTO_REASONING_EFFORT,
   CLASSIFICATION_TIMEOUT_MS,
@@ -30,6 +35,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
   const turnRouteStatus = createTurnRouteStatus();
   const routeStatusListeners = new Set();
   let catalogRefreshPromise = null;
+  let historyCacheGeneration = 0;
 
   function emitRouteStatus(event) {
     for (const listener of Array.from(routeStatusListeners)) {
@@ -42,6 +48,10 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
 
   function pluginConfig() {
     return configStore.plugin(SMART_ROUTER_PLUGIN_ID) || { enabled: false, values: {} };
+  }
+
+  function classificationHistoryLimit(config = pluginConfig()) {
+    return normalizeHistoryUserInputLimit(config?.values?.classifierHistoryCount);
   }
 
   function isEnabled() {
@@ -117,6 +127,11 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
   const stopConfigListener = configStore.onChanged((event) => {
     if (event.id !== SMART_ROUTER_PLUGIN_ID) return;
     if (!event.current.enabled) stateStore.clearAllAuto();
+    if (classificationHistoryLimit(event.previous) !== classificationHistoryLimit(event.current)) {
+      // 全局数量变化后丢弃所有旧尺寸缓存，下一轮按新配置重新读取完整历史。
+      historyCacheGeneration += 1;
+      historyByThread.clear();
+    }
   });
 
   function remainingRouteMs(deadlineAt, cap) {
@@ -159,30 +174,53 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     return catalogRefreshPromise;
   }
 
-  async function recentHistory(threadId, deadlineAt = 0) {
-    if (historyByThread.has(threadId)) return historyByThread.get(threadId);
+  async function recentHistory(threadId, historyLimit, deadlineAt = 0) {
+    const cached = historyByThread.get(threadId);
+    if (
+      cached?.generation === historyCacheGeneration &&
+      cached.limit === historyLimit &&
+      Array.isArray(cached.inputs)
+    ) {
+      return cached.inputs;
+    }
+    if (cached) historyByThread.delete(threadId);
+    const requestGeneration = historyCacheGeneration;
     try {
       const result = await transport.request(
         "thread/turns/list",
-        { threadId, cursor: null, limit: 6, sortDirection: "desc", itemsView: "full" },
+        { threadId, cursor: null, limit: historyLimit, sortDirection: "desc", itemsView: "full" },
         { timeoutMs: deadlineAt ? remainingRouteMs(deadlineAt, 4_000) : 4_000 }
       );
-      // desc 页先倒序为时间正序，再抽取最近六条用户输入。
-      const history = userInputsFromTurns([...(Array.isArray(result?.data) ? result.data : [])].reverse());
-      historyByThread.set(threadId, history);
+      // desc 页先倒序为时间正序，再抽取配置数量的最近用户输入。
+      const history = userInputsFromTurns(
+        [...(Array.isArray(result?.data) ? result.data : [])].reverse(),
+        historyLimit
+      );
+      // 配置可能在请求期间变化；旧请求结果只能服务当前回合，不能污染新尺寸缓存。
+      if (requestGeneration === historyCacheGeneration && classificationHistoryLimit() === historyLimit) {
+        historyByThread.set(threadId, { generation: requestGeneration, limit: historyLimit, inputs: history });
+      }
       return history;
     } catch {
-      historyByThread.set(threadId, []);
+      // 读取失败时不落空缓存；同时保留同一期间由其他完整历史响应成功填充的缓存。
       return [];
     }
   }
 
   function appendUserInput(threadId, input) {
     if (!threadId) return;
-    const history = historyByThread.get(threadId) || [];
-    history.push(summarizeUserInput(input));
-    while (history.length > 6) history.shift();
-    historyByThread.set(threadId, history);
+    const historyLimit = classificationHistoryLimit();
+    const cached = historyByThread.get(threadId);
+    // 未完成服务端历史读取时不创建局部缓存，避免手动回合让后续 Auto 误判缓存已完整。
+    if (
+      cached?.generation !== historyCacheGeneration ||
+      cached.limit !== historyLimit ||
+      !Array.isArray(cached.inputs)
+    ) {
+      return;
+    }
+    cached.inputs.push(summarizeUserInput(input));
+    while (cached.inputs.length > historyLimit) cached.inputs.shift();
   }
 
   function rewriteTurn(message, route) {
@@ -224,12 +262,15 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     let route;
     let errorCategory = "";
     try {
+      const config = pluginConfig();
+      const historyLimit = classificationHistoryLimit(config);
       if (catalog.models().length === 0) await refreshCatalog(deadlineAt);
-      const history = await recentHistory(threadId, deadlineAt);
+      const history = await recentHistory(threadId, historyLimit, deadlineAt);
       const threadState = stateStore.threadState(threadId) || {};
       const context = createRoutingContext({
         input: message.params?.input,
         history,
+        historyLimit,
         lastRoute: {
           tier: threadState.lastTier,
           model: threadState.lastModel,
@@ -238,7 +279,6 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
         usage: usageByThread.get(threadId),
         previousStatus: threadState.lastStatus,
       });
-      const config = pluginConfig();
       const configValues = config.values;
       const tiers = config.tiers;
       const enabledTiers = enabledTierDefinitions(tiers);
@@ -320,10 +360,21 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
 
   async function processClientMessage(original) {
     if (original?.id != null && typeof original.method === "string") {
+      const historyRequest =
+        original.method === "thread/turns/list"
+          ? {
+              cursor: original.params?.cursor ?? null,
+              itemsView: String(original.params?.itemsView || ""),
+              limit: Number(original.params?.limit),
+              sortDirection: String(original.params?.sortDirection || ""),
+            }
+          : null;
       externalRequests.set(requestKey(original.id), {
         method: original.method,
         requestKey: requestKey(original.id),
         threadId: String(original.params?.threadId || ""),
+        historyCacheGeneration,
+        historyRequest,
       });
     }
     const prepared = virtualModel.prepareClientMessage(original);
@@ -377,8 +428,23 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     if (key) externalRequests.delete(key);
     const filtered = filterInternalThreads(original, meta);
     if (meta?.method === "thread/turns/list" && meta.threadId && Array.isArray(filtered?.result?.data)) {
-      const history = userInputsFromTurns([...filtered.result.data].reverse());
-      historyByThread.set(meta.threadId, history);
+      const historyLimit = classificationHistoryLimit();
+      const request = meta.historyRequest;
+      const canHydrateCurrentCache =
+        meta.historyCacheGeneration === historyCacheGeneration &&
+        request?.cursor == null &&
+        request.limit >= historyLimit &&
+        request.sortDirection === "desc" &&
+        request.itemsView === "full";
+      if (canHydrateCurrentCache) {
+        // 仅用完整的最新页填充缓存，分页或旧配置响应不能让后续分类误判缓存已经完备。
+        const history = userInputsFromTurns([...filtered.result.data].reverse(), historyLimit);
+        historyByThread.set(meta.threadId, {
+          generation: historyCacheGeneration,
+          limit: historyLimit,
+          inputs: history,
+        });
+      }
     }
     const withRouteStatus = turnRouteStatus.processServerMessage(filtered, meta);
     const threadId = String(withRouteStatus?.params?.threadId || withRouteStatus?.params?.thread?.id || meta?.threadId || "");

@@ -398,6 +398,13 @@ test("smart scheduling settings localize and render dynamic tier controls", () =
   assert.match(injectionHealthSource, /card\.appendChild\(header\)/);
   assert.match(injectionHealthSource, /root\.appendChild\(card\)/);
   assert.equal(manifest.settings.find((setting) => setting.id === "showRouteInSummary").defaultValue, true);
+  const historyCountSetting = manifest.settings.find((setting) => setting.id === "classifierHistoryCount");
+  assert.equal(historyCountSetting.type, "select");
+  assert.equal(historyCountSetting.defaultValue, "3");
+  assert.deepEqual(historyCountSetting.options, Array.from({ length: 20 }, (_value, index) => String(index + 1)));
+  assert.equal(zh[historyCountSetting.labelKey], "分类参考对话数");
+  assert.match(zh[historyCountSetting.descriptionKey], /不包含当前输入/);
+  assert.match(en[historyCountSetting.descriptionKey], /excluding the current input/);
   assert.equal(manifest.settings.some((setting) => setting.id === "balancedModel"), false);
   assert.equal(manifest.settings.find((setting) => setting.id === "fallbackModel").labelKey, "plugin.smartModelRouter.setting.model");
   const settingsSource = fs.readFileSync(SMART_SCHEDULING_SETTINGS, "utf-8");

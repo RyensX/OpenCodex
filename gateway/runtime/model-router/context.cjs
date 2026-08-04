@@ -1,4 +1,8 @@
-const { HISTORY_USER_INPUT_LIMIT } = require("./constants.cjs");
+const {
+  HISTORY_USER_INPUT_LIMIT,
+  HISTORY_USER_INPUT_LIMIT_MAX,
+  HISTORY_USER_INPUT_LIMIT_MIN,
+} = require("./constants.cjs");
 const { defaultTierDefinitions, enabledTierDefinitions, failureFloorTierId } = require("./tiers.cjs");
 
 const CURRENT_TEXT_LIMIT = 8_000;
@@ -30,6 +34,14 @@ function summarizeUserInput(content, textLimit = HISTORY_TEXT_LIMIT) {
   };
 }
 
+function normalizeHistoryUserInputLimit(value) {
+  const limit = Number(value);
+  // 插件配置使用字符串 select；在核心边界统一转成受控整数，避免损坏配置放大分类上下文。
+  return Number.isSafeInteger(limit) && limit >= HISTORY_USER_INPUT_LIMIT_MIN && limit <= HISTORY_USER_INPUT_LIMIT_MAX
+    ? limit
+    : HISTORY_USER_INPUT_LIMIT;
+}
+
 function userInputsFromTurns(turns, limit = HISTORY_USER_INPUT_LIMIT) {
   const result = [];
   for (const turn of Array.isArray(turns) ? turns : []) {
@@ -38,8 +50,8 @@ function userInputsFromTurns(turns, limit = HISTORY_USER_INPUT_LIMIT) {
       result.push(summarizeUserInput(item.content));
     }
   }
-  // thread/turns/list 常用 desc 返回，统一按调用方传入顺序取最近六条并保持时间顺序。
-  return result.slice(-Math.max(0, limit));
+  // thread/turns/list 常用 desc 返回，统一按调用方传入顺序取配置数量并保持时间顺序。
+  return result.slice(-normalizeHistoryUserInputLimit(limit));
 }
 
 function normalizeUsage(usage) {
@@ -53,10 +65,10 @@ function normalizeUsage(usage) {
   return Object.keys(result).length > 0 ? result : null;
 }
 
-function createRoutingContext({ input, history, lastRoute, usage, previousStatus }) {
+function createRoutingContext({ input, history, historyLimit = HISTORY_USER_INPUT_LIMIT, lastRoute, usage, previousStatus }) {
   return {
     current: summarizeUserInput(input, CURRENT_TEXT_LIMIT),
-    recentUserInputs: (Array.isArray(history) ? history : []).slice(-HISTORY_USER_INPUT_LIMIT),
+    recentUserInputs: (Array.isArray(history) ? history : []).slice(-normalizeHistoryUserInputLimit(historyLimit)),
     previousRoute:
       lastRoute && typeof lastRoute === "object"
         ? {
@@ -117,6 +129,7 @@ module.exports = {
   HISTORY_TEXT_LIMIT,
   buildClassifierPrompt,
   createRoutingContext,
+  normalizeHistoryUserInputLimit,
   normalizeUsage,
   summarizeUserInput,
   trimText,

@@ -54,6 +54,8 @@
   "plugin.smartModelRouter.group.fallback": "失败回退",
   "plugin.smartModelRouter.setting.model": "模型",
   "plugin.smartModelRouter.setting.effort": "推理强度",
+  "plugin.smartModelRouter.setting.classifierHistoryCount": "分类参考对话数",
+  "plugin.smartModelRouter.setting.classifierHistoryCount.description": "每次分类参考的最近历史用户消息数量，不包含当前输入。",
   "plugin.smartModelRouter.setting.showRouteInSummary": "显示调度结果",
   "plugin.smartModelRouter.setting.showRouteInSummary.description": "开启 Auto 后，在任务摘要中持续显示最近一次调度采用的模型和推理强度。"
 }

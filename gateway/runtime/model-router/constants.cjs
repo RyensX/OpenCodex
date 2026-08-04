@@ -6,7 +6,10 @@ const SMART_ROUTER_PLUGIN_ID = "opencodex.smart-model-router";
 const ROUTER_REQUEST_PREFIX = "opencodex.router:";
 const CLASSIFICATION_TIMEOUT_MS = 20_000;
 const CLASSIFICATION_MAX_CONCURRENCY = 2;
-const HISTORY_USER_INPUT_LIMIT = 6;
+// 历史用户消息数量由插件配置覆盖；配置缺失或损坏时统一回退到这里的默认值。
+const HISTORY_USER_INPUT_LIMIT = 3;
+const HISTORY_USER_INPUT_LIMIT_MIN = 1;
+const HISTORY_USER_INPUT_LIMIT_MAX = 20;
 
 const TIER_ORDER = Object.freeze(["economy", "balanced", "complex", "frontier"]);
 const EFFORT_ORDER = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]);
@@ -42,6 +45,8 @@ module.exports = {
   CLASSIFICATION_TIMEOUT_MS,
   EFFORT_ORDER,
   HISTORY_USER_INPUT_LIMIT,
+  HISTORY_USER_INPUT_LIMIT_MAX,
+  HISTORY_USER_INPUT_LIMIT_MIN,
   ROUTER_REQUEST_PREFIX,
   SMART_ROUTER_PLUGIN_ID,
   TASK_TYPES,

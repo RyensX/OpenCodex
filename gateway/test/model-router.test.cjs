@@ -138,7 +138,7 @@ test("resolver honors configured, tier, catalog default and nearest effort order
   assert.equal(automaticClassifier.effort, "high");
 });
 
-test("routing context keeps six recent user inputs, image markers, usage and state", () => {
+test("routing context keeps the configured recent user inputs, image markers, usage and state", () => {
   const turns = Array.from({ length: 8 }, (_value, index) => ({
     items: [
       {
@@ -151,18 +151,22 @@ test("routing context keeps six recent user inputs, image markers, usage and sta
     ],
   }));
   const history = userInputsFromTurns(turns);
-  assert.deepEqual(history.map((entry) => entry.text), ["message-2", "message-3", "message-4", "message-5", "message-6", "message-7"]);
-  assert.equal(history[5].hasImages, true);
+  assert.deepEqual(history.map((entry) => entry.text), ["message-5", "message-6", "message-7"]);
+  assert.equal(history[2].hasImages, true);
+  const expandedHistory = userInputsFromTurns(turns, 5);
+  assert.deepEqual(expandedHistory.map((entry) => entry.text), ["message-3", "message-4", "message-5", "message-6", "message-7"]);
 
   const context = createRoutingContext({
     input: [{ type: "text", text: "current" }, { type: "image", url: "data:image/png" }],
-    history,
+    history: expandedHistory,
+    historyLimit: 3,
     lastRoute: { tier: "balanced", model: "luna", effort: "medium" },
     previousStatus: "failed",
     usage: { total: { inputTokens: 120, outputTokens: 30, totalTokens: 150 } },
   });
   assert.equal(context.current.imageCount, 1);
-  assert.equal(context.recentUserInputs.length, 6);
+  assert.equal(context.current.text, "current");
+  assert.deepEqual(context.recentUserInputs.map((entry) => entry.text), ["message-5", "message-6", "message-7"]);
   assert.equal(context.previousStatus, "failed");
   assert.equal(context.usage.totalTokens, 150);
   assert.equal(summarizeUserInput([{ type: "skill", name: "x" }]).skillCount, 1);
