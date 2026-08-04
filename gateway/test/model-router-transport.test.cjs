@@ -151,6 +151,258 @@ test("client frames classify concurrently while their real stdin order stays sta
   assert.deepEqual(serverMessages.map((message) => message.id), ["first", "second"]);
 });
 
+test("unrelated thread hydration bypasses a pending turn while same-thread control stays ordered", async (t) => {
+  let releaseTurn;
+  const serverMessages = [];
+  const transport = createAppServerTransport({
+    async processClientMessage(message) {
+      if (message.id === "turn-a") await new Promise((resolve) => (releaseTurn = resolve));
+      return message;
+    },
+  });
+  const fake = fakeChild();
+  transport.decorateChild(fake.child);
+  t.after(() => fake.child.emit("close"));
+  lineStream(fake.serverInput, (message) => serverMessages.push(message));
+
+  await Promise.all([
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "turn-a", method: "turn/start", params: { threadId: "thread-a", input: [] } })}\n`
+    ),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "interrupt-a", method: "turn/interrupt", params: { threadId: "thread-a", turnId: "a" } })}\n`
+    ),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "read-b", method: "thread/read", params: { threadId: "thread-b" } })}\n`
+    ),
+  ]);
+
+  await waitFor(() => serverMessages.length === 1);
+  assert.deepEqual(serverMessages.map((message) => message.id), ["read-b"]);
+  releaseTurn();
+  await waitFor(() => serverMessages.length === 3);
+  // A 的控制请求仍在 A 的 turn/start 之后，只有完全独立的 B 被提前发送。
+  assert.deepEqual(serverMessages.map((message) => message.id), ["read-b", "turn-a", "interrupt-a"]);
+});
+
+test("hydration requests for the same thread cannot overtake each other", async (t) => {
+  const releases = new Map();
+  const serverMessages = [];
+  const transport = createAppServerTransport({
+    async processClientMessage(message) {
+      await new Promise((resolve) => releases.set(message.id, resolve));
+      return message;
+    },
+  });
+  const fake = fakeChild();
+  transport.decorateChild(fake.child);
+  t.after(() => fake.child.emit("close"));
+  lineStream(fake.serverInput, (message) => serverMessages.push(message));
+
+  await Promise.all([
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "turn-a", method: "turn/start", params: { threadId: "thread-a", input: [] } })}\n`
+    ),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "read-b", method: "thread/read", params: { threadId: "thread-b" } })}\n`
+    ),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "resume-b", method: "thread/resume", params: { threadId: "thread-b" } })}\n`
+    ),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "goal-b", method: "thread/goal/get", params: { threadId: "thread-b" } })}\n`
+    ),
+  ]);
+  await waitFor(() => releases.size === 4);
+
+  releases.get("goal-b")();
+  releases.get("resume-b")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(serverMessages.length, 0);
+  releases.get("read-b")();
+  await waitFor(() => serverMessages.length === 3);
+  assert.deepEqual(serverMessages.map((message) => message.id), ["read-b", "resume-b", "goal-b"]);
+  releases.get("turn-a")();
+  await waitFor(() => serverMessages.length === 4);
+  assert.deepEqual(serverMessages.map((message) => message.id), ["read-b", "resume-b", "goal-b", "turn-a"]);
+});
+
+test("audited reads and server responses bypass a pending turn but global writes remain barriers", async (t) => {
+  let releaseTurn;
+  const serverMessages = [];
+  const transport = createAppServerTransport({
+    async processClientMessage(message) {
+      if (message.id === "turn-a") await new Promise((resolve) => (releaseTurn = resolve));
+      return message;
+    },
+  });
+  const fake = fakeChild();
+  transport.decorateChild(fake.child);
+  t.after(() => fake.child.emit("close"));
+  lineStream(fake.serverInput, (message) => serverMessages.push(message));
+
+  await Promise.all([
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "turn-a", method: "turn/start", params: { threadId: "thread-a", input: [] } })}\n`
+    ),
+    writeClient(fake.child.stdin, `${JSON.stringify({ id: "list", method: "thread/list", params: {} })}\n`),
+    writeClient(fake.child.stdin, `${JSON.stringify({ id: "auth", method: "getAuthStatus", params: {} })}\n`),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "config-write", method: "config/value/write", params: { keyPath: "model", value: "x" } })}\n`
+    ),
+    writeClient(fake.child.stdin, `${JSON.stringify({ id: "approval", result: { decision: "accept" } })}\n`),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "read-b", method: "thread/read", params: { threadId: "thread-b" } })}\n`
+    ),
+  ]);
+
+  await waitFor(() => serverMessages.length === 3);
+  assert.deepEqual(serverMessages.map((message) => message.id), ["list", "auth", "approval"]);
+  releaseTurn();
+  await waitFor(() => serverMessages.length === 6);
+  assert.deepEqual(serverMessages.map((message) => message.id), [
+    "list",
+    "auth",
+    "approval",
+    "turn-a",
+    "config-write",
+    "read-b",
+  ]);
+});
+
+test("resume by path and unknown methods stay conservative global barriers", async (t) => {
+  let releaseTurn;
+  const serverMessages = [];
+  const transport = createAppServerTransport({
+    async processClientMessage(message) {
+      if (message.id === "turn-a") await new Promise((resolve) => (releaseTurn = resolve));
+      return message;
+    },
+  });
+  const fake = fakeChild();
+  transport.decorateChild(fake.child);
+  t.after(() => fake.child.emit("close"));
+  lineStream(fake.serverInput, (message) => serverMessages.push(message));
+
+  await Promise.all([
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "turn-a", method: "turn/start", params: { threadId: "thread-a", input: [] } })}\n`
+    ),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "resume-b", method: "thread/resume", params: { threadId: "thread-b", path: "/tmp/b" } })}\n`
+    ),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "unknown-c", method: "thread/futureMutation", params: { threadId: "thread-c" } })}\n`
+    ),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "read-d", method: "thread/read", params: { threadId: "thread-d" } })}\n`
+    ),
+  ]);
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(serverMessages.length, 0);
+  releaseTurn();
+  await waitFor(() => serverMessages.length === 4);
+  assert.deepEqual(serverMessages.map((message) => message.id), ["turn-a", "resume-b", "unknown-c", "read-d"]);
+});
+
+test("client stdin final waits for deferred frames after later independent frames bypass", async (t) => {
+  let releaseTurn;
+  let serverEnded = false;
+  const serverMessages = [];
+  const transport = createAppServerTransport({
+    async processClientMessage(message) {
+      if (message.id === "turn-a") await new Promise((resolve) => (releaseTurn = resolve));
+      if (message.id === "drop") return null;
+      return message;
+    },
+  });
+  const fake = fakeChild();
+  transport.decorateChild(fake.child);
+  t.after(() => fake.child.emit("close"));
+  lineStream(fake.serverInput, (message) => serverMessages.push(message));
+  fake.serverInput.on("end", () => {
+    serverEnded = true;
+  });
+
+  await Promise.all([
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "turn-a", method: "turn/start", params: { threadId: "thread-a", input: [] } })}\n`
+    ),
+    writeClient(
+      fake.child.stdin,
+      `${JSON.stringify({ id: "read-b", method: "thread/read", params: { threadId: "thread-b" } })}\n`
+    ),
+    writeClient(fake.child.stdin, `${JSON.stringify({ id: "drop", method: "getAuthStatus", params: {} })}\n`),
+  ]);
+  const clientEnded = new Promise((resolve, reject) => {
+    fake.child.stdin.end((error) => (error ? reject(error) : resolve()));
+  });
+
+  await waitFor(() => serverMessages.some((message) => message.id === "read-b"));
+  assert.equal(serverEnded, false);
+  releaseTurn();
+  await clientEnded;
+  await waitFor(() => serverEnded);
+  assert.deepEqual(serverMessages.map((message) => message.id), ["read-b", "turn-a"]);
+});
+
+test("client input backpressure releases as soon as the pending frame count drops below the cap", async (t) => {
+  const releases = new Map();
+  const serverMessages = [];
+  const transport = createAppServerTransport({
+    async processClientMessage(message) {
+      await new Promise((resolve) => releases.set(message.id, resolve));
+      return message;
+    },
+  });
+  const fake = fakeChild();
+  transport.decorateChild(fake.child);
+  t.after(() => fake.child.emit("close"));
+  lineStream(fake.serverInput, (message) => serverMessages.push(message));
+
+  const frames = Array.from({ length: 64 }, (_, index) =>
+    JSON.stringify({
+      id: `frame-${index}`,
+      method: "turn/start",
+      params: { threadId: "thread-a", input: [] },
+    })
+  ).join("\n");
+  let writeSettled = false;
+  const writePromise = writeClient(fake.child.stdin, `${frames}\n`).then(() => {
+    writeSettled = true;
+  });
+  await waitFor(() => releases.size === 64);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writeSettled, false);
+
+  // 第一帧提交后 Map 实际只剩 63 帧，此时必须及时解除 Writable 背压。
+  releases.get("frame-0")();
+  await writePromise;
+  assert.equal(writeSettled, true);
+  for (let index = 1; index < 64; index += 1) releases.get(`frame-${index}`)();
+  await waitFor(() => serverMessages.length === 64);
+  assert.deepEqual(
+    serverMessages.map((message) => message.id),
+    Array.from({ length: 64 }, (_, index) => `frame-${index}`)
+  );
+});
+
 test("UTF-8 characters survive byte-level chunk splits in both directions", async (t) => {
   const received = [];
   const visible = [];

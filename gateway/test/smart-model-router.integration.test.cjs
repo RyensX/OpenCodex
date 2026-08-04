@@ -430,6 +430,163 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
   );
 });
 
+test("pending Auto classification blocks only requests from the same thread", async (t) => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-router-cross-thread-"));
+  t.after(() => fs.rmSync(runtimeDir, { force: true, recursive: true }));
+  const configStore = createPluginConfigStore({
+    filePath: path.join(runtimeDir, "plugins.json"),
+    manifests: listPluginManifests(),
+  });
+  configStore.update("opencodex.smart-model-router", {
+    expectedRevision: 0,
+    enabled: true,
+  });
+  const service = createSmartModelRouterService({
+    configStore,
+    stateFilePath: path.join(runtimeDir, "router-state.json"),
+    classifierOptions: { timeoutMs: 1_000 },
+  });
+  service.modelCatalog.addModels([
+    model("gpt-5.3-codex-spark", "low", true),
+    model("gpt-5.6-luna", ["medium", "high"]),
+    model("gpt-5.6-terra", "high"),
+    model("gpt-5.6-sol", "xhigh"),
+  ]);
+  service.stateStore.setThreadAuto("thread-a", true, {
+    model: "gpt-5.3-codex-spark",
+    effort: "low",
+  });
+
+  const fake = fakeChild();
+  service.decorateAppServerChild(fake.child);
+  t.after(() => {
+    service.dispose();
+    fake.child.emit("close");
+  });
+  const publicMessages = [];
+  const serverMessages = [];
+  let classifierThreadId = "";
+  let classifierTurnId = "";
+  let resolveClassifierReady;
+  const classifierReady = new Promise((resolve) => {
+    resolveClassifierReady = resolve;
+  });
+  observeLines(fake.child.stdout, (message) => publicMessages.push(message));
+  observeLines(fake.serverInput, (message) => {
+    serverMessages.push(message);
+    const internal = typeof message.id === "string" && message.id.startsWith("opencodex.router:");
+    if (internal && message.method === "thread/turns/list") {
+      fake.serverOutput.write(
+        `${JSON.stringify({ id: message.id, result: { data: [], nextCursor: null, backwardsCursor: null } })}\n`
+      );
+      return;
+    }
+    if (internal && message.method === "thread/start") {
+      classifierThreadId = "classifier-cross-thread";
+      fake.serverOutput.write(
+        `${JSON.stringify({ id: message.id, result: { thread: { id: classifierThreadId, ephemeral: true } } })}\n`
+      );
+      return;
+    }
+    if (internal && message.method === "turn/start") {
+      classifierTurnId = "classifier-cross-thread-turn";
+      fake.serverOutput.write(`${JSON.stringify({ id: message.id, result: { turn: { id: classifierTurnId } } })}\n`);
+      resolveClassifierReady();
+      return;
+    }
+    if (internal) {
+      fake.serverOutput.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+      return;
+    }
+    if (message.method === "thread/list") {
+      // 即使 App Server 返回正在运行的 ephemeral 分类任务，公共响应也必须把它过滤掉。
+      fake.serverOutput.write(
+        `${JSON.stringify({
+          id: message.id,
+          result: {
+            data: [
+              { id: classifierThreadId, ephemeral: true },
+              { id: "thread-b", ephemeral: false },
+            ],
+            nextCursor: null,
+            backwardsCursor: null,
+          },
+        })}\n`
+      );
+      return;
+    }
+    fake.serverOutput.write(`${JSON.stringify({ id: message.id, result: { ok: true } })}\n`);
+  });
+
+  await writeRequest(fake.child.stdin, {
+    id: "turn-a",
+    method: "turn/start",
+    params: {
+      threadId: "thread-a",
+      model: "auto",
+      effort: "medium",
+      input: [{ type: "text", text: "Classify this slowly", text_elements: [] }],
+    },
+  });
+  await classifierReady;
+  await Promise.all([
+    writeRequest(fake.child.stdin, {
+      id: "read-b",
+      method: "thread/read",
+      params: { threadId: "thread-b", includeTurns: false },
+    }),
+    writeRequest(fake.child.stdin, {
+      id: "list",
+      method: "thread/list",
+      params: { cursor: null },
+    }),
+    writeRequest(fake.child.stdin, {
+      id: "interrupt-a",
+      method: "turn/interrupt",
+      params: { threadId: "thread-a", turnId: "turn-a" },
+    }),
+  ]);
+
+  await waitFor(() => serverMessages.some((message) => message.id === "read-b"));
+  const listResponse = await waitFor(() => publicMessages.find((message) => message.id === "list"));
+  assert.deepEqual(listResponse.result.data.map((thread) => thread.id), ["thread-b"]);
+  assert.equal(serverMessages.some((message) => message.id === "turn-a"), false);
+  assert.equal(serverMessages.some((message) => message.id === "interrupt-a"), false);
+
+  const classifierText = JSON.stringify({
+    route: {
+      tier: "balanced",
+      effort: "high",
+      confidence: 0.9,
+      taskType: "code_generation",
+      rationale: "integration ordering check",
+    },
+  });
+  fake.serverOutput.write(
+    `${JSON.stringify({
+      method: "item/completed",
+      params: {
+        threadId: classifierThreadId,
+        turnId: classifierTurnId,
+        item: { type: "agentMessage", text: classifierText },
+      },
+    })}\n${JSON.stringify({
+      method: "turn/completed",
+      params: {
+        threadId: classifierThreadId,
+        turn: { id: classifierTurnId, status: "completed", items: [] },
+      },
+    })}\n`
+  );
+  await waitFor(() => serverMessages.some((message) => message.id === "interrupt-a"));
+  assert.deepEqual(
+    serverMessages
+      .filter((message) => ["read-b", "list", "turn-a", "interrupt-a"].includes(message.id))
+      .map((message) => message.id),
+    ["read-b", "list", "turn-a", "interrupt-a"]
+  );
+});
+
 test("manual selection suppresses delayed route status after classification already started", async (t) => {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-router-race-"));
   t.after(() => fs.rmSync(runtimeDir, { force: true, recursive: true }));
