@@ -6,6 +6,7 @@
   const FEATURE = "smart-model-router";
   const ROUTE_METADATA_KEY = "opencodex/smart-scheduling";
   const PINNED_SUMMARY_ROOT_SELECTOR = '[data-pip-obstacle="thread-summary-panel"]';
+  const OVERLAY_SUMMARY_MARKER_SELECTOR = '[data-pip-obstacle="thread-summary-panel-popover"]';
   const OVERLAY_SUMMARY_ROOT_SELECTOR = "[data-radix-popper-content-wrapper]";
   const OVERLAY_SUMMARY_CONTENT_CLASS =
     "max-h-[min(var(--radix-popover-content-available-height),calc(100vh-16px))]";
@@ -336,8 +337,8 @@
 
   function officialOverlaySummaryContainer(root) {
     if (!root) return null;
-    // 官方 overlay 的 PopoverContent 有稳定的专用高度类；借此支持“原生分组全为空”的新任务。
-    for (const candidate of Array.from(root.querySelectorAll("div"))) {
+    // 26.803 会把专用高度类直接放在 marker 根节点上，旧版则放在 Radix wrapper 的后代节点上。
+    for (const candidate of [root, ...Array.from(root.querySelectorAll("div"))]) {
       if (!hasClass(candidate, OVERLAY_SUMMARY_CONTENT_CLASS)) continue;
       const container = candidate.querySelector(".overflow-y-auto");
       if (container) return container;
@@ -354,9 +355,33 @@
     return allowEmptyPinnedPanel ? root.querySelector(".overflow-y-auto") : null;
   }
 
+  function pinnedSummaryContainer(marker) {
+    const contained = containerInSummaryRoot(marker, true);
+    if (contained) return contained;
+    const parent = marker?.parentElement;
+    if (!parent) return null;
+    const siblings = Array.from(parent.children || []);
+    const markerIndex = siblings.indexOf(marker);
+    if (markerIndex < 0) return null;
+    /**
+     * 26.803 把 data-pip-obstacle 留在 aria-hidden 占位节点上，真实固定面板改成其后方兄弟节点。
+     * 只沿同一父节点中 marker 之后的兄弟节点查找，既兼容新版，又不会误扫页面上的其它滚动区域。
+     */
+    for (const sibling of siblings.slice(markerIndex + 1)) {
+      const container = containerInSummaryRoot(sibling, true);
+      if (container) return container;
+    }
+    return null;
+  }
+
   function summarySectionsContainer() {
-    for (const root of Array.from(document.querySelectorAll(PINNED_SUMMARY_ROOT_SELECTOR))) {
-      const container = containerInSummaryRoot(root, true);
+    for (const marker of Array.from(document.querySelectorAll(PINNED_SUMMARY_ROOT_SELECTOR))) {
+      const container = pinnedSummaryContainer(marker);
+      if (container) return container;
+    }
+    // 新版 overlay 提供专用 marker，优先使用它，避免依赖通用 Radix wrapper 的内部层级。
+    for (const root of Array.from(document.querySelectorAll(OVERLAY_SUMMARY_MARKER_SELECTOR))) {
+      const container = containerInSummaryRoot(root) || officialOverlaySummaryContainer(root);
       if (container) return container;
     }
     // overlay 优先用原生条目识别；全空时再核对官方 PopoverContent 专用结构，避开其它 Radix 浮层。

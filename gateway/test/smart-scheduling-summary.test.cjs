@@ -241,6 +241,22 @@ function createHarness() {
     mutationCallback?.([record]);
   }
 
+  function appendNativeSummaryContent(contentRoot, includeNativeItem = true) {
+    const card = document.createElement("div");
+    const container = document.createElement("div");
+    container.className = "overflow-y-auto";
+    if (includeNativeItem) {
+      const nativeSection = document.createElement("section");
+      const nativeItem = document.createElement("div");
+      nativeItem.dataset.slot = "thread-summary-panel-item";
+      nativeSection.appendChild(nativeItem);
+      container.appendChild(nativeSection);
+    }
+    card.appendChild(container);
+    contentRoot.appendChild(card);
+    return container;
+  }
+
   function createNativeSummaryPanel(mode, includeNativeItem = true, officialOverlay = true) {
     const root = document.createElement("div");
     if (mode === "pinned") root.setAttribute("data-pip-obstacle", "thread-summary-panel");
@@ -254,18 +270,40 @@ function createHarness() {
         "flex max-h-[min(var(--radix-popover-content-available-height),calc(100vh-16px))] flex-col gap-3";
       root.appendChild(contentRoot);
     }
-    const card = document.createElement("div");
-    const container = document.createElement("div");
-    container.className = "overflow-y-auto";
-    if (includeNativeItem) {
-      const nativeSection = document.createElement("section");
-      const nativeItem = document.createElement("div");
-      nativeItem.dataset.slot = "thread-summary-panel-item";
-      nativeSection.appendChild(nativeItem);
-      container.appendChild(nativeSection);
-    }
-    card.appendChild(container);
-    contentRoot.appendChild(card);
+    appendNativeSummaryContent(contentRoot, includeNativeItem);
+    body.appendChild(root);
+    notifyMutation({ type: "childList", addedNodes: [root], removedNodes: [] });
+    return root;
+  }
+
+  function createCurrentPinnedSummaryPanel(includeNativeItem = true) {
+    const shell = document.createElement("div");
+    const marker = document.createElement("div");
+    marker.setAttribute("data-pip-obstacle", "thread-summary-panel");
+    marker.setAttribute("aria-hidden", "true");
+    const contentRoot = document.createElement("div");
+    appendNativeSummaryContent(contentRoot, includeNativeItem);
+    // 对齐 26.803：占位 marker 与真实固定面板不再是包含关系，而是同一父节点下的兄弟节点。
+    shell.append(marker, contentRoot);
+    body.appendChild(shell);
+    notifyMutation({ type: "childList", addedNodes: [shell], removedNodes: [] });
+    return shell;
+  }
+
+  function createCurrentOverlaySummaryPanel(includeNativeItem = true) {
+    const root = document.createElement("div");
+    root.setAttribute("data-pip-obstacle", "thread-summary-panel-popover");
+    root.className =
+      "flex max-h-[min(var(--radix-popover-content-available-height),calc(100vh-16px))] flex-col gap-3";
+    appendNativeSummaryContent(root, includeNativeItem);
+    body.appendChild(root);
+    notifyMutation({ type: "childList", addedNodes: [root], removedNodes: [] });
+    return root;
+  }
+
+  function createUnrelatedScrollContainer() {
+    const root = document.createElement("div");
+    root.className = "overflow-y-auto";
     body.appendChild(root);
     notifyMutation({ type: "childList", addedNodes: [root], removedNodes: [] });
     return root;
@@ -287,8 +325,17 @@ function createHarness() {
     mountEmptyOverlaySummary() {
       return createNativeSummaryPanel("overlay", false, true);
     },
+    mountCurrentOverlaySummary(includeNativeItem = true) {
+      return createCurrentOverlaySummaryPanel(includeNativeItem);
+    },
+    mountCurrentPinnedSummary(includeNativeItem = true) {
+      return createCurrentPinnedSummaryPanel(includeNativeItem);
+    },
     mountUnrelatedOverlay() {
       return createNativeSummaryPanel("overlay", false, false);
+    },
+    mountUnrelatedScrollContainer() {
+      return createUnrelatedScrollContainer();
     },
     openThread(threadId) {
       summary.handleAppHostData(
@@ -367,6 +414,10 @@ function createHarness() {
     summaryVisible() {
       return !!document.querySelector(SUMMARY_SELECTOR);
     },
+    summaryInside(root) {
+      const section = document.querySelector(SUMMARY_SELECTOR);
+      return !!section && root.contains(section);
+    },
     triggerUnrelatedMutation() {
       const node = document.createElement("div");
       body.appendChild(node);
@@ -416,6 +467,48 @@ test("smart scheduling summary mounts in pinned and overlay panels and remounts 
     assert.equal(harness.summaryVisible(), false);
     harness.mountSummary(mode);
     assert.equal(harness.summaryVisible(), true, `${mode} panel should remount the custom section`);
+  }
+});
+
+test("smart scheduling summary mounts in 26.803 pinned siblings and marked overlays", async () => {
+  const scenarios = [
+    {
+      name: "pinned panel with native items",
+      mount: (harness) => harness.mountCurrentPinnedSummary(true),
+    },
+    {
+      name: "empty pinned panel",
+      mount: (harness) => harness.mountCurrentPinnedSummary(false),
+    },
+    {
+      name: "empty marked overlay",
+      mount: (harness) => harness.mountCurrentOverlaySummary(false),
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const harness = createHarness();
+    await harness.ready();
+    harness.sendViewMessage({ type: "navigate-to-route", path: "/local/thread-current" });
+    harness.handleRouteEvent({ threadId: "thread-current", status: "selected" });
+    await resolveRoute(harness, "thread-current", {
+      displayName: "Luna",
+      effort: "max",
+      model: "luna",
+      tier: "balanced",
+      turnId: "turn-current",
+    });
+
+    const unrelatedScrollContainer = harness.mountUnrelatedScrollContainer();
+    assert.equal(harness.summaryVisible(), false, "an unrelated scroll container must not become the mount point");
+    const root = scenario.mount(harness);
+    assert.equal(harness.summaryVisible(), true, `${scenario.name} should contain the custom section`);
+    assert.equal(harness.summaryInside(unrelatedScrollContainer), false);
+    assert.deepEqual(harness.summaryValues(), { effort: "max", model: "Luna" });
+    assert.equal(harness.resultSummaryValue(), "均衡");
+
+    harness.unmountSummary(root);
+    assert.equal(harness.summaryVisible(), false);
   }
 });
 
