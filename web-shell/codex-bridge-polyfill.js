@@ -44,6 +44,7 @@
     "Log out of Codex",
   ];
   const MESSAGE_FOR_VIEW_CHANNEL = "codex_desktop:message-for-view";
+  const WINDOW_FOCUS_CHANGED_MESSAGE = "electron-window-focus-changed";
 
   function installLocaleOverride() {
     try {
@@ -1141,6 +1142,32 @@
     } catch (error) {
       console.warn("[codex-web] failed to emit window message", channel, error);
     }
+  }
+
+  /** 浏览器页面才是真实交互窗口，不能沿用隐藏 Electron 代理窗口的 focus 状态。 */
+  function browserWindowIsFocused() {
+    return document.visibilityState !== "hidden" && document.hasFocus();
+  }
+
+  /** 按官方 preload 的 MessageEvent 契约同步浏览器窗口 focus 状态。 */
+  function emitBrowserWindowFocusChanged() {
+    emitWindowMessage(WINDOW_FOCUS_CHANGED_MESSAGE, { isFocused: browserWindowIsFocused() });
+  }
+
+  /** hidden Electron 代理窗口的 focus 状态不代表浏览器，入站时统一替换为页面真实状态。 */
+  function browserRendererMessagePayload(channel, payload) {
+    if (channel !== WINDOW_FOCUS_CHANGED_MESSAGE) return payload;
+    return {
+      ...(payload && typeof payload === "object" ? payload : {}),
+      isFocused: browserWindowIsFocused(),
+    };
+  }
+
+  /** 页面 focus 或可见性变化时持续更新 renderer 状态，避免后续快捷键和 onboarding 使用陈旧值。 */
+  function installBrowserWindowFocusBridge() {
+    w.addEventListener("focus", emitBrowserWindowFocusChanged);
+    w.addEventListener("blur", emitBrowserWindowFocusChanged);
+    document.addEventListener("visibilitychange", emitBrowserWindowFocusChanged);
   }
 
   /** 官方 main 发给 renderer 的消息通常用 message-for-view 包一层，真实类型在 payload.type。 */
@@ -2793,6 +2820,7 @@
   w.codexBridge = createAdaptiveBridgeProxy(w.codexBridge, "codexBridge");
   w.electronAPI = createAdaptiveBridgeProxy(w.electronAPI, "electronAPI");
   w.electronBridge = createAdaptiveBridgeProxy(w.electronBridge, "electronBridge");
+  installBrowserWindowFocusBridge();
   installAppHostMessagePortBridge();
   installAppFsImageRewrite();
 
@@ -2972,10 +3000,11 @@
             surfaceFetchIpcError("fetch-stream-error", messagePayload);
           }
           handleTokenUsageGatewayPayload(messagePayload);
+          const rendererMessagePayload = browserRendererMessagePayload(effectiveChannel, messagePayload);
           if (shouldDispatchGatewayMessage(msg.channel, effectiveChannel)) {
-            dispatch(effectiveChannel, messagePayload);
+            dispatch(effectiveChannel, rendererMessagePayload);
           }
-          emitWindowMessage(effectiveChannel, messagePayload);
+          emitWindowMessage(effectiveChannel, rendererMessagePayload);
           if (WS_DEBUG_ENABLED) {
             maybeLogLargeOrSlowWsInbound({
               handledBy: "gateway-channel",

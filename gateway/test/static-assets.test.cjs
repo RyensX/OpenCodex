@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
 const { pluginMessagesForLocale } = require("../runtime/core/plugin-assets.cjs");
 const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
@@ -61,6 +62,64 @@ const TOKEN_USAGE_INLINE_PLUGIN = path.resolve(
   "token-usage-inline",
   "index.js"
 );
+const MESSAGE_FOR_VIEW_CHANNEL = "codex_desktop:message-for-view";
+const WINDOW_FOCUS_CHANGED_MESSAGE = "electron-window-focus-changed";
+
+function sourceFunctionDeclaration(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `missing function ${name}`);
+  const bodyStart = source.indexOf("{", start);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] !== "}") continue;
+    depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  assert.fail(`unterminated function ${name}`);
+}
+
+function createBrowserFocusHarness(bridge) {
+  const windowListeners = new Map();
+  const documentListeners = new Map();
+  const emitted = [];
+  let hasFocus = true;
+  const context = {
+    document: {
+      visibilityState: "visible",
+      hasFocus: () => hasFocus,
+      addEventListener: (type, handler) => documentListeners.set(type, handler),
+    },
+    emitWindowMessage: (channel, payload) => emitted.push({ channel, payload }),
+    w: { addEventListener: (type, handler) => windowListeners.set(type, handler) },
+  };
+  const functionNames = [
+    "browserWindowIsFocused",
+    "emitBrowserWindowFocusChanged",
+    "browserRendererMessagePayload",
+    "installBrowserWindowFocusBridge",
+    "effectiveGatewayMessageChannel",
+  ];
+  const declarations = functionNames.map((name) => sourceFunctionDeclaration(bridge, name)).join("\n");
+  // 执行生产函数本身，避免只验证源码字符串存在而漏掉 focus payload 行为回归。
+  const focusBridge = vm.runInNewContext(
+    `const MESSAGE_FOR_VIEW_CHANNEL = ${JSON.stringify(MESSAGE_FOR_VIEW_CHANNEL)};
+     const WINDOW_FOCUS_CHANGED_MESSAGE = ${JSON.stringify(WINDOW_FOCUS_CHANGED_MESSAGE)};
+     ${declarations}
+     ({ ${functionNames.join(", ")} })`,
+    context
+  );
+  return {
+    context,
+    documentListeners,
+    emitted,
+    focusBridge,
+    setFocus: (value) => {
+      hasFocus = value;
+    },
+    windowListeners,
+  };
+}
 
 function makeTempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-static-assets-test-"));
@@ -223,6 +282,51 @@ test("bridge reconnects active app-host ports after websocket hello", () => {
 
   assert.match(bridge, /state\.pending\.unshift\(appHostWsPayload\(state, \{ type: "app-host-connect" \}\)\)/);
   assert.match(bridge, /for \(const state of appHostPortRelays\.values\(\)\) state\.connected = false/);
+});
+
+test("bridge resolves window focus from the browser instead of the hidden Electron proxy", () => {
+  const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
+  const { context, documentListeners, emitted, focusBridge, setFocus, windowListeners } =
+    createBrowserFocusHarness(bridge);
+
+  const effectiveChannel = focusBridge.effectiveGatewayMessageChannel(MESSAGE_FOR_VIEW_CHANNEL, {
+    type: WINDOW_FOCUS_CHANGED_MESSAGE,
+    isFocused: false,
+  });
+  assert.equal(effectiveChannel, WINDOW_FOCUS_CHANGED_MESSAGE);
+
+  const electronPayload = { isFocused: false, source: "hidden-electron-window" };
+  const browserPayload = focusBridge.browserRendererMessagePayload(effectiveChannel, electronPayload);
+  assert.equal(browserPayload.isFocused, true);
+  assert.equal(browserPayload.source, "hidden-electron-window");
+  assert.notEqual(browserPayload, electronPayload);
+
+  const unrelatedPayload = { value: 1 };
+  assert.equal(focusBridge.browserRendererMessagePayload("unrelated-message", unrelatedPayload), unrelatedPayload);
+
+  setFocus(false);
+  assert.equal(focusBridge.browserRendererMessagePayload(WINDOW_FOCUS_CHANGED_MESSAGE, null).isFocused, false);
+  setFocus(true);
+  context.document.visibilityState = "hidden";
+  assert.equal(focusBridge.browserRendererMessagePayload(WINDOW_FOCUS_CHANGED_MESSAGE, {}).isFocused, false);
+
+  context.document.visibilityState = "visible";
+  focusBridge.installBrowserWindowFocusBridge();
+  assert.deepEqual([...windowListeners.keys()], ["focus", "blur"]);
+  assert.deepEqual([...documentListeners.keys()], ["visibilitychange"]);
+  windowListeners.get("focus")();
+  assert.equal(emitted.at(-1).channel, WINDOW_FOCUS_CHANGED_MESSAGE);
+  assert.equal(emitted.at(-1).payload.isFocused, true);
+  setFocus(false);
+  windowListeners.get("blur")();
+  assert.equal(emitted.at(-1).payload.isFocused, false);
+  documentListeners.get("visibilitychange")();
+  assert.equal(emitted.at(-1).payload.isFocused, false);
+
+  // 保留一条 wiring 断言，确保 WebSocket 入站数据实际经过已执行验证的 normalizer。
+  assert.match(bridge, /browserRendererMessagePayload\(effectiveChannel, messagePayload\)/);
+  assert.match(bridge, /dispatch\(effectiveChannel, rendererMessagePayload\)/);
+  assert.match(bridge, /emitWindowMessage\(effectiveChannel, rendererMessagePayload\)/);
 });
 
 test("patched official renderer CSP allows the injected PWA manifest", (t) => {
@@ -498,20 +602,7 @@ test("smart scheduling summary follows root-path task context while Auto remains
 
 test("inline token usage shares the assistant action group visibility", () => {
   const source = fs.readFileSync(TOKEN_USAGE_INLINE_PLUGIN, "utf-8");
-
-  function functionDeclaration(name) {
-    const start = source.indexOf(`function ${name}(`);
-    assert.notEqual(start, -1, `missing ${name}`);
-    const bodyStart = source.indexOf("{", start);
-    let depth = 0;
-    for (let index = bodyStart; index < source.length; index += 1) {
-      if (source[index] === "{") depth += 1;
-      if (source[index] !== "}") continue;
-      depth -= 1;
-      if (depth === 0) return source.slice(start, index + 1);
-    }
-    throw new Error(`unterminated ${name}`);
-  }
+  const functionDeclaration = (name) => sourceFunctionDeclaration(source, name);
 
   const { insertUsageBadge } = new Function(
     `${functionDeclaration("directChildForInsert")}
