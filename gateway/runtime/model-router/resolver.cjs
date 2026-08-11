@@ -6,8 +6,6 @@ const {
 const {
   defaultTierDefinitions,
   enabledTierDefinitions,
-  failureFloorTierId,
-  normalizeStoredTierDefinitions,
 } = require("./tiers.cjs");
 
 const BUILTIN_TIER_CANDIDATES = Object.freeze({
@@ -190,25 +188,8 @@ function resolveClassifierRoute({ configValues, models }) {
   });
 }
 
-function applyClassificationPolicy(classification, previousStatus, tiers = defaultTierDefinitions()) {
-  const normalizedTiers = normalizeStoredTierDefinitions(tiers);
-  const activeTiers = enabledTierDefinitions(normalizedTiers);
-  if (activeTiers.length === 0) return { ...classification, tier: "" };
-  let index = activeTiers.findIndex((tier) => tier.id === classification?.tier);
-  if (index < 0) index = 0;
-  const confidence = Number(classification?.confidence);
-  if (Number.isFinite(confidence) && confidence < 0.65) index = Math.min(index + 1, activeTiers.length - 1);
-  // 用户主动中断不代表任务困难；真实失败使用档位定义中的基准标记，并跳过已关闭档位。
-  if (previousStatus === "failed") {
-    const floorIndex = activeTiers.findIndex((tier) => tier.id === failureFloorTierId(normalizedTiers));
-    if (floorIndex >= 0) index = Math.max(index, floorIndex);
-  }
-  return { ...classification, tier: activeTiers[index].id };
-}
-
 module.exports = {
   BUILTIN_TIER_CANDIDATES,
-  applyClassificationPolicy,
   candidateModelNames,
   modelIdentifier,
   nearestEffort,

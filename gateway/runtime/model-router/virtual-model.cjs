@@ -350,9 +350,6 @@ function createVirtualModelController({ stateStore, isEnabled, fallbackRoute, ca
     if (!original || typeof original !== "object" || typeof original.method !== "string") return original;
     const params = original.params;
     const threadId = String(params?.threadId || params?.thread?.id || "");
-    if (original.method === "turn/completed" && threadId) {
-      stateStore.recordStatus(threadId, params?.turn?.status || "");
-    }
     if (original.method === "thread/deleted" && threadId) {
       stateStore.removeThread(threadId);
     }

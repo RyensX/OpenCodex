@@ -5,13 +5,15 @@ const path = require("node:path");
 const test = require("node:test");
 const { parseClassificationText, validateClassification } = require("../runtime/model-router/classifier.cjs");
 const {
+  ASSISTANT_FINAL_TEXT_LIMIT,
+  assistantFinalFromItems,
+  assistantFinalFromTurn,
   buildClassifierPrompt,
   createRoutingContext,
+  recentTurnsFromTurns,
   summarizeUserInput,
-  userInputsFromTurns,
 } = require("../runtime/model-router/context.cjs");
 const {
-  applyClassificationPolicy,
   nearestEffort,
   resolveClassifierRoute,
   resolveTierRoute,
@@ -53,32 +55,15 @@ function tiersWithCustom(patch) {
   return tiers;
 }
 
-test("classification policy promotes low confidence and previous failures", () => {
-  assert.equal(applyClassificationPolicy({ tier: "economy", confidence: 0.64 }, "completed").tier, "balanced");
-  assert.equal(applyClassificationPolicy({ tier: "frontier", confidence: 0.1 }, "completed").tier, "frontier");
-  assert.equal(applyClassificationPolicy({ tier: "balanced", confidence: 0.9 }, "failed").tier, "complex");
-  assert.equal(applyClassificationPolicy({ tier: "economy", confidence: 0.9 }, "interrupted").tier, "economy");
-});
-
-test("classification policy follows custom order and skips disabled tiers", () => {
-  const defaults = defaultTierDefinitions();
-  const tiers = [
-    defaults[0],
-    {
-      id: "routine-plus",
-      builtin: false,
-      enabled: true,
-      name: "Routine plus",
-      prompt: "Use for routine work with a wider change surface.",
-      model: "custom",
-      effort: "auto",
-    },
-    defaults[1],
-    { ...defaults[2], enabled: false },
-    defaults[3],
-  ];
-  assert.equal(applyClassificationPolicy({ tier: "economy", confidence: 0.64 }, "completed", tiers).tier, "routine-plus");
-  assert.equal(applyClassificationPolicy({ tier: "balanced", confidence: 0.9 }, "failed", tiers).tier, "frontier");
+test("default tier criteria preserve the intended scene boundaries", () => {
+  const criteria = Object.fromEntries(defaultTierDefinitions().map((tier) => [tier.id, tier.prompt]));
+  assert.match(criteria.economy, /extracting explicit information from files, logs, or command output/);
+  assert.match(criteria.balanced, /routine, clearly scoped engineering work/);
+  assert.match(criteria.balanced, /Do not use this tier when the task requires deep diagnosis/);
+  assert.match(criteria.complex, /correlating logs, tests, and source code to establish root cause/);
+  assert.match(criteria.complex, /high-confidence reviews covering edge cases and failure modes/);
+  assert.match(criteria.frontier, /security, data-loss, concurrency, or distributed-consistency decisions/);
+  assert.match(criteria.frontier, /Do not select this tier merely because the input is long/);
 });
 
 test("resolver honors configured, tier, catalog default and nearest effort order", () => {
@@ -138,8 +123,9 @@ test("resolver honors configured, tier, catalog default and nearest effort order
   assert.equal(automaticClassifier.effort, "high");
 });
 
-test("routing context keeps the configured recent user inputs, image markers, usage and state", () => {
+test("routing context keeps configured recent turns and excludes prior route state", () => {
   const turns = Array.from({ length: 8 }, (_value, index) => ({
+    status: "completed",
     items: [
       {
         type: "userMessage",
@@ -148,28 +134,69 @@ test("routing context keeps the configured recent user inputs, image markers, us
           ...(index === 7 ? [{ type: "localImage", path: "/tmp/image.png" }] : []),
         ],
       },
+      { type: "agentMessage", phase: "commentary", text: `working-${index}` },
+      { type: "agentMessage", phase: "final_answer", text: `done-${index}` },
     ],
   }));
-  const history = userInputsFromTurns(turns);
-  assert.deepEqual(history.map((entry) => entry.text), ["message-5", "message-6", "message-7"]);
-  assert.equal(history[2].hasImages, true);
-  const expandedHistory = userInputsFromTurns(turns, 5);
-  assert.deepEqual(expandedHistory.map((entry) => entry.text), ["message-3", "message-4", "message-5", "message-6", "message-7"]);
+  const history = recentTurnsFromTurns(turns);
+  assert.deepEqual(history.map((entry) => entry.user.text), ["message-5", "message-6", "message-7"]);
+  assert.deepEqual(history.map((entry) => entry.assistantFinal), ["done-5", "done-6", "done-7"]);
+  assert.equal(history[2].user.hasImages, true);
+  const expandedHistory = recentTurnsFromTurns(turns, 5);
+  assert.deepEqual(expandedHistory.map((entry) => entry.user.text), [
+    "message-3",
+    "message-4",
+    "message-5",
+    "message-6",
+    "message-7",
+  ]);
 
   const context = createRoutingContext({
     input: [{ type: "text", text: "current" }, { type: "image", url: "data:image/png" }],
     history: expandedHistory,
     historyLimit: 3,
+    // 旧调用方即使仍传这些字段，也不能让它们进入分类上下文。
     lastRoute: { tier: "balanced", model: "luna", effort: "medium" },
     previousStatus: "failed",
     usage: { total: { inputTokens: 120, outputTokens: 30, totalTokens: 150 } },
   });
   assert.equal(context.current.imageCount, 1);
   assert.equal(context.current.text, "current");
-  assert.deepEqual(context.recentUserInputs.map((entry) => entry.text), ["message-5", "message-6", "message-7"]);
-  assert.equal(context.previousStatus, "failed");
-  assert.equal(context.usage.totalTokens, 150);
+  assert.deepEqual(context.recentTurns.map((entry) => entry.user.text), ["message-5", "message-6", "message-7"]);
+  assert.deepEqual(Object.keys(context), ["current", "recentTurns"]);
   assert.equal(summarizeUserInput([{ type: "skill", name: "x" }]).skillCount, 1);
+});
+
+test("assistant final extraction excludes intermediate items and supports legacy completed turns", () => {
+  const items = [
+    { type: "reasoning", text: "private reasoning" },
+    { type: "agentMessage", phase: "commentary", text: "progress" },
+    { type: "commandExecution", command: "git status" },
+    { type: "agentMessage", phase: "final_answer", text: "first final" },
+    { type: "agentMessage", phase: "final_answer", text: "second final" },
+  ];
+  assert.equal(assistantFinalFromItems(items), "first final\n\nsecond final");
+  assert.equal(
+    assistantFinalFromTurn({
+      status: "completed",
+      items: [
+        { type: "agentMessage", phase: null, text: "legacy commentary" },
+        { type: "agentMessage", text: "legacy final" },
+      ],
+    }),
+    "legacy final"
+  );
+  assert.equal(
+    assistantFinalFromTurn({ status: "inProgress", items: [{ type: "agentMessage", text: "not confirmed" }] }),
+    ""
+  );
+
+  const longFinal = `${"H".repeat(1_000)}${"T".repeat(1_000)}`;
+  const truncated = assistantFinalFromItems([{ type: "agentMessage", phase: "final_answer", text: longFinal }]);
+  assert.equal(truncated.length, ASSISTANT_FINAL_TEXT_LIMIT);
+  assert.equal(truncated.startsWith("H"), true);
+  assert.equal(truncated.endsWith("T"), true);
+  assert.match(truncated, /\n…\n/);
 });
 
 test("classifier prompt composes only enabled tier names and custom criteria", () => {
@@ -185,50 +212,43 @@ test("classifier prompt composes only enabled tier names and custom criteria", (
     effort: "auto",
   });
   const prompt = buildClassifierPrompt(
-    { current: { text: "change two files" }, recentUserInputs: [] },
+    { current: { text: "change two files" }, recentTurns: [] },
     { tiers, automaticEffortTiers: ["routine-plus"] }
   );
-  assert.match(prompt, /Routine plus/);
-  assert.match(prompt, /bounded two-file implementation/);
-  assert.match(prompt, /Auto-effort tiers: routine-plus/);
-  assert.doesNotMatch(prompt, /trivial questions\/edits/);
+  const payload = JSON.parse(prompt.split("\n\n").at(-1));
+  assert.deepEqual(payload.tiers.map((tier) => tier.id), ["routine-plus", "balanced", "complex", "frontier"]);
+  assert.equal(payload.tiers[0].name, "Routine plus");
+  assert.match(payload.tiers[0].criteria, /bounded two-file implementation/);
+  assert.deepEqual(payload.automaticEffortTiers, ["routine-plus"]);
+  assert.match(prompt, /"current" is authoritative/);
+  assert.match(prompt, /Do not assume that any particular tier id/);
+  assert.doesNotMatch(prompt, /previousStatus|previousRoute|tokenUsage/);
 });
 
-test("classifier JSON parser validates all required structured fields", () => {
-  const value = parseClassificationText(
-    '```json\n{"tier":"complex","effort":"high","confidence":0.8,"taskType":"debugging","rationale":"multi-file failure"}\n```'
-  );
+test("classifier JSON parser enforces the stable route envelope and conditional effort", () => {
+  const value = parseClassificationText('```json\n{"route":{"tier":"complex","rationale":"multi-file failure"}}\n```');
   assert.equal(value.tier, "complex");
-  assert.equal(value.effort, "high");
+  assert.equal("effort" in value, false);
+  const automatic = parseClassificationText(
+    '{"route":{"tier":"economy","effort":"medium","rationale":"bounded analysis"}}'
+  );
+  assert.equal(automatic.effort, "medium");
   assert.throws(
     () =>
       validateClassification({
-        tier: "complex",
-        effort: "high",
-        confidence: 2,
-        taskType: "debugging",
-        rationale: "x",
+        route: { tier: "complex", confidence: 0.9, rationale: "x" },
       }),
-    /confidence/
+    /unsupported fields/
   );
-  const fixedEffort = validateClassification({
-    tier: "complex",
-    confidence: 0.9,
-    taskType: "debugging",
-    rationale: "x",
-  });
-  assert.equal("effort" in fixedEffort, false);
   assert.throws(
     () =>
       validateClassification({
-        tier: "complex",
-        effort: "adaptive",
-        confidence: 0.9,
-        taskType: "debugging",
-        rationale: "x",
+        route: { tier: "complex", effort: "high", rationale: "x" },
       }),
-    /effort/
+    /unsupported fields|forbidden/
   );
+  assert.throws(() => validateClassification({ route: { tier: "economy", rationale: "x" } }), /required/);
+  assert.throws(() => parseClassificationText('{"tier":"complex","rationale":"x"}'), /only route/);
   assert.throws(() => parseClassificationText("not-json"), /invalid JSON/);
 });
 
@@ -238,13 +258,18 @@ test("auto state survives restart and clear keeps the last concrete route", (t) 
   first.setDefaultAuto(true, { model: "spark", effort: "low" });
   first.setThreadAuto("thread-1", true, { model: "terra", effort: "high" });
   first.recordRoute("thread-1", { tier: "complex", model: "terra", effort: "high", fallback: true });
-  first.recordStatus("thread-1", "failed");
+
+  // 旧状态文件即使含 lastStatus，也应在读取时直接忽略而无需迁移。
+  const legacyState = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  legacyState.threads["thread-1"].lastStatus = "failed";
+  fs.writeFileSync(filePath, JSON.stringify(legacyState));
 
   const second = createAutoStateStore({ filePath });
   assert.equal(second.isDefaultAuto(), true);
   assert.equal(second.isThreadAuto("thread-1"), true);
   assert.equal(second.threadState("thread-1").lastTier, "complex");
   assert.equal(second.threadState("thread-1").lastFallback, true);
+  assert.equal("lastStatus" in second.threadState("thread-1"), false);
   second.clearAllAuto();
   assert.equal(second.isDefaultAuto(), false);
   assert.equal(second.isThreadAuto("thread-1"), false);

@@ -17,20 +17,23 @@ const ALLOWED_TIER_EFFORTS = new Set([AUTO_REASONING_EFFORT, ...EFFORT_ORDER]);
 const BUILTIN_TIER_COPY = Object.freeze({
   economy: Object.freeze({
     name: "Economy",
-    prompt: "Use for trivial questions/edits.",
+    prompt:
+      "Use for bounded, low-risk work with an obvious procedure and little or no inference. Examples include locating or extracting explicit information from files, logs, or command output; producing a straightforward summary of provided content; answering a direct question; or performing a mechanical localized edit or routine completion action. Escalate when the requested outcome requires diagnosis, design choices, or reasoning across interacting components.",
   }),
   balanced: Object.freeze({
     name: "Balanced",
-    prompt: "Use for normal implementation.",
+    prompt:
+      "Use only for routine, clearly scoped engineering work with low ambiguity and a conventional solution. The relevant behavior should be localized, dependencies limited and well understood, expected results clear, and verification straightforward. Examples include small feature changes, ordinary bug fixes with an identifiable cause, localized tests or reviews, straightforward documentation, and concrete plans for bounded changes. Do not use this tier when the task requires deep diagnosis, reasoning across coupled components, substantial tradeoffs, broad impact analysis, or a high-assurance result.",
   }),
   complex: Object.freeze({
     name: "Complex",
-    prompt: "Use for difficult debugging or multi-file reasoning.",
-    failureFloor: true,
+    prompt:
+      "Use when the task exceeds routine execution because it requires deep or non-obvious reasoning, coordination across interacting components, substantial ambiguity or tradeoffs, broad impact analysis, or an explicitly high level of assurance and verification. Examples include correlating logs, tests, and source code to establish root cause; difficult debugging; multi-module design or implementation; migrations, compatibility work, or broad refactors; detailed planning with risks and alternatives; and high-confidence reviews covering edge cases and failure modes. The task may still have clear boundaries and success criteria, but completing it reliably requires stronger reasoning and more careful verification.",
   }),
   frontier: Object.freeze({
     name: "Frontier",
-    prompt: "Use only for exceptional ambiguity or architecture depth.",
+    prompt:
+      "Use only for exceptional work dominated by high ambiguity, high consequence, or open-ended system-level reasoning. Examples include architecture with competing system-wide tradeoffs; security, data-loss, concurrency, or distributed-consistency decisions; and unfamiliar large-scale incidents or migrations whose scope or solution is not yet clear. Do not select this tier merely because the input is long, many files are involved, the task is called planning, or a previous task was complex.",
   }),
 });
 
@@ -56,7 +59,6 @@ function builtinTierDefinition(tierId) {
     model: route.model,
     // 只有经济档位交给分类器动态选择强度，其余内置档位使用固定默认强度。
     effort: route.effort,
-    failureFloor: copy.failureFloor === true,
     defaultModel: route.model,
     defaultEffort: route.effort,
   };
@@ -108,7 +110,6 @@ function normalizeTierDefinition(value, fallback = null) {
     // 内置档位仅开放路由参数；损坏或缺失的持久化值仍回退到代码内默认值。
     model: normalizedModel(source.model, baseline.model || BUILTIN_ROUTE_DEFAULTS.fallback.model),
     effort: normalizedEffort(source.effort, baseline.effort || AUTO_REASONING_EFFORT),
-    failureFloor: builtin?.failureFloor === true,
     defaultModel: builtin?.defaultModel || "",
     defaultEffort: builtin?.defaultEffort || "medium",
   };
@@ -227,17 +228,6 @@ function enabledTierDefinitions(tiers) {
   return normalizeStoredTierDefinitions(tiers).filter((tier) => tier.enabled);
 }
 
-function failureFloorTierId(tiers) {
-  const normalized = normalizeStoredTierDefinitions(tiers);
-  const enabled = normalized.filter((tier) => tier.enabled);
-  if (enabled.length === 0) return "";
-  const configuredFloorIndex = normalized.findIndex((tier) => tier.failureFloor === true);
-  const floorIndex = configuredFloorIndex >= 0 ? configuredFloorIndex : normalized.length - 1;
-  const candidate = normalized.slice(Math.max(0, floorIndex)).find((tier) => tier.enabled);
-  // 默认失败基准档被关闭且其后没有启用档位时，退到当前最高启用档位。
-  return candidate?.id || enabled[enabled.length - 1].id;
-}
-
 module.exports = {
   ALLOWED_TIER_EFFORTS,
   BUILTIN_TIER_COPY,
@@ -251,7 +241,6 @@ module.exports = {
   SMART_ROUTER_PLUGIN_ID,
   defaultTierDefinitions,
   enabledTierDefinitions,
-  failureFloorTierId,
   legacyTierDefinitions,
   normalizeStoredTierDefinitions,
   normalizeTierDefinition,

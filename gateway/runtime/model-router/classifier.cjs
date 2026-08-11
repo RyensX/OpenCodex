@@ -1,72 +1,36 @@
 const os = require("os");
 const {
+  AUTO_REASONING_EFFORT,
   CLASSIFICATION_MAX_CONCURRENCY,
   CLASSIFICATION_TIMEOUT_MS,
   EFFORT_ORDER,
-  TASK_TYPES,
 } = require("./constants.cjs");
-const { buildClassifierPrompt } = require("./context.cjs");
-const { applyClassificationPolicy } = require("./resolver.cjs");
+const { assistantFinalFromItems, assistantFinalFromTurn, buildClassifierPrompt } = require("./context.cjs");
 const { defaultTierDefinitions, enabledTierDefinitions } = require("./tiers.cjs");
 
-function baseClassifierOutputSchema(tierIds) {
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: ["tier", "confidence", "taskType", "rationale"],
-    properties: {
-      tier: { type: "string", enum: tierIds },
-      confidence: { type: "number", minimum: 0, maximum: 1 },
-      taskType: { type: "string", enum: TASK_TYPES },
-      rationale: { type: "string", maxLength: 300 },
-    },
-  };
-}
-
-// 兼容旧调用方的默认 schema 也从内置档位数据生成，不再单独维护一份写死枚举。
-const DEFAULT_TIER_IDS = Object.freeze(defaultTierDefinitions().map((tier) => tier.id));
-const CLASSIFIER_OUTPUT_SCHEMA = Object.freeze(baseClassifierOutputSchema(DEFAULT_TIER_IDS));
-
-function classifierOutputSchema(
-  automaticEffortTiers,
-  previousStatus = "",
-  tiers = defaultTierDefinitions()
-) {
+function classifierOutputSchema(automaticEffortTiers, tiers = defaultTierDefinitions()) {
   const activeTiers = enabledTierDefinitions(tiers);
   const tierIds = activeTiers.map((tier) => tier.id);
-  const baseSchema = baseClassifierOutputSchema(tierIds);
-  const needsEffort = Array.isArray(automaticEffortTiers) && automaticEffortTiers.length > 0;
-  if (!needsEffort) return baseSchema;
-  const automaticTiers = new Set(automaticEffortTiers);
-  const variants = [];
-  for (const tier of tierIds) {
-    for (const lowConfidence of [true, false]) {
-      const confidence = lowConfidence
-        ? { type: "number", minimum: 0, exclusiveMaximum: 0.65 }
-        : { type: "number", minimum: 0.65, maximum: 1 };
-      const effectiveTier = applyClassificationPolicy(
-        { tier, confidence: lowConfidence ? 0.64 : 0.65 },
-        previousStatus,
-        tiers
-      ).tier;
-      const effortRequired = automaticTiers.has(effectiveTier);
-      variants.push({
-        type: "object",
-        additionalProperties: false,
-        required: ["tier", ...(effortRequired ? ["effort"] : []), "confidence", "taskType", "rationale"],
-        properties: {
-          tier: { type: "string", enum: [tier] },
-          ...(effortRequired ? { effort: { type: "string", enum: EFFORT_ORDER } } : {}),
-          confidence,
-          taskType: baseSchema.properties.taskType,
-          rationale: baseSchema.properties.rationale,
-        },
-      });
-    }
-  }
+  const configuredAutoTiers = Array.isArray(automaticEffortTiers)
+    ? automaticEffortTiers
+    : activeTiers.filter((tier) => tier.effort === AUTO_REASONING_EFFORT).map((tier) => tier.id);
+  const automaticTiers = new Set(configuredAutoTiers.filter((tier) => tierIds.includes(tier)));
+  const variants = tierIds.map((tier) => {
+    const effortRequired = automaticTiers.has(tier);
+    return {
+      type: "object",
+      additionalProperties: false,
+      required: ["tier", ...(effortRequired ? ["effort"] : []), "rationale"],
+      properties: {
+        tier: { type: "string", enum: [tier] },
+        ...(effortRequired ? { effort: { type: "string", enum: EFFORT_ORDER } } : {}),
+        rationale: { type: "string", maxLength: 300 },
+      },
+    };
+  });
   /**
-   * Responses API 禁止在输出 schema 顶层使用 anyOf，但允许在对象属性内使用。
-   * 因此用稳定的 route 外壳承载条件分支，同时继续从 schema 层保证只有 Auto 档位返回 effort。
+   * Responses API 禁止在输出 schema 顶层使用 anyOf，因此统一用稳定的 route 外壳承载条件分支。
+   * 每个启用档位恰好一个分支，并在 schema 层保证只有 Auto 档位能够返回 effort。
    */
   return {
     type: "object",
@@ -77,6 +41,16 @@ function classifierOutputSchema(
     },
   };
 }
+
+// 默认导出同样从当前内置定义动态生成，避免另维护一套固定枚举或 effort 规则。
+const DEFAULT_TIERS = defaultTierDefinitions();
+const DEFAULT_TIER_IDS = Object.freeze(DEFAULT_TIERS.filter((tier) => tier.enabled).map((tier) => tier.id));
+const DEFAULT_AUTOMATIC_EFFORT_TIERS = Object.freeze(
+  DEFAULT_TIERS.filter((tier) => tier.enabled && tier.effort === AUTO_REASONING_EFFORT).map((tier) => tier.id)
+);
+const CLASSIFIER_OUTPUT_SCHEMA = Object.freeze(
+  classifierOutputSchema(DEFAULT_AUTOMATIC_EFFORT_TIERS, DEFAULT_TIERS)
+);
 
 class ClassificationError extends Error {
   constructor(message, category = "classification") {
@@ -132,7 +106,11 @@ function remainingMs(deadlineAt) {
   return value;
 }
 
-function parseClassificationText(text, allowedTierIds = DEFAULT_TIER_IDS) {
+function parseClassificationText(
+  text,
+  allowedTierIds = DEFAULT_TIER_IDS,
+  automaticEffortTiers = DEFAULT_AUTOMATIC_EFFORT_TIERS
+) {
   if (typeof text !== "string" || !text.trim()) throw new ClassificationError("Classifier returned no message", "empty");
   const trimmed = text.trim();
   const unwrapped = trimmed.startsWith("```")
@@ -144,8 +122,7 @@ function parseClassificationText(text, allowedTierIds = DEFAULT_TIER_IDS) {
   } catch {
     throw new ClassificationError("Classifier returned invalid JSON", "invalid_json");
   }
-  // Auto effort 的条件 schema 使用 route 外壳；无 Auto 档位时仍兼容原来的扁平对象，避免无谓改变协议形态。
-  return validateClassification(parsed?.route ?? parsed, allowedTierIds);
+  return validateClassification(parsed, allowedTierIds, automaticEffortTiers);
 }
 
 function normalizedFailureCode(value) {
@@ -169,42 +146,53 @@ function classifierTurnFailureCategory(turn) {
   return codexErrorInfo && codexErrorInfo !== "other" ? codexErrorInfo : "turn_failed";
 }
 
-function validateClassification(value, allowedTierIds = DEFAULT_TIER_IDS) {
+function validateClassification(
+  value,
+  allowedTierIds = DEFAULT_TIER_IDS,
+  automaticEffortTiers = DEFAULT_AUTOMATIC_EFFORT_TIERS
+) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new ClassificationError("Classifier result must be an object", "invalid_schema");
   }
+  const envelopeKeys = Object.keys(value);
+  if (envelopeKeys.length !== 1 || envelopeKeys[0] !== "route") {
+    throw new ClassificationError("Classifier result must contain only route", "invalid_schema");
+  }
+  const route = value.route;
+  if (!route || typeof route !== "object" || Array.isArray(route)) {
+    throw new ClassificationError("Classifier route must be an object", "invalid_schema");
+  }
   const allowedTiers = new Set(Array.isArray(allowedTierIds) ? allowedTierIds : []);
-  if (!allowedTiers.has(value.tier)) throw new ClassificationError("Classifier tier is invalid", "invalid_schema");
-  if (value.effort !== undefined && !EFFORT_ORDER.includes(value.effort)) {
-    throw new ClassificationError("Classifier effort is invalid", "invalid_schema");
+  if (!allowedTiers.has(route.tier)) throw new ClassificationError("Classifier tier is invalid", "invalid_schema");
+  const automaticTiers = new Set(
+    (Array.isArray(automaticEffortTiers) ? automaticEffortTiers : []).filter((tier) => allowedTiers.has(tier))
+  );
+  const usesAutomaticEffort = automaticTiers.has(route.tier);
+  if (usesAutomaticEffort && !EFFORT_ORDER.includes(route.effort)) {
+    throw new ClassificationError("Classifier effort is required for an automatic-effort tier", "invalid_schema");
   }
-  if (!Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) {
-    throw new ClassificationError("Classifier confidence is invalid", "invalid_schema");
+  if (!usesAutomaticEffort && route.effort !== undefined) {
+    throw new ClassificationError("Classifier effort is forbidden for a fixed-effort tier", "invalid_schema");
   }
-  if (!TASK_TYPES.includes(value.taskType)) throw new ClassificationError("Classifier taskType is invalid", "invalid_schema");
-  if (typeof value.rationale !== "string" || value.rationale.length > 300) {
+  const allowedKeys = new Set(["tier", "rationale", ...(usesAutomaticEffort ? ["effort"] : [])]);
+  if (Object.keys(route).some((key) => !allowedKeys.has(key))) {
+    throw new ClassificationError("Classifier route contains unsupported fields", "invalid_schema");
+  }
+  if (typeof route.rationale !== "string" || route.rationale.length > 300) {
     throw new ClassificationError("Classifier rationale is invalid", "invalid_schema");
   }
   return {
-    tier: value.tier,
-    ...(value.effort === undefined ? {} : { effort: value.effort }),
-    confidence: value.confidence,
-    taskType: value.taskType,
-    rationale: value.rationale,
+    tier: route.tier,
+    ...(usesAutomaticEffort ? { effort: route.effort } : {}),
+    rationale: route.rationale,
   };
 }
 
-function lastAgentMessage(turn) {
-  const messages = (Array.isArray(turn?.items) ? turn.items : []).filter(
-    (item) => item?.type === "agentMessage" && typeof item.text === "string"
-  );
-  return messages.length > 0 ? messages[messages.length - 1].text : "";
-}
-
-async function completedAgentMessage({ transport, completedTurn, observedText, threadId, deadlineAt }) {
-  const inlineMessage = lastAgentMessage(completedTurn);
+async function completedAgentMessage({ transport, completedTurn, observedItems, threadId, deadlineAt }) {
+  const inlineMessage = assistantFinalFromTurn(completedTurn);
   if (inlineMessage) return inlineMessage;
-  if (typeof observedText === "string" && observedText) return observedText;
+  const observedMessage = assistantFinalFromItems(observedItems, { allowLegacy: completedTurn?.status === "completed" });
+  if (observedMessage) return observedMessage;
 
   /**
    * 新版 App Server 会按订阅视图把 turn/completed.items 裁成摘要，结构化消息可能只存在于完整历史里。
@@ -217,7 +205,7 @@ async function completedAgentMessage({ transport, completedTurn, observedText, t
       { timeoutMs: remainingMs(deadlineAt) }
     );
     const turns = Array.isArray(result?.data) ? result.data : [];
-    return turns.length > 0 ? lastAgentMessage(turns[0]) : "";
+    return turns.length > 0 ? assistantFinalFromTurn(turns[0]) : "";
   } catch {
     // 某些 App Server 版本不允许读取 ephemeral 历史；此处转成 empty fallback，不能阻断用户回合。
     return "";
@@ -259,7 +247,7 @@ function createClassifier({ transport, timeoutMs = CLASSIFICATION_TIMEOUT_MS, co
     let threadId = "";
     let turnId = "";
     let completed = false;
-    let observedAgentText = "";
+    const observedAgentItems = [];
     let stopObserving = () => {};
     try {
       const threadResult = await transport.request(
@@ -286,7 +274,7 @@ function createClassifier({ transport, timeoutMs = CLASSIFICATION_TIMEOUT_MS, co
       stopObserving = transport.observeNotifications((message) => {
         if (message?.method !== "item/completed" || message?.params?.threadId !== threadId) return;
         const item = message.params.item;
-        if (item?.type === "agentMessage" && typeof item.text === "string") observedAgentText = item.text;
+        if (item?.type === "agentMessage" && typeof item.text === "string") observedAgentItems.push(item);
       });
 
       const completionPromise = transport.waitForNotification(
@@ -306,7 +294,7 @@ function createClassifier({ transport, timeoutMs = CLASSIFICATION_TIMEOUT_MS, co
           ],
           model,
           effort,
-          outputSchema: classifierOutputSchema(automaticEffortTiers, context?.previousStatus, tiers),
+          outputSchema: classifierOutputSchema(automaticEffortTiers, tiers),
         },
         { timeoutMs: remainingMs(deadlineAt) }
       );
@@ -332,11 +320,11 @@ function createClassifier({ transport, timeoutMs = CLASSIFICATION_TIMEOUT_MS, co
       const agentMessage = await completedAgentMessage({
         transport,
         completedTurn: turn,
-        observedText: observedAgentText,
+        observedItems: observedAgentItems,
         threadId,
         deadlineAt,
       });
-      const classification = parseClassificationText(agentMessage, activeTierIds);
+      const classification = parseClassificationText(agentMessage, activeTierIds, automaticEffortTiers);
       return { classification, elapsedMs: Date.now() - startedAt };
     } catch (error) {
       if (error instanceof ClassificationError) throw error;
@@ -364,7 +352,6 @@ module.exports = {
   completedAgentMessage,
   createClassifier,
   createSemaphore,
-  lastAgentMessage,
   parseClassificationText,
   validateClassification,
 };

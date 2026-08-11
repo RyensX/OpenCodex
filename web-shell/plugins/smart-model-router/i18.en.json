@@ -54,8 +54,8 @@
   "plugin.smartModelRouter.group.fallback": "Fallback",
   "plugin.smartModelRouter.setting.model": "Model",
   "plugin.smartModelRouter.setting.effort": "Reasoning effort",
-  "plugin.smartModelRouter.setting.classifierHistoryCount": "Classification history messages",
-  "plugin.smartModelRouter.setting.classifierHistoryCount.description": "Number of recent user messages considered for each classification, excluding the current input.",
+  "plugin.smartModelRouter.setting.classifierHistoryCount": "Classification history turns",
+  "plugin.smartModelRouter.setting.classifierHistoryCount.description": "Number of recent conversation turns considered for each classification, excluding the current input.",
   "plugin.smartModelRouter.setting.showRouteInSummary": "Show scheduling result",
   "plugin.smartModelRouter.setting.showRouteInSummary.description": "While Auto is enabled, keep the most recently scheduled model and reasoning effort visible in the task summary."
 }

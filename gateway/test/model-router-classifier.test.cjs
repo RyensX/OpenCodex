@@ -3,16 +3,29 @@ const test = require("node:test");
 const {
   ClassificationError,
   classifierTurnFailureCategory,
+  classifierOutputSchema,
   createClassifier,
 } = require("../runtime/model-router/classifier.cjs");
 const { defaultTierDefinitions } = require("../runtime/model-router/tiers.cjs");
 
 function classifierTransport(
   agentText,
-  { inlineItems = true, streamItem = false, failFullRead = false, turnStatus = "completed", turnError = null } = {}
+  {
+    inlineItems = true,
+    streamItem = false,
+    failFullRead = false,
+    turnStatus = "completed",
+    turnError = null,
+    messagePhase = "final_answer",
+  } = {}
 ) {
   const calls = [];
   const observers = new Set();
+  const agentItem = () => ({
+    type: "agentMessage",
+    text: agentText,
+    ...(messagePhase === undefined ? {} : { phase: messagePhase }),
+  });
   return {
     calls,
     observeNotifications(observer) {
@@ -32,7 +45,7 @@ function classifierTransport(
               params: {
                 threadId: "classifier-thread",
                 turnId: "classifier-turn",
-                item: { type: "agentMessage", text: agentText },
+                item: agentItem(),
               },
             });
           }
@@ -42,7 +55,7 @@ function classifierTransport(
       if (method === "thread/turns/list") {
         if (failFullRead) throw new Error("ephemeral history is unavailable");
         return {
-          data: [{ status: "completed", items: [{ type: "agentMessage", text: agentText }] }],
+          data: [{ status: "completed", items: [agentItem()] }],
           nextCursor: null,
         };
       }
@@ -56,7 +69,7 @@ function classifierTransport(
           turn: {
             status: turnStatus,
             error: turnError,
-            items: inlineItems ? [{ type: "agentMessage", text: agentText }] : [],
+            items: inlineItems ? [agentItem()] : [],
           },
         },
       };
@@ -67,14 +80,14 @@ function classifierTransport(
 test("classifier creates one ephemeral read-only thread with no dynamic tools", async () => {
   const transport = classifierTransport(
     JSON.stringify({
-      tier: "balanced",
-      confidence: 0.9,
-      taskType: "code_generation",
-      rationale: "normal change",
+      route: {
+        tier: "balanced",
+        rationale: "normal change",
+      },
     })
   );
   const classifier = createClassifier({ transport, timeoutMs: 500 });
-  const result = await classifier.classify({ context: { current: {}, recentUserInputs: [] }, model: "spark", effort: "low" });
+  const result = await classifier.classify({ context: { current: {}, recentTurns: [] }, model: "spark", effort: "low" });
   assert.equal(result.classification.tier, "balanced");
   assert.equal("effort" in result.classification, false);
   const start = transport.calls.find((call) => call.method === "thread/start");
@@ -83,8 +96,9 @@ test("classifier creates one ephemeral read-only thread with no dynamic tools", 
   assert.equal(start.params.sandbox, "read-only");
   assert.deepEqual(start.params.dynamicTools, []);
   const turn = transport.calls.find((call) => call.method === "turn/start");
-  assert.equal("effort" in turn.params.outputSchema.properties, false);
-  assert.match(turn.params.input[0].text, /Do not return an effort field/);
+  assert.deepEqual(turn.params.outputSchema.required, ["route"]);
+  assert.equal(turn.params.outputSchema.properties.route.anyOf.every((variant) => !variant.properties.effort), true);
+  assert.match(turn.params.input[0].text, /"automaticEffortTiers":\[\]/);
 });
 
 test("classifier requests effort only when a configured tier uses Auto", async () => {
@@ -93,15 +107,13 @@ test("classifier requests effort only when a configured tier uses Auto", async (
       route: {
         tier: "balanced",
         effort: "high",
-        confidence: 0.9,
-        taskType: "code_generation",
         rationale: "normal change",
       },
     })
   );
   const classifier = createClassifier({ transport, timeoutMs: 500 });
   const result = await classifier.classify({
-    context: { current: {}, recentUserInputs: [] },
+    context: { current: {}, recentTurns: [] },
     model: "spark",
     effort: "low",
     automaticEffortTiers: ["balanced"],
@@ -119,8 +131,8 @@ test("classifier requests effort only when a configured tier uses Auto", async (
   assert.equal(effortVariants.every((variant) => variant.required.includes("effort")), true);
   assert.equal(fixedVariants.every((variant) => !variant.required.includes("effort")), true);
   assert.equal(effortVariants[0].properties.effort.enum.includes("ultra"), true);
-  assert.match(turn.params.input[0].text, /Auto-effort tiers: balanced/);
-  assert.match(turn.params.input[0].text, /"route" field/);
+  assert.equal(variants.length, 4);
+  assert.match(turn.params.input[0].text, /"automaticEffortTiers":\["balanced"\]/);
 });
 
 test("classifier schema and prompt use enabled custom tiers", async () => {
@@ -140,15 +152,13 @@ test("classifier schema and prompt use enabled custom tiers", async () => {
       route: {
         tier: "routine-plus",
         effort: "high",
-        confidence: 0.9,
-        taskType: "code_generation",
         rationale: "bounded implementation",
       },
     })
   );
   const classifier = createClassifier({ transport, timeoutMs: 500 });
   const result = await classifier.classify({
-    context: { current: {}, recentUserInputs: [] },
+    context: { current: {}, recentTurns: [] },
     model: "spark",
     effort: "low",
     tiers,
@@ -164,6 +174,31 @@ test("classifier schema and prompt use enabled custom tiers", async () => {
   assert.match(turn.params.input[0].text, /bounded changes spanning a few files/);
 });
 
+test("classifier schema supports a custom-only tier set and updates with its effort mode", () => {
+  const tiers = defaultTierDefinitions().map((tier) => ({ ...tier, enabled: false }));
+  tiers.splice(2, 0, {
+    id: "solo-custom",
+    builtin: false,
+    enabled: true,
+    name: "Solo custom",
+    prompt: "Use for the only enabled routing boundary.",
+    model: "custom",
+    effort: "auto",
+  });
+
+  const automaticSchema = classifierOutputSchema(["solo-custom"], tiers);
+  const automaticVariants = automaticSchema.properties.route.anyOf;
+  assert.equal(automaticVariants.length, 1);
+  assert.deepEqual(automaticVariants[0].properties.tier.enum, ["solo-custom"]);
+  assert.deepEqual(automaticVariants[0].required, ["tier", "effort", "rationale"]);
+
+  tiers.find((tier) => tier.id === "solo-custom").effort = "high";
+  const fixedSchema = classifierOutputSchema([], tiers);
+  assert.equal(fixedSchema.properties.route.anyOf.length, 1);
+  assert.deepEqual(fixedSchema.properties.route.anyOf[0].required, ["tier", "rationale"]);
+  assert.equal("effort" in fixedSchema.properties.route.anyOf[0].properties, false);
+});
+
 test("classifier exposes a safe structured-output failure category", async () => {
   const turnError = {
     message: JSON.stringify({ error: { code: "invalid_json_schema", message: "schema rejected" }, status: 400 }),
@@ -175,7 +210,7 @@ test("classifier exposes a safe structured-output failure category", async () =>
     timeoutMs: 500,
   });
   await assert.rejects(
-    classifier.classify({ context: { current: {}, recentUserInputs: [] }, model: "spark", effort: "low" }),
+    classifier.classify({ context: { current: {}, recentTurns: [] }, model: "spark", effort: "low" }),
     (error) => error instanceof ClassificationError && error.category === "invalid_json_schema"
   );
 });
@@ -183,18 +218,23 @@ test("classifier exposes a safe structured-output failure category", async () =>
 test("classifier rejects malformed structured output", async () => {
   const classifier = createClassifier({ transport: classifierTransport("not-json"), timeoutMs: 500 });
   await assert.rejects(
-    classifier.classify({ context: { current: {}, recentUserInputs: [] }, model: "spark", effort: "low" }),
+    classifier.classify({ context: { current: {}, recentTurns: [] }, model: "spark", effort: "low" }),
     (error) => error instanceof ClassificationError && error.category === "invalid_json"
   );
 });
 
 test("classifier reloads the full last turn when completion only contains a summary", async () => {
   const transport = classifierTransport(
-    JSON.stringify({ tier: "economy", effort: "low", confidence: 0.98, taskType: "question", rationale: "short answer" }),
-    { inlineItems: false }
+    JSON.stringify({ route: { tier: "economy", effort: "low", rationale: "short answer" } }),
+    { inlineItems: false, messagePhase: null }
   );
   const classifier = createClassifier({ transport, timeoutMs: 500 });
-  const result = await classifier.classify({ context: { current: {}, recentUserInputs: [] }, model: "spark", effort: "low" });
+  const result = await classifier.classify({
+    context: { current: {}, recentTurns: [] },
+    model: "spark",
+    effort: "low",
+    automaticEffortTiers: ["economy"],
+  });
   assert.equal(result.classification.tier, "economy");
   const fullRead = transport.calls.find((call) => call.method === "thread/turns/list");
   assert.deepEqual(fullRead.params, {
@@ -208,11 +248,11 @@ test("classifier reloads the full last turn when completion only contains a summ
 
 test("classifier consumes the completed agent item when ephemeral history is unavailable", async () => {
   const transport = classifierTransport(
-    JSON.stringify({ tier: "complex", effort: "high", confidence: 0.92, taskType: "debugging", rationale: "deep failure" }),
+    JSON.stringify({ route: { tier: "complex", rationale: "deep failure" } }),
     { inlineItems: false, streamItem: true, failFullRead: true }
   );
   const classifier = createClassifier({ transport, timeoutMs: 500 });
-  const result = await classifier.classify({ context: { current: {}, recentUserInputs: [] }, model: "spark", effort: "low" });
+  const result = await classifier.classify({ context: { current: {}, recentTurns: [] }, model: "spark", effort: "low" });
   assert.equal(result.classification.tier, "complex");
   assert.equal(transport.calls.some((call) => call.method === "thread/turns/list"), false);
 });
@@ -226,7 +266,7 @@ test("classifier transport timeout is normalized to the timeout error category",
   };
   const classifier = createClassifier({ transport, timeoutMs: 50 });
   await assert.rejects(
-    classifier.classify({ context: { current: {}, recentUserInputs: [] }, model: "spark", effort: "low" }),
+    classifier.classify({ context: { current: {}, recentTurns: [] }, model: "spark", effort: "low" }),
     (error) => error instanceof ClassificationError && error.category === "timeout"
   );
 });

@@ -2,10 +2,14 @@ const { diagnosticLog, diagnosticWarn } = require("../core/diagnostics.cjs");
 const { createClassifier } = require("./classifier.cjs");
 const { createModelCatalog } = require("./catalog.cjs");
 const {
+  ASSISTANT_FINAL_TEXT_LIMIT,
+  assistantFinalFromItems,
+  assistantFinalFromTurn,
   createRoutingContext,
   normalizeHistoryUserInputLimit,
+  recentTurnsFromTurns,
   summarizeUserInput,
-  userInputsFromTurns,
+  trimMiddleText,
 } = require("./context.cjs");
 const {
   AUTO_REASONING_EFFORT,
@@ -14,7 +18,6 @@ const {
   SMART_ROUTER_PLUGIN_ID,
 } = require("./constants.cjs");
 const {
-  applyClassificationPolicy,
   resolveClassifierRoute,
   resolveFallbackRoute,
   resolveTierRoute,
@@ -29,7 +32,8 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
   const stateStore = createAutoStateStore({ filePath: stateFilePath });
   const catalog = createModelCatalog();
   const historyByThread = new Map();
-  const usageByThread = new Map();
+  const historyRevisionByThread = new Map();
+  const openHistoryTurnsByThread = new Map();
   const externalRequests = new Map();
   const threadRoutingChains = new Map();
   const turnRouteStatus = createTurnRouteStatus();
@@ -52,6 +56,29 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
 
   function classificationHistoryLimit(config = pluginConfig()) {
     return normalizeHistoryUserInputLimit(config?.values?.classifierHistoryCount);
+  }
+
+  function historyRevision(threadId) {
+    return historyRevisionByThread.get(threadId) || 0;
+  }
+
+  function markHistoryChanged(threadId) {
+    if (!threadId) return;
+    historyRevisionByThread.set(threadId, historyRevision(threadId) + 1);
+  }
+
+  function beginHistoryTurn(threadId) {
+    openHistoryTurnsByThread.set(threadId, (openHistoryTurnsByThread.get(threadId) || 0) + 1);
+  }
+
+  function endHistoryTurn(threadId) {
+    const remaining = (openHistoryTurnsByThread.get(threadId) || 0) - 1;
+    if (remaining > 0) openHistoryTurnsByThread.set(threadId, remaining);
+    else openHistoryTurnsByThread.delete(threadId);
+  }
+
+  function hasOpenHistoryTurn(threadId) {
+    return (openHistoryTurnsByThread.get(threadId) || 0) > 0;
   }
 
   function isEnabled() {
@@ -105,6 +132,9 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     onClosed() {
       catalog.clear();
       catalogRefreshPromise = null;
+      historyByThread.clear();
+      historyRevisionByThread.clear();
+      openHistoryTurnsByThread.clear();
       // App Server 连接断开即表示没有仍可确认的真实执行，防止任务摘要显示过期状态。
       turnRouteStatus.clearAll();
     },
@@ -179,26 +209,32 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     if (
       cached?.generation === historyCacheGeneration &&
       cached.limit === historyLimit &&
-      Array.isArray(cached.inputs)
+      Array.isArray(cached.turns)
     ) {
-      return cached.inputs;
+      return cached.turns;
     }
     if (cached) historyByThread.delete(threadId);
     const requestGeneration = historyCacheGeneration;
+    const requestRevision = historyRevision(threadId);
     try {
       const result = await transport.request(
         "thread/turns/list",
         { threadId, cursor: null, limit: historyLimit, sortDirection: "desc", itemsView: "full" },
         { timeoutMs: deadlineAt ? remainingRouteMs(deadlineAt, 4_000) : 4_000 }
       );
-      // desc 页先倒序为时间正序，再抽取配置数量的最近用户输入。
-      const history = userInputsFromTurns(
+      // desc 页先倒序为时间正序，再抽取配置数量的最近完整回合。
+      const history = recentTurnsFromTurns(
         [...(Array.isArray(result?.data) ? result.data : [])].reverse(),
         historyLimit
       );
       // 配置可能在请求期间变化；旧请求结果只能服务当前回合，不能污染新尺寸缓存。
-      if (requestGeneration === historyCacheGeneration && classificationHistoryLimit() === historyLimit) {
-        historyByThread.set(threadId, { generation: requestGeneration, limit: historyLimit, inputs: history });
+      if (
+        requestGeneration === historyCacheGeneration &&
+        requestRevision === historyRevision(threadId) &&
+        !hasOpenHistoryTurn(threadId) &&
+        classificationHistoryLimit() === historyLimit
+      ) {
+        historyByThread.set(threadId, { generation: requestGeneration, limit: historyLimit, turns: history });
       }
       return history;
     } catch {
@@ -207,20 +243,98 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     }
   }
 
-  function appendUserInput(threadId, input) {
+  function appendUserTurn(threadId, input) {
     if (!threadId) return;
+    // 即使当前没有可追加的完整缓存，回合开始也会让更早发出的历史响应失去权威性。
+    markHistoryChanged(threadId);
+    beginHistoryTurn(threadId);
     const historyLimit = classificationHistoryLimit();
     const cached = historyByThread.get(threadId);
     // 未完成服务端历史读取时不创建局部缓存，避免手动回合让后续 Auto 误判缓存已完整。
     if (
       cached?.generation !== historyCacheGeneration ||
       cached.limit !== historyLimit ||
-      !Array.isArray(cached.inputs)
+      !Array.isArray(cached.turns)
     ) {
       return;
     }
-    cached.inputs.push(summarizeUserInput(input));
-    while (cached.inputs.length > historyLimit) cached.inputs.shift();
+    cached.turns.push({
+      user: summarizeUserInput(input),
+      // 这些字段只服务缓存关联，createRoutingContext 会在送入分类器前剥离。
+      pending: true,
+      turnId: "",
+      finalConfirmed: false,
+    });
+    while (cached.turns.length > historyLimit) cached.turns.shift();
+  }
+
+  function cachedPendingTurn(threadId, turnId = "") {
+    const cached = historyByThread.get(threadId);
+    if (!Array.isArray(cached?.turns)) return null;
+    const pending = cached.turns.filter((turn) => turn?.pending === true);
+    if (turnId) {
+      const matched = pending.findLast((turn) => turn.turnId === turnId);
+      if (matched) return matched;
+    }
+    return pending.findLast((turn) => !turn.turnId) || pending.at(-1) || null;
+  }
+
+  function associateCachedTurn(threadId, turnId) {
+    if (!threadId || !turnId) return;
+    const pending = cachedPendingTurn(threadId, turnId);
+    if (pending && !pending.turnId) pending.turnId = turnId;
+  }
+
+  function appendCachedAssistantFinal(threadId, turnId, item) {
+    if (item?.type !== "agentMessage" || item.phase !== "final_answer") return;
+    markHistoryChanged(threadId);
+    const assistantFinal = assistantFinalFromItems([item]);
+    const pending = cachedPendingTurn(threadId, turnId);
+    if (!assistantFinal) return;
+    if (!pending) {
+      // 收到未被本地回合结构覆盖的最终回答时，现有缓存已无法证明完整。
+      historyByThread.delete(threadId);
+      return;
+    }
+    pending.assistantFinal = trimMiddleText(
+      [pending.assistantFinal, assistantFinal].filter(Boolean).join("\n\n"),
+      ASSISTANT_FINAL_TEXT_LIMIT
+    );
+    pending.finalConfirmed = true;
+  }
+
+  function completeCachedTurn(threadId, turn) {
+    markHistoryChanged(threadId);
+    endHistoryTurn(threadId);
+    const turnId = String(turn?.id || "");
+    const pending = cachedPendingTurn(threadId, turnId);
+    if (!pending) {
+      historyByThread.delete(threadId);
+      return;
+    }
+    const inlineFinal = assistantFinalFromTurn(turn);
+    if (inlineFinal) {
+      // 完整 turn 是权威来源，可消除 item/completed 重放造成的重复拼接。
+      pending.assistantFinal = inlineFinal;
+      pending.finalConfirmed = true;
+    }
+    if (!pending.finalConfirmed) {
+      // 无法确认用户可见最终回答时丢弃局部缓存，下一轮强制从 full history 补齐。
+      historyByThread.delete(threadId);
+      return;
+    }
+    delete pending.pending;
+    delete pending.turnId;
+    delete pending.finalConfirmed;
+  }
+
+  function discardUnstartedCachedTurn(threadId) {
+    markHistoryChanged(threadId);
+    endHistoryTurn(threadId);
+    const cached = historyByThread.get(threadId);
+    if (!Array.isArray(cached?.turns)) return;
+    const index = cached.turns.findLastIndex((turn) => turn?.pending === true && !turn.turnId);
+    if (index >= 0) cached.turns.splice(index, 1);
   }
 
   function rewriteTurn(message, route) {
@@ -266,18 +380,10 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       const historyLimit = classificationHistoryLimit(config);
       if (catalog.models().length === 0) await refreshCatalog(deadlineAt);
       const history = await recentHistory(threadId, historyLimit, deadlineAt);
-      const threadState = stateStore.threadState(threadId) || {};
       const context = createRoutingContext({
         input: message.params?.input,
         history,
         historyLimit,
-        lastRoute: {
-          tier: threadState.lastTier,
-          model: threadState.lastModel,
-          effort: threadState.lastEffort,
-        },
-        usage: usageByThread.get(threadId),
-        previousStatus: threadState.lastStatus,
       });
       const configValues = config.values;
       const tiers = config.tiers;
@@ -302,7 +408,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
         automaticEffortTiers,
         deadlineAt,
       });
-      const classification = applyClassificationPolicy(result.classification, threadState.lastStatus, tiers);
+      const classification = result.classification;
       if (automaticEffortTiers.includes(classification.tier) && !EFFORT_ORDER.includes(classification.effort)) {
         const error = new Error("Classifier omitted effort for an automatic-effort tier");
         error.category = "invalid_schema";
@@ -374,6 +480,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
         requestKey: requestKey(original.id),
         threadId: String(original.params?.threadId || ""),
         historyCacheGeneration,
+        historyRevision: historyRevision(String(original.params?.threadId || "")),
         historyRequest,
       });
     }
@@ -391,7 +498,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       } else {
         emitRouteStatus({ status: "cleared", threadId });
       }
-      appendUserInput(threadId, message.params?.input);
+      appendUserTurn(threadId, message.params?.input);
     }
     return concreteGuard(message);
   }
@@ -412,12 +519,19 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
   function observeServerNotification(message) {
     if (!message?.method || !message.params) return;
     const threadId = String(message.params.threadId || message.params.thread?.id || "");
-    if (message.method === "thread/tokenUsage/updated" && threadId) {
-      usageByThread.set(threadId, message.params.tokenUsage);
+    if (!threadId || transport.isInternalThreadId(threadId)) return;
+    if (message.method === "turn/started") {
+      associateCachedTurn(threadId, String(message.params.turn?.id || message.params.turnId || ""));
+    } else if (message.method === "item/completed") {
+      appendCachedAssistantFinal(threadId, String(message.params.turnId || ""), message.params.item);
+    } else if (["turn/completed", "turn/failed", "turn/interrupted"].includes(message.method)) {
+      completeCachedTurn(threadId, message.params.turn);
     }
     if (message.method === "thread/deleted" && threadId) {
       historyByThread.delete(threadId);
-      usageByThread.delete(threadId);
+      openHistoryTurnsByThread.delete(threadId);
+      // 保留递增后的修订号，使删除前发出的迟到历史响应无法重新创建缓存。
+      markHistoryChanged(threadId);
     }
   }
 
@@ -432,19 +546,25 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       const request = meta.historyRequest;
       const canHydrateCurrentCache =
         meta.historyCacheGeneration === historyCacheGeneration &&
+        meta.historyRevision === historyRevision(meta.threadId) &&
+        !hasOpenHistoryTurn(meta.threadId) &&
         request?.cursor == null &&
         request.limit >= historyLimit &&
         request.sortDirection === "desc" &&
         request.itemsView === "full";
       if (canHydrateCurrentCache) {
         // 仅用完整的最新页填充缓存，分页或旧配置响应不能让后续分类误判缓存已经完备。
-        const history = userInputsFromTurns([...filtered.result.data].reverse(), historyLimit);
+        const history = recentTurnsFromTurns([...filtered.result.data].reverse(), historyLimit);
         historyByThread.set(meta.threadId, {
           generation: historyCacheGeneration,
           limit: historyLimit,
-          inputs: history,
+          turns: history,
         });
       }
+    }
+    if (meta?.method === "turn/start" && meta.threadId) {
+      if (filtered?.error) discardUnstartedCachedTurn(meta.threadId);
+      else associateCachedTurn(meta.threadId, String(filtered?.result?.turn?.id || filtered?.result?.turnId || ""));
     }
     const withRouteStatus = turnRouteStatus.processServerMessage(filtered, meta);
     const threadId = String(withRouteStatus?.params?.threadId || withRouteStatus?.params?.thread?.id || meta?.threadId || "");

@@ -153,9 +153,6 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
   let classifierText = JSON.stringify({
     route: {
       tier: "balanced",
-      effort: "high",
-      confidence: 0.9,
-      taskType: "code_generation",
       rationale: "ordinary implementation",
     },
   });
@@ -317,8 +314,6 @@ test("Auto turn is classified on the same App Server, rewritten, hidden and safe
     route: {
       // 当前只有经济档位使用自动推理强度，缺失 effort 应触发失败回退。
       tier: "economy",
-      confidence: 0.9,
-      taskType: "code_generation",
       rationale: "missing automatic effort",
     },
   });
@@ -556,9 +551,6 @@ test("pending Auto classification blocks only requests from the same thread", as
   const classifierText = JSON.stringify({
     route: {
       tier: "balanced",
-      effort: "high",
-      confidence: 0.9,
-      taskType: "code_generation",
       rationale: "integration ordering check",
     },
   });
@@ -648,9 +640,6 @@ test("manual selection suppresses delayed route status after classification alre
     JSON.stringify({
       route: {
         tier: "balanced",
-        effort: "high",
-        confidence: 0.9,
-        taskType: "code_generation",
         rationale: "delayed result",
       },
     })
@@ -703,13 +692,19 @@ test("classification history count controls hydration, caching, invalidation and
 
   const userTurn = (text) => ({
     status: "completed",
-    items: [{ type: "userMessage", content: [{ type: "text", text }] }],
+    items: [
+      { type: "userMessage", content: [{ type: "text", text }] },
+      { type: "agentMessage", phase: "commentary", text: `working-${text}` },
+      { type: "agentMessage", phase: "final_answer", text: `done-${text}` },
+    ],
   });
   const serverHistory = new Map([
     ["history-thread", [5, 4, 3, 2, 1].map((index) => userTurn(`history-${index}`))],
     ["manual-thread", [2, 1].map((index) => userTurn(`manual-history-${index}`))],
     ["retry-thread", [userTurn("retry-history-1")]],
     ["external-thread", [4, 3, 2, 1].map((index) => userTurn(`external-history-${index}`))],
+    ["incomplete-thread", [userTurn("incomplete-history-1")]],
+    ["live-stale-thread", [userTurn("live-stale-history-1")]],
   ]);
   const historyRequests = [];
   const classifierContexts = [];
@@ -745,8 +740,6 @@ test("classification history count controls hydration, caching, invalidation and
         route: {
           tier: "economy",
           effort: "low",
-          confidence: 0.95,
-          taskType: "question",
           rationale: "history test",
         },
       });
@@ -780,23 +773,56 @@ test("classification history count controls hydration, caching, invalidation and
       },
     });
 
+  const completeUserTurn = (threadId, turnId, finalText = "") => {
+    service.processServerMessage({
+      method: "turn/started",
+      params: { threadId, turn: { id: turnId, status: "inProgress" } },
+    });
+    service.processServerMessage({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: { type: "agentMessage", phase: "commentary", text: "intermediate progress" },
+      },
+    });
+    if (finalText) {
+      service.processServerMessage({
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: { type: "agentMessage", phase: "final_answer", text: finalText },
+        },
+      });
+    }
+    // completion 通知可能只有摘要；缓存应使用先前 item/completed 确认的最终回答。
+    service.processServerMessage({
+      method: "turn/completed",
+      params: { threadId, turn: { id: turnId, status: "completed", items: [] } },
+    });
+  };
+
   await startTurn("history-thread", "history-turn-1", "current-1");
+  completeUserTurn("history-thread", "real-history-turn-1", "completed-current-1");
   await startTurn("history-thread", "history-turn-2", "current-2");
   assert.deepEqual(
     historyRequests.filter((request) => request.threadId === "history-thread"),
     [{ threadId: "history-thread", limit: 3 }]
   );
-  assert.deepEqual(classifierContexts[0].recentUserInputs.map((entry) => entry.text), [
+  assert.deepEqual(classifierContexts[0].recentTurns.map((entry) => entry.user.text), [
     "history-3",
     "history-4",
     "history-5",
   ]);
-  // 第二轮命中缓存，并使用第一轮追加后的最近三条历史用户消息。
-  assert.deepEqual(classifierContexts[1].recentUserInputs.map((entry) => entry.text), [
+  // 第二轮命中缓存，并使用第一轮追加后的最近三个历史回合。
+  assert.deepEqual(classifierContexts[1].recentTurns.map((entry) => entry.user.text), [
     "history-4",
     "history-5",
     "current-1",
   ]);
+  assert.equal(classifierContexts[1].recentTurns.at(-1).assistantFinal, "completed-current-1");
+  assert.equal(JSON.stringify(classifierContexts[1]).includes("intermediate progress"), false);
   assert.equal(classifierContexts[1].current.text, "current-2");
 
   configStore.update("opencodex.smart-model-router", {
@@ -811,7 +837,7 @@ test("classification history count controls hydration, caching, invalidation and
       { threadId: "history-thread", limit: 5 },
     ]
   );
-  assert.deepEqual(classifierContexts[2].recentUserInputs.map((entry) => entry.text), [
+  assert.deepEqual(classifierContexts[2].recentTurns.map((entry) => entry.user.text), [
     "history-1",
     "history-2",
     "history-3",
@@ -825,7 +851,7 @@ test("classification history count controls hydration, caching, invalidation and
     historyRequests.filter((request) => request.threadId === "manual-thread"),
     [{ threadId: "manual-thread", limit: 5 }]
   );
-  assert.deepEqual(classifierContexts[3].recentUserInputs.map((entry) => entry.text), [
+  assert.deepEqual(classifierContexts[3].recentTurns.map((entry) => entry.user.text), [
     "manual-history-1",
     "manual-history-2",
   ]);
@@ -839,8 +865,8 @@ test("classification history count controls hydration, caching, invalidation and
       { threadId: "retry-thread", limit: 5 },
     ]
   );
-  assert.deepEqual(classifierContexts[4].recentUserInputs, []);
-  assert.deepEqual(classifierContexts[5].recentUserInputs.map((entry) => entry.text), ["retry-history-1"]);
+  assert.deepEqual(classifierContexts[4].recentTurns, []);
+  assert.deepEqual(classifierContexts[5].recentTurns.map((entry) => entry.user.text), ["retry-history-1"]);
 
   await service.processClientMessage({
     id: "stale-external-history",
@@ -867,10 +893,47 @@ test("classification history count controls hydration, caching, invalidation and
     historyRequests.filter((request) => request.threadId === "external-thread"),
     [{ threadId: "external-thread", limit: 4 }]
   );
-  assert.deepEqual(classifierContexts[6].recentUserInputs.map((entry) => entry.text), [
+  assert.deepEqual(classifierContexts[6].recentTurns.map((entry) => entry.user.text), [
     "external-history-1",
     "external-history-2",
     "external-history-3",
     "external-history-4",
   ]);
+
+  await startTurn("incomplete-thread", "incomplete-turn-1", "incomplete-current-1");
+  completeUserTurn("incomplete-thread", "real-incomplete-turn-1");
+  await startTurn("incomplete-thread", "incomplete-turn-2", "incomplete-current-2");
+  assert.deepEqual(
+    historyRequests.filter((request) => request.threadId === "incomplete-thread"),
+    [
+      { threadId: "incomplete-thread", limit: 4 },
+      { threadId: "incomplete-thread", limit: 4 },
+    ]
+  );
+  assert.deepEqual(classifierContexts[8].recentTurns.map((entry) => entry.user.text), ["incomplete-history-1"]);
+
+  await service.processClientMessage({
+    id: "live-stale-history",
+    method: "thread/turns/list",
+    params: {
+      threadId: "live-stale-thread",
+      cursor: null,
+      limit: 4,
+      sortDirection: "desc",
+      itemsView: "full",
+    },
+  });
+  await startTurn("live-stale-thread", "live-stale-manual", "live-stale-current", "gpt-5.3-codex-spark");
+  // 请求发出后又开始了新回合，这个旧快照不能覆盖本地正在跟踪的回合缓存。
+  service.processServerMessage({
+    id: "live-stale-history",
+    result: { data: serverHistory.get("live-stale-thread"), nextCursor: null },
+  });
+  completeUserTurn("live-stale-thread", "real-live-stale-turn", "completed-live-stale-current");
+  await startTurn("live-stale-thread", "live-stale-auto", "live-stale-auto-current");
+  assert.deepEqual(
+    historyRequests.filter((request) => request.threadId === "live-stale-thread"),
+    [{ threadId: "live-stale-thread", limit: 4 }]
+  );
+  assert.deepEqual(classifierContexts[9].recentTurns.map((entry) => entry.user.text), ["live-stale-history-1"]);
 });
