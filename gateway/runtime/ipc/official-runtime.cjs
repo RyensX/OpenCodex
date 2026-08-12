@@ -51,6 +51,8 @@ const requestContext = new AsyncLocalStorage();
 const requestRoutes = new Map();
 // requestRouteSummaries 保存 requestId 对应的入站摘要，让出站 fetch-response 日志也能带上原始 URL。
 const requestRouteSummaries = new Map();
+const REQUEST_ROUTE_MAX_ENTRIES = 4096;
+const ROUTE_ID_SCAN_MAX_NODES = 256;
 let officialBundle = null;
 let wsHub = null;
 let appServerChildDecorator = null;
@@ -622,6 +624,8 @@ function alignOfficialElectronEnvironment(bundle) {
   // 官方 main 在开发态会从环境/package metadata 推导 build flavor；gateway 明确按 prod 对齐。
   process.env.BUILD_FLAVOR = process.env.BUILD_FLAVOR || "prod";
   process.env.npm_package_codexBuildFlavor = process.env.npm_package_codexBuildFlavor || "prod";
+  // 抽取缓存中的 Native pet 适配只认这个网关专用标记，普通官方桌面进程不会受影响。
+  process.env.OPENCODEX_GATEWAY_HIDDEN_RUNTIME = "1";
   if (bundle.build && bundle.build !== "unknown") {
     process.env.npm_package_codexBuildNumber = process.env.npm_package_codexBuildNumber || String(bundle.build);
   }
@@ -987,6 +991,84 @@ function payloadFromArgs(args) {
   return args.length <= 1 ? (args[0] ?? null) : args;
 }
 
+function outgoingWsEnvelope(channel, args) {
+  const payload = payloadFromArgs(args);
+  /**
+   * 浏览器桥接层在 args 缺失时会用 payload 还原单参数调用。官方绝大多数消息都只有一个参数，
+   * 若同时发送 payload 和 args，会让应用目录/会话快照等大对象在 JSON 中完整出现两次。
+   * 零参数、多参数及 undefined 仍保留 args，避免改变这些少见边界的 Electron IPC 语义。
+   */
+  if (args.length === 1 && args[0] !== undefined) return { channel, payload };
+  return { channel, payload, args };
+}
+
+const WEB_APP_CATALOG_ICON_KEYS = ["256_square"];
+const WEB_APP_CATALOG_METADATA_KEYS = ["categories", "firstPartyType"];
+
+function compactCatalogObjectField(value, allowedKeys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const keys = Object.keys(value);
+  if (keys.every((key) => allowedKeys.includes(key))) return value;
+  const compacted = {};
+  for (const key of allowedKeys) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) compacted[key] = value[key];
+  }
+  return compacted;
+}
+
+function compactWebAppCatalogEntry(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+  /**
+   * 当前官方 renderer 对目录对象的完整静态使用审计结果：
+   * - 图标只读取 iconAssets/iconDarkAssets["256_square"]；
+   * - appMetadata 只读取 categories 与 firstPartyType。
+   * 其它顶层业务字段原样保留，且只构造发往 Web 的副本，不改官方 Electron/app-server 对象。
+   */
+  const iconAssets = compactCatalogObjectField(entry.iconAssets, WEB_APP_CATALOG_ICON_KEYS);
+  const iconDarkAssets = compactCatalogObjectField(entry.iconDarkAssets, WEB_APP_CATALOG_ICON_KEYS);
+  const appMetadata = compactCatalogObjectField(entry.appMetadata, WEB_APP_CATALOG_METADATA_KEYS);
+  if (
+    iconAssets === entry.iconAssets &&
+    iconDarkAssets === entry.iconDarkAssets &&
+    appMetadata === entry.appMetadata
+  ) {
+    return entry;
+  }
+  return { ...entry, appMetadata, iconAssets, iconDarkAssets };
+}
+
+function compactWebAppCatalogEntries(entries) {
+  if (!Array.isArray(entries)) return entries;
+  let changed = false;
+  const compacted = entries.map((entry) => {
+    const nextEntry = compactWebAppCatalogEntry(entry);
+    if (nextEntry !== entry) changed = true;
+    return nextEntry;
+  });
+  return changed ? compacted : entries;
+}
+
+function compactOfficialAppCatalogPayload(channel, payload, requestSummary = null) {
+  if (channel !== MESSAGE_FOR_VIEW_CHANNEL || !payload || typeof payload !== "object") return payload;
+  if (payload.type === "mcp-notification" && payload.method === "app/list/updated") {
+    const entries = payload.params?.data;
+    const compacted = compactWebAppCatalogEntries(entries);
+    if (compacted === entries) return payload;
+    return { ...payload, params: { ...payload.params, data: compacted } };
+  }
+  if (payload.type !== "mcp-response" || requestSummary?.requestMethod !== "app/list") return payload;
+  const entries = payload.message?.result?.data;
+  const compacted = compactWebAppCatalogEntries(entries);
+  if (compacted === entries) return payload;
+  return {
+    ...payload,
+    message: {
+      ...payload.message,
+      result: { ...payload.message.result, data: compacted },
+    },
+  };
+}
+
 function isOfficialChunkToken(token) {
   if (!token || typeof token !== "object" || typeof token.type !== "string") return false;
   if (["array-start", "object-start", "container-end", "string-end"].includes(token.type)) return true;
@@ -1186,15 +1268,18 @@ function stringRouteId(value) {
   return "";
 }
 
-function routeIdFromValue(value, depth = 0, seen = new Set()) {
-  if (value == null || depth > 5) return "";
-  if (typeof value !== "object") return "";
-  if (seen.has(value)) return "";
-  seen.add(value);
+function routeIdFromValue(value, depth = 0, state = null) {
+  const traversal = state || { remaining: ROUTE_ID_SCAN_MAX_NODES, seen: new WeakSet() };
+  if (value == null || depth > 5 || typeof value !== "object" || traversal.remaining <= 0) return "";
+  if (traversal.seen.has(value)) return "";
+  traversal.seen.add(value);
+  traversal.remaining -= 1;
 
   if (Array.isArray(value)) {
-    for (const item of value) {
-      const nested = routeIdFromValue(item, depth + 1, seen);
+    // requestId 只会出现在协议包裹附近；超宽参数数组共享总预算，不能阻塞其它 IPC 回包。
+    const childCount = Math.min(value.length, traversal.remaining);
+    for (let index = 0; index < childCount && traversal.remaining > 0; index += 1) {
+      const nested = routeIdFromValue(value[index], depth + 1, traversal);
       if (nested) return nested;
     }
     return "";
@@ -1204,7 +1289,7 @@ function routeIdFromValue(value, depth = 0, seen = new Set()) {
   const requestId = stringRouteId(value.requestId);
   if (requestId) return requestId;
   for (const key of ["request", "message", "response", "payload", "body"]) {
-    const nested = routeIdFromValue(value[key], depth + 1, seen);
+    const nested = routeIdFromValue(value[key], depth + 1, traversal);
     if (nested) return nested;
   }
   if (value.id != null && (depth > 0 || value.method || value.jsonrpc || value.type)) {
@@ -1227,6 +1312,11 @@ function responsePayloadType(channel, args) {
   const payload = payloadFromArgs(args);
   if (payload && typeof payload === "object" && typeof payload.type === "string") return payload.type;
   return channel;
+}
+
+function ipcPayloadShape(value) {
+  if (Array.isArray(value)) return `array(${value.length})`;
+  return value && typeof value === "object" ? "object" : typeof value;
 }
 
 function incomingIpcDiagnosticSummary(channel, payload) {
@@ -1385,7 +1475,8 @@ function outgoingIpcDiagnosticSummary(channel, args, requestSummary = null) {
   const summary = {
     ...(requestSummary && typeof requestSummary === "object" ? requestSummary : {}),
     channel,
-    payloadType: payload && typeof payload === "object" ? `object(${Object.keys(payload).length})` : typeof payload,
+    // 摘要不枚举任意 payload 的全部键，异常大对象也不能把错误日志变成额外热路径。
+    payloadType: ipcPayloadShape(payload),
     requestId: responseRouteIdFromOutgoing(channel, args),
   };
   if (payload && typeof payload === "object") {
@@ -1445,8 +1536,33 @@ function rememberRequestRoute(channel, payload, clientId) {
   if (!clientId) return;
   const requestId = requestRouteIdFromIncoming(channel, payload);
   if (requestId) {
-    requestRoutes.set(requestId, clientId);
-    requestRouteSummaries.set(requestId, incomingIpcDiagnosticSummary(channel, payload));
+    storeBoundedRequestRoute(
+      requestRoutes,
+      requestRouteSummaries,
+      requestId,
+      clientId,
+      incomingIpcDiagnosticSummary(channel, payload)
+    );
+  }
+}
+
+function storeBoundedRequestRoute(
+  routes,
+  summaries,
+  requestId,
+  clientId,
+  summary,
+  maxEntries = REQUEST_ROUTE_MAX_ENTRIES
+) {
+  routes.delete(requestId);
+  summaries.delete(requestId);
+  routes.set(requestId, clientId);
+  summaries.set(requestId, summary);
+  const effectiveMaxEntries = Math.max(1, Number(maxEntries) || REQUEST_ROUTE_MAX_ENTRIES);
+  while (routes.size > effectiveMaxEntries) {
+    const oldestRequestId = routes.keys().next().value;
+    routes.delete(oldestRequestId);
+    summaries.delete(oldestRequestId);
   }
 }
 
@@ -1505,7 +1621,7 @@ function threadListInvalidationEnvelope() {
     method: "query-cache-invalidate",
     params: { queryKey: ["recent-conversations-meta"] },
   };
-  return { channel: MESSAGE_FOR_VIEW_CHANNEL, payload, args: [payload] };
+  return outgoingWsEnvelope(MESSAGE_FOR_VIEW_CHANNEL, [payload]);
 }
 
 function threadListInvalidationRequest() {
@@ -1623,6 +1739,11 @@ function routeOfficialWebContentsSend(
   const requestId = responseRouteIdFromOutgoing(channel, routedArgs);
   const mappedClientId = requestId ? requestRoutes.get(requestId) : "";
   const requestSummary = requestId ? requestRouteSummaries.get(requestId) : null;
+  const compactedPayload = compactOfficialAppCatalogPayload(channel, payload, requestSummary);
+  if (compactedPayload !== payload && routedArgs.length === 1) {
+    payload = compactedPayload;
+    routedArgs = [payload];
+  }
   const store = (requestContext && requestContext.getStore && requestContext.getStore()) || {};
   const targetClientId = mappedClientId || (isTargetedOutgoing(channel, payload) ? store.clientId : "");
   const routeBase = {
@@ -1645,30 +1766,51 @@ function routeOfficialWebContentsSend(
     suppressDiagnostic: suppressRouteDiagnostic,
     diagnosticSummary: routeBase,
   };
-  if (targetClientId && wsHub.sendTo(targetClientId, { channel, payload, args: routedArgs }, wsDiagnosticOptions)) {
-    if (DEBUG_LOGS && !suppressRouteDiagnostic) {
-      // 官方 IPC 定向成功投递会随每个请求回包出现，默认不落盘；DEBUG 时用于确认 requestId/clientId 路由。
-      diagnosticLog("official-ipc-route", "send_to_client", { ...routeBase, route: "target" });
+  if (
+    channel === MESSAGE_FOR_VIEW_CHANNEL &&
+    payload?.type === "mcp-notification" &&
+    payload.method === "app/list/updated"
+  ) {
+    /**
+     * 官方 runtime 在初始化/页面恢复交界处可能连续发布同一份完整目录；由 WS 层按最终帧精确去重，
+     * 任意目录字段变化都会产生新摘要并立即发送，新连接也不会继承其它页面的去重状态。
+     */
+    wsDiagnosticOptions.dedupeKey = "official-app-list-updated";
+    wsDiagnosticOptions.dedupeWindowMs = 10_000;
+  }
+  const wsEnvelope = outgoingWsEnvelope(channel, routedArgs);
+  if (targetClientId) {
+    if (wsHub.sendTo(targetClientId, wsEnvelope, wsDiagnosticOptions)) {
+      if (DEBUG_LOGS && !suppressRouteDiagnostic) {
+        // 官方 IPC 定向成功投递会随每个请求回包出现，默认不落盘；DEBUG 时用于确认 requestId/clientId 路由。
+        diagnosticLog("official-ipc-route", "send_to_client", { ...routeBase, route: "target" });
+      }
+      return true;
     }
-    return true;
+    // 已明确归属某个页面的响应不能因目标离线而广播，否则既浪费大包流量，也会跨页面泄露状态。
+    if (DEBUG_LOGS && !suppressRouteDiagnostic) {
+      diagnosticWarn("official-ipc-route", "target_client_unavailable", routeBase);
+    }
+    return false;
+  }
+  if (isTargetedOutgoing(channel, payload)) {
+    /**
+     * 隐藏官方 renderer 也会周期性发起 thread/list 等请求；它们的响应没有浏览器路由，
+     * 不能退化为广播。浏览器请求若目标已离线同样直接丢弃，避免其它页面解析无关大包或看到响应。
+     */
+    if (DEBUG_LOGS) {
+      diagnosticWarn("official-ipc-route", "target_route_unavailable", routeBase);
+    }
+    return false;
   }
   // 没有 requestId 或 clientId 的通知类消息广播给所有在线浏览器。
-  const broadcastCount = wsHub.broadcast({ channel, payload, args: routedArgs }, wsDiagnosticOptions);
+  const broadcastCount = wsHub.broadcast(wsEnvelope, wsDiagnosticOptions);
   if (DEBUG_LOGS && !suppressRouteDiagnostic) {
     // 成功广播只是常规路由摘要，数量会随会话状态同步放大；默认压下，DEBUG 时用于追路由。
     diagnosticLog("official-ipc-route", "broadcast", {
       ...routeBase,
       broadcastCount,
-      route: targetClientId ? "target_fallback_broadcast" : "broadcast",
-    });
-  }
-  if (targetClientId && broadcastCount === 0) {
-    // 定向回包没有命中任何 WS 客户端时要打日志，这通常表示前端过早发送 IPC 或 WS 已断开。
-    diagnosticWarn("official-ipc-route", "ws_target_missing_for_ipc_response", {
-      channel,
-      requestId,
-      targetClientId: shortId(targetClientId),
-      payloadType: payload && typeof payload === "object" ? payload.type : typeof payload,
+      route: "broadcast",
     });
   }
   return true;
@@ -1678,6 +1820,23 @@ function shouldSuppressHiddenRendererSend(channel, args) {
   const payload = payloadFromArgs(args);
   // 浏览器代理的消息已经通过 WS 转发，继续送进隐藏 renderer 会造成重复消费。
   return channel === MESSAGE_FOR_VIEW_CHANNEL && payload && typeof payload === "object";
+}
+
+const OFFICIAL_WEB_CONTENTS_MAX_LISTENERS = 64;
+
+function configureOfficialWebContentsListenerBudget(webContents) {
+  if (
+    !webContents ||
+    typeof webContents.getMaxListeners !== "function" ||
+    typeof webContents.setMaxListeners !== "function"
+  ) {
+    return false;
+  }
+  const currentLimit = webContents.getMaxListeners();
+  if (!Number.isFinite(currentLimit) || currentLimit >= OFFICIAL_WEB_CONTENTS_MAX_LISTENERS) return false;
+  // 官方主进程由多个独立模块在同一 webContents 上安装 destroyed 清理器；提高有界阈值，避免默认 10 个的误告警。
+  webContents.setMaxListeners(OFFICIAL_WEB_CONTENTS_MAX_LISTENERS);
+  return true;
 }
 
 function patchOfficialWebContents(webContents) {
@@ -1730,6 +1889,7 @@ function patchOfficialWebContents(webContents) {
 function registerOfficialWindow(win) {
   if (!win || win.__opencodexOfficialGatewayRegistered) return;
   win.__opencodexOfficialGatewayRegistered = true;
+  configureOfficialWebContentsListenerBudget(win.webContents);
   // 第一扇官方窗口对应主 renderer；avatarOverlay 等辅助窗口会收到同一批广播，不能再次桥接到同一个 Web 页面。
   const shouldBridge = shouldBridgeOfficialWebContents(
     win.webContents,
@@ -2034,6 +2194,7 @@ function officialBundleStatus() {
         webviewDir: officialBundle.webviewDir,
         bootstrapPath: officialBundle.bootstrapPath,
         cacheProcessedAt: officialBundle.manifest && officialBundle.manifest.processedAt ? officialBundle.manifest.processedAt : null,
+        runtimeOptimizations: officialBundle.manifest?.runtimeOptimizations || null,
       }
     : null;
 }
@@ -2090,8 +2251,9 @@ async function webConfigScript() {
     localeSource: ${JSON.stringify(i18n.source || "")},
     localeMode: ${JSON.stringify(i18n.mode || "")},
     messages: ${JSON.stringify(i18n.messages)},
-    // debugWs 只控制浏览器侧诊断采集，不控制 WS 压缩；压缩属于 gateway 传输层优化。
-    // OPENCODEX_DEBUG_WS=1 时才开启 WS 大包/慢解析诊断，平时不采集。
+    // 浏览器诊断仅在服务端会消费日志或显式排查 WS 时开启，正常模式不产生额外上报请求。
+    debugClientDiagnostics: ${JSON.stringify(DEBUG_LOGS || process.env.OPENCODEX_DEBUG_WS === "1")},
+    // debugWs 只控制 WS 大包/慢解析采样，不控制压缩；压缩属于 gateway 传输层优化。
     debugWs: ${JSON.stringify(process.env.OPENCODEX_DEBUG_WS === "1")},
     appServer: ${JSON.stringify({ kind: "official-electron-ipc", spawnHook: appServerSpawnHookStatus() })},
     sharedObjectSnapshot: ${JSON.stringify({ host_config: { id: "local", kind: "local" } })},
@@ -2193,13 +2355,19 @@ module.exports = {
   startOfficialRuntime,
   webConfigScript,
   __test: {
+    compactOfficialAppCatalogPayload,
+    configureOfficialWebContentsListenerBudget,
     fileManagerPathFromSpawn,
     normalizeInitialSidebarBootstrap,
     OfficialChunkedMessageReceiver,
     officialDesktopIpcSocketPaths,
+    outgoingWsEnvelope,
+    routeIdFromValue,
+    routeOfficialWebContentsSend,
     isHiddenOfficialAppServerArgs,
     shouldBridgeOfficialWebContents,
     shouldInterceptRemoteFileManagerStore,
+    storeBoundedRequestRoute,
     threadListInvalidationEnvelope,
     threadListInvalidationForOfficialMessage,
     threadListInvalidationRequest,

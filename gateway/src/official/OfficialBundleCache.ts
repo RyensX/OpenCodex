@@ -24,6 +24,9 @@ class OfficialBundleRefreshPolicy {
     if (manifest.schemaVersion !== this.schemaVersion) {
       return `缓存清单版本变化：${manifest.schemaVersion || "none"} -> ${this.schemaVersion}`;
     }
+    if (!manifest.runtimeOptimizations || typeof manifest.runtimeOptimizations !== "object") {
+      return "缓存清单缺少运行时优化信息";
+    }
     if (!Number.isFinite(Number(manifest.sourceAsarSize))) {
       return "缓存清单缺少 app.asar 文件大小";
     }
@@ -109,6 +112,9 @@ class OfficialBundleCache {
     if (manifest.schemaVersion !== schemaVersion) {
       return `缓存清单版本变化：${manifest.schemaVersion || "none"} -> ${schemaVersion}`;
     }
+    if (!manifest.runtimeOptimizations || typeof manifest.runtimeOptimizations !== "object") {
+      return "缓存清单缺少运行时优化信息";
+    }
     if (!this.isWebviewReady()) return "已处理的官方运行时缓存缺失或不完整";
 
     const sourceAsarPath = typeof manifest.sourceAsarPath === "string" ? manifest.sourceAsarPath : "";
@@ -180,7 +186,7 @@ class OfficialBundleCache {
 
 /** 根据当前安装源生成 cache manifest，provider 不直接拼 manifest 字段。 */
 class OfficialBundleManifestFactory {
-  create(sourceInfo: any): any {
+  create(sourceInfo: any, runtimeOptimizations: any = null): any {
     return {
       schemaVersion: MANIFEST_SCHEMA_VERSION,
       sourceAppPath: sourceInfo.installRoot,
@@ -195,6 +201,7 @@ class OfficialBundleManifestFactory {
       build: sourceInfo.build,
       sourceAsarSize: sourceInfo.sourceAsarSize,
       sourceAsarMtimeMs: sourceInfo.sourceAsarMtimeMs,
+      runtimeOptimizations,
       processedAt: new Date().toISOString(),
     };
   }

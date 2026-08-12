@@ -4,6 +4,8 @@ const { ROUTER_REQUEST_PREFIX } = require("./constants.cjs");
 
 const DECORATED_CHILD = Symbol("opencodexModelRouterDecoratedChild");
 const MAX_PENDING_CLIENT_FRAMES = 64;
+const MAX_INTERNAL_THREAD_TOMBSTONES = 512;
+const INTERNAL_TURN_TERMINAL_METHODS = new Set(["turn/completed", "turn/failed", "turn/interrupted"]);
 
 // 这些是当前协议中明确的只读请求；官方本身会并发发起它们，调用方不能依赖它们排在未完成的 turn/start 之后。
 const INDEPENDENT_CLIENT_READ_METHODS = new Set([
@@ -229,6 +231,9 @@ function createAppServerTransport({ processClientMessage, processServerMessage, 
     // 删除确认后的尾部通知仍可能稍晚到达，保留短期 tombstone 防止泄漏到官方 Main。
     internalThreadTombstones.set(normalized, Date.now() + 5 * 60 * 1_000);
     pruneInternalThreadTombstones();
+    while (internalThreadTombstones.size > MAX_INTERNAL_THREAD_TOMBSTONES) {
+      internalThreadTombstones.delete(internalThreadTombstones.keys().next().value);
+    }
   }
 
   function rejectPending(error) {
@@ -391,7 +396,9 @@ function createAppServerTransport({ processClientMessage, processServerMessage, 
           error: { code: -32001, message: "Internal router sessions do not allow host interactions" },
         }).catch(() => {});
       }
-      if (message.method === "turn/completed") internalTurnIds.delete(turnIdFromMessage(message));
+      if (INTERNAL_TURN_TERMINAL_METHODS.has(message.method)) {
+        internalTurnIds.delete(turnIdFromMessage(message));
+      }
       return null;
     }
     return typeof processServerMessage === "function" ? processServerMessage(message) : message;
@@ -674,6 +681,9 @@ function createAppServerTransport({ processClientMessage, processServerMessage, 
     internalThreadIds() {
       return new Set(internalThreadIds);
     },
+    internalTurnIds() {
+      return new Set(internalTurnIds);
+    },
     observeNotifications(observer) {
       if (typeof observer !== "function") return () => {};
       notificationObservers.add(observer);
@@ -689,6 +699,9 @@ function createAppServerTransport({ processClientMessage, processServerMessage, 
     request,
     unregisterInternalThread(threadId) {
       tombstoneInternalThread(threadId);
+    },
+    unregisterInternalTurn(turnId) {
+      if (turnId) internalTurnIds.delete(String(turnId));
     },
     waitForNotification,
     writeMessage,

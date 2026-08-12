@@ -11,9 +11,12 @@ const {
   isAuthed,
   isLauncherRequest,
   sendUnauthorized,
+  verifyAccessPasswordRequest,
 } = require("./http/auth.cjs");
 const {
+  CODEX_WEB_PICKED_FILES_MAX_TOTAL_BYTES,
   DEBUG_LOGS,
+  GATEWAY_INSTANCE_ID,
   HOST,
   IPC_SLOW_LOG_MS,
   PORT,
@@ -26,6 +29,7 @@ const {
 const { hostnameFromHostHeader, isLoopbackHostHeader } = require("./core/loopback-host.cjs");
 const { isRequestBodyTooLargeError, readBody, send, sendJson } = require("./http/http-utils.cjs");
 const { createLocalFileService } = require("./http/local-files.cjs");
+const { createServiceRestartHandler } = require("./http/service-control.cjs");
 const { handleTokenUsageRequest } = require("./http/token-usage.cjs");
 const {
   buildGatewayStatus,
@@ -51,9 +55,17 @@ const { createWorkspaceRootsService } = require("./ipc/workspace-roots.cjs");
 const { diagnosticError, diagnosticLog, diagnosticWarn, sanitizeDiagnosticValue, shortId } = require("./core/diagnostics.cjs");
 const { markGatewaySilentQuit } = require("./lifecycle/quit-confirmation-suppressor.cjs");
 const { createGatewayPluginService } = require("./plugins/service.cjs");
+const {
+  GATEWAY_RESTART_EXIT_CODE,
+  isGatewayRestartSupported,
+} = require("../../shared/gateway-lifecycle.cjs");
 
 // server.cjs 只负责编排 HTTP/WS 生命周期；官方 Electron hook 细节放在 official-runtime.cjs。
 const LOCAL_DOWNLOAD_PATH_BODY_MAX_BYTES = 32 * 1024;
+const CLIENT_LOG_BODY_MAX_BYTES = 256 * 1024;
+// pick-files 使用 base64，保留现有总附件能力并给 JSON 元数据预留 2MB；其它 IPC 同享这一硬上限。
+const IPC_INVOKE_BODY_MAX_BYTES =
+  Math.ceil((CODEX_WEB_PICKED_FILES_MAX_TOTAL_BYTES * 4) / 3) + 2 * 1024 * 1024;
 
 function gatewayUrl(req) {
   // Node 原生 req.url 只有 path，需要补 host 才能安全解析 query 参数。
@@ -166,7 +178,15 @@ function safeClientLogData(value) {
 }
 
 async function handleClientLog(req, res) {
-  const body = await readBody(req);
+  let body = "";
+  try {
+    body = await readBody(req, { maxBytes: CLIENT_LOG_BODY_MAX_BYTES });
+  } catch (error) {
+    if (isRequestBodyTooLargeError(error)) {
+      return sendJson(res, 413, { ok: false, error: "Request body is too large." }, { "cache-control": "no-store" });
+    }
+    throw error;
+  }
   let parsed = {};
   try {
     parsed = JSON.parse(body || "{}");
@@ -261,7 +281,8 @@ async function handleLocalDownloadPath(req, res, localFiles) {
 
 function installShutdownHandlers(server, localFiles, pickedFiles, pluginService) {
   let shuttingDown = false;
-  function shutdown(signal) {
+  let restartScheduled = false;
+  function shutdown({ exitCode = null, reason = "", signal = "" } = {}) {
     if (shuttingDown) return;
     shuttingDown = true;
     // 退出时先释放短期 token 和待处理的官方内部请求，避免请求一直挂起。
@@ -272,6 +293,11 @@ function installShutdownHandlers(server, localFiles, pickedFiles, pluginService)
     }
     rejectPendingInternalResponses(new Error("gateway shutting down"));
     const exit = () => {
+      if (Number.isInteger(exitCode)) {
+        markGatewaySilentQuit(reason || "gateway_restart");
+        app.exit(exitCode);
+        return;
+      }
       if (signal) {
         markGatewaySilentQuit(signal);
         app.quit();
@@ -282,16 +308,25 @@ function installShutdownHandlers(server, localFiles, pickedFiles, pluginService)
     } catch {
       exit();
     }
-    if (signal) {
-      // 信号退出时给 Electron 一小段清理时间，避免隐藏窗口阻塞进程结束。
-      const forceExitTimer = setTimeout(() => process.exit(0), 1500);
+    if (signal || Number.isInteger(exitCode)) {
+      // 信号退出和重启都给 Electron 一小段清理时间，超时后使用对应退出码强制结束。
+      const forceExitTimer = setTimeout(() => process.exit(Number.isInteger(exitCode) ? exitCode : 0), 1500);
       if (forceExitTimer && typeof forceExitTimer.unref === "function") forceExitTimer.unref();
     }
   }
 
-  process.once("SIGINT", () => shutdown("SIGINT"));
-  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  function requestRestart() {
+    if (restartScheduled || shuttingDown) return false;
+    restartScheduled = true;
+    // 延后一轮再关闭服务，确保 202 响应和按钮加载态先送达浏览器。
+    setImmediate(() => shutdown({ exitCode: GATEWAY_RESTART_EXIT_CODE, reason: "web_restart" }));
+    return true;
+  }
+
+  process.once("SIGINT", () => shutdown({ signal: "SIGINT" }));
+  process.once("SIGTERM", () => shutdown({ signal: "SIGTERM" }));
   app.once("before-quit", () => shutdown());
+  return { requestRestart };
 }
 
 async function listen(server) {
@@ -311,7 +346,7 @@ async function listen(server) {
   });
 }
 
-function createRequestHandler({ localFiles, pickedFiles, pluginService, staticAssets, workspaceRoots }) {
+function createRequestHandler({ localFiles, pickedFiles, pluginService, requestRestart, staticAssets, workspaceRoots }) {
   /**
    * 路由顺序很关键：
    * 1. 认证和 launcher 探活先处理。
@@ -319,6 +354,12 @@ function createRequestHandler({ localFiles, pickedFiles, pluginService, staticAs
    * 3. SPA shell 可公开返回，真正敏感数据在后续 API/WS 才校验 token。
    * 4. 其余 API、官方 renderer 和本地文件入口必须通过 auth gate。
    */
+  const handleServiceRestart = createServiceRestartHandler({
+    instanceId: GATEWAY_INSTANCE_ID,
+    requestRestart,
+    restartSupported: isGatewayRestartSupported(),
+    verifyAccessPasswordRequest,
+  });
   return async (req, res) => {
     const url = gatewayUrl(req);
     const pathname = url.pathname;
@@ -327,6 +368,7 @@ function createRequestHandler({ localFiles, pickedFiles, pluginService, staticAs
     if (pathname === "/api/auth/status") return handleAuthStatus(req, res, url);
     if (pathname === "/api/auth/login") return handleAuthLogin(req, res);
     if (pathname === "/api/auth/logout") return handleAuthLogout(req, res, url);
+    if (pathname === "/api/service/restart") return handleServiceRestart(req, res);
     if (pathname === "/login") return send(res, 302, { location: "/" }, "");
     if (pathname === "/api/launcher/status") {
       // launcher/status 只给桌面壳进程探活，不接受普通浏览器请求。
@@ -395,6 +437,11 @@ function createRequestHandler({ localFiles, pickedFiles, pluginService, staticAs
       return handleLocalDownloadPath(req, res, localFiles);
     }
 
+    if (pathname === "/api/plugin-image" && req.method === "GET") {
+      // 官方插件摘要只保留同源 URL，实际挂载 img 时再流式读取，避免启动期批量 base64 IPC。
+      return localFiles.servePluginImage(url, req, res);
+    }
+
     if (pathname.startsWith("/api/app-fs/@fs/") && req.method === "GET") {
       // 官方 renderer 里的 app://fs 图片会被前端改写到这个 HTTP 入口。
       return localFiles.serveAppFsFile(pathname, res);
@@ -445,7 +492,15 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
    * 浏览器把 Electron ipcRenderer.invoke/send 折叠成 HTTP POST。
    * gateway 在这里恢复 channel/args，并伪造 IpcMainEvent 交给官方 handler。
    */
-  const body = await readBody(req);
+  let body = "";
+  try {
+    body = await readBody(req, { maxBytes: IPC_INVOKE_BODY_MAX_BYTES });
+  } catch (error) {
+    if (isRequestBodyTooLargeError(error)) {
+      return sendJson(res, 413, { ok: false, error: "Request body is too large." });
+    }
+    throw error;
+  }
   let parsed = {};
   try {
     parsed = JSON.parse(body || "{}");
@@ -581,7 +636,15 @@ async function createGateway() {
   const localFiles = createLocalFileService({ getWorkspaceRoots: workspaceRoots.workspaceRoots });
   const pickedFiles = createPickedFilesService();
   const staticAssets = createStaticAssetService({ getI18nSnapshot, getOfficialBundle });
-  const requestHandler = createRequestHandler({ localFiles, pickedFiles, pluginService, staticAssets, workspaceRoots });
+  let requestRestart = () => false;
+  const requestHandler = createRequestHandler({
+    localFiles,
+    pickedFiles,
+    pluginService,
+    requestRestart: () => requestRestart(),
+    staticAssets,
+    workspaceRoots,
+  });
   const server = http.createServer((req, res) => {
     requestHandler(req, res).catch((error) => {
       diagnosticError("gateway", "request_failed", {
@@ -602,10 +665,14 @@ async function createGateway() {
       pluginService.smartSchedulingPresentation?.observeAppHostFrame(frame);
     },
   });
-  pluginService.bindSmartSchedulingPresentation({ sendTo: webSocketHub.sendTo });
+  pluginService.bindSmartSchedulingPresentation({
+    onClientRemoved: webSocketHub.onClientRemoved,
+    sendTo: webSocketHub.sendTo,
+  });
   // official-runtime 通过这个 hub 把官方 renderer 的异步消息转发给浏览器。
   setWsHub(webSocketHub);
-  installShutdownHandlers(server, localFiles, pickedFiles, pluginService);
+  const shutdownController = installShutdownHandlers(server, localFiles, pickedFiles, pluginService);
+  requestRestart = shutdownController.requestRestart;
   await listen(server);
 
   diagnosticLog("gateway", "listening", { url: `http://${HOST}:${PORT}` });

@@ -14,6 +14,10 @@ const {
 const { createBoundedLogWriter } = require("./log-writer.cjs");
 const { OPENCODEX_VERSION_LABEL } = require("../shared/app-version.cjs");
 const { PREFERRED_LANGUAGES_ENV, formatMessage, resolveOpenCodexI18n } = require("../shared/i18n/index.cjs");
+const {
+  GATEWAY_RESTART_SUPPORTED_ENV,
+  isGatewayRestartExit,
+} = require("../shared/gateway-lifecycle.cjs");
 const packageMetadata = require("../package.json");
 
 const APP_ROOT = path.resolve(__dirname, "..");
@@ -22,6 +26,7 @@ const DEFAULT_HOST = process.env.OPENCODEX_HOST || "127.0.0.1";
 const DEFAULT_PORT = normalizePort(process.env.OPENCODEX_PORT);
 const PLUGIN_DIRS_ENV = "OPENCODEX_PLUGIN_DIRS";
 const OFFICIAL_AUTO_SCAN_UPGRADE_ENV = "CODEX_WEB_OFFICIAL_AUTO_SCAN_UPGRADE";
+const GATEWAY_STATUS_TIMEOUT_MS = 5_000;
 const OPENCODEX_GITHUB_URL = "https://github.com/RyensX/OpenCodex";
 const OPENCODEX_AUTHOR_URL = "https://github.com/RyensX";
 const OPENCODEX_AUTHOR = packageMetadata.author || "Ryens";
@@ -30,9 +35,13 @@ let mainWindow = null;
 let tray = null;
 let trayMenu = null;
 let statusTimer = null;
+let statusRefreshPromise = null;
+let statusRefreshController = null;
 let preventSleepBlockerId = null;
 let latestReleaseCheckedForForeground = false;
 let isQuitting = false;
+let gatewayStartPromise = null;
+let gatewayRestartPromise = null;
 const gatewayLogWriter = createBoundedLogWriter();
 
 const gatewayState = {
@@ -583,12 +592,13 @@ function broadcastState() {
   mainWindow.webContents.send("launcher:state", buildState());
 }
 
-async function fetchGatewayStatus() {
+async function fetchGatewayStatus({ signal } = {}) {
   if (!gatewayState.localUrl) return null;
   const response = await fetch(`${gatewayState.localUrl}/api/launcher/status`, {
     headers: {
       "x-opencodex-launcher-token": gatewayState.token,
     },
+    ...(signal ? { signal } : {}),
   });
   if (!response.ok) {
     throw new Error(`gateway status failed: HTTP ${response.status}`);
@@ -596,22 +606,76 @@ async function fetchGatewayStatus() {
   return response.json();
 }
 
-function startStatusPolling() {
-  if (statusTimer) clearInterval(statusTimer);
-  statusTimer = setInterval(async () => {
+function launcherWindowNeedsStatusPolling() {
+  return !!(
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    mainWindow.isVisible() &&
+    !mainWindow.isMinimized()
+  );
+}
+
+function refreshGatewayStatus() {
+  if (statusRefreshPromise) return statusRefreshPromise;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  let timedOut = false;
+  const timeout = controller
+    ? setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, GATEWAY_STATUS_TIMEOUT_MS)
+    : null;
+  if (timeout?.unref) timeout.unref();
+  statusRefreshController = controller;
+  const refresh = (async () => {
     try {
-      gatewayState.status = await fetchGatewayStatus();
+      gatewayState.status = await fetchGatewayStatus({ signal: controller?.signal });
       if (gatewayState.status && gatewayState.status.i18n) gatewayState.i18n = gatewayState.status.i18n;
       gatewayState.lastError = "";
     } catch (error) {
-      gatewayState.lastError = error instanceof Error ? error.message : String(error);
+      // 窗口隐藏时主动中止的请求不代表 gateway 故障，不能把 AbortError 展示成服务错误。
+      if (error?.name === "AbortError" && (!timedOut || !launcherWindowNeedsStatusPolling())) return;
+      if (error?.name === "AbortError" && timedOut) {
+        // 单次探活必须有上限，否则一个挂起 fetch 会让 single-flight 永久阻塞后续状态更新。
+        gatewayState.lastError = `gateway status timed out after ${GATEWAY_STATUS_TIMEOUT_MS}ms`;
+      } else {
+        gatewayState.lastError = error instanceof Error ? error.message : String(error);
+      }
     }
     broadcastState();
-  }, 1500);
+  })().finally(() => {
+    if (timeout) clearTimeout(timeout);
+    if (statusRefreshPromise === refresh) statusRefreshPromise = null;
+    if (statusRefreshController === controller) statusRefreshController = null;
+  });
+  statusRefreshPromise = refresh;
+  return refresh;
+}
+
+function clearStatusPollingTimer() {
+  if (statusTimer) clearInterval(statusTimer);
+  statusTimer = null;
+}
+
+function stopStatusPolling() {
+  clearStatusPollingTimer();
+  statusRefreshController?.abort();
+}
+
+function startStatusPolling() {
+  // show/focus 可能连续触发；重置 interval 即可，不能把刚发出的同一条状态请求误中止。
+  clearStatusPollingTimer();
+  // 子进程退出由 exit 事件直接上报；Launcher 没有可见窗口时无需每 1.5 秒唤醒一次本机 gateway。
+  if (!launcherWindowNeedsStatusPolling()) {
+    stopStatusPolling();
+    return;
+  }
+  void refreshGatewayStatus();
+  statusTimer = setInterval(() => void refreshGatewayStatus(), 1500);
   if (statusTimer.unref) statusTimer.unref();
 }
 
-async function startGateway() {
+async function startGatewayOnce() {
   if (gatewayState.child) return buildState();
 
   const paths = runtimePaths();
@@ -665,6 +729,8 @@ async function startGateway() {
     OPENCODEX_GATEWAY_AGENT_MODE: "1",
     // 第 4 个 stdio fd 是生命周期 pipe；gateway 会监听它判断 launcher 是否已退出。
     OPENCODEX_GATEWAY_LIFECYCLE_FD: "3",
+    // 只有受 launcher 监督的 gateway 才开放 Web 重启入口，退出后由下方 exit 监听重新拉起。
+    [GATEWAY_RESTART_SUPPORTED_ENV]: "1",
     // Chromium profile 必须和官方 Desktop 隔离；核心数据继续通过 CODEX_HOME 共享。
     CODEX_WEB_OFFICIAL_USER_DATA_DIR: officialUserDataDir,
     CODEX_ELECTRON_USER_DATA_PATH: officialUserDataDir,
@@ -702,9 +768,25 @@ async function startGateway() {
     broadcastState();
   });
   child.on("exit", (code, signal) => {
-    appendLog(`[launcher] gateway exited: code=${code} signal=${signal}\n`, { urgent: true });
-    gatewayState.child = null;
-    gatewayState.status = null;
+    const restartRequested = !isQuitting && isGatewayRestartExit(code, signal);
+    appendLog(`[launcher] gateway exited: code=${code} signal=${signal}\n`, { urgent: !restartRequested });
+    // 只允许当前子进程清空状态；并发操作已拉起新实例时，旧 exit 事件不能覆盖它。
+    if (gatewayState.child === child) {
+      gatewayState.child = null;
+      gatewayState.status = null;
+    }
+    if (restartRequested) {
+      // Web 端已完成密码认证；旧进程释放端口后立即按现有配置启动新实例。
+      gatewayState.lastError = "";
+      appendLog("[launcher] gateway requested restart\n");
+      broadcastState();
+      void startGateway().catch((error) => {
+        gatewayState.lastError = error instanceof Error ? error.message : String(error);
+        appendLog(`[launcher] gateway restart failed: ${errorLogText(error)}\n`, { urgent: true });
+        broadcastState();
+      });
+      return;
+    }
     if (!isQuitting) {
       gatewayState.lastError = `gateway exited: code=${code} signal=${signal}`;
     }
@@ -714,6 +796,18 @@ async function startGateway() {
   startStatusPolling();
   broadcastState();
   return buildState();
+}
+
+async function startGateway() {
+  if (gatewayState.child) return buildState();
+  if (gatewayStartPromise) return gatewayStartPromise;
+  // 启动包含异步 runtime 准备和端口探测；所有入口共享同一 Promise，避免瞬间生成两个 gateway。
+  gatewayStartPromise = startGatewayOnce();
+  try {
+    return await gatewayStartPromise;
+  } finally {
+    gatewayStartPromise = null;
+  }
 }
 
 function stopGateway() {
@@ -742,10 +836,27 @@ function stopGateway() {
   });
 }
 
-async function restartGateway() {
+async function restartGatewayOnce() {
+  // runtime 尚在准备时先等本轮启动落地，再按正常停止流程重启，避免设置变更被旧启动吞掉。
+  if (gatewayStartPromise) {
+    try {
+      await gatewayStartPromise;
+    } catch {}
+  }
   await stopGateway();
   gatewayState.child = null;
   return startGateway();
+}
+
+async function restartGateway() {
+  if (gatewayRestartPromise) return gatewayRestartPromise;
+  // 托盘、窗口和设置保存都可能同时请求重启；共享一次完整 stop/start 生命周期。
+  gatewayRestartPromise = restartGatewayOnce();
+  try {
+    return await gatewayRestartPromise;
+  } finally {
+    gatewayRestartPromise = null;
+  }
 }
 
 function createWindow() {
@@ -770,13 +881,21 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, "index.html"));
   mainWindow.setMenuBarVisibility(false);
-  mainWindow.on("focus", checkLatestReleaseForForeground);
+  mainWindow.on("focus", () => {
+    checkLatestReleaseForForeground();
+    startStatusPolling();
+  });
+  mainWindow.on("show", startStatusPolling);
+  mainWindow.on("restore", startStatusPolling);
+  mainWindow.on("hide", stopStatusPolling);
+  mainWindow.on("minimize", stopStatusPolling);
   mainWindow.on("blur", () => {
     // 失焦后允许下一次回到前台重新检查最新版本。
     latestReleaseCheckedForForeground = false;
   });
   mainWindow.on("closed", () => {
     // 窗口允许真正关闭；后台驻留由托盘对象和 app 生命周期负责，之后需要时再重建窗口。
+    stopStatusPolling();
     mainWindow = null;
     latestReleaseCheckedForForeground = false;
     hideLauncherDockIconIfWindowless();
@@ -833,6 +952,7 @@ async function showLauncherWindow() {
   await showLauncherDockIcon();
   if (!mainWindow || mainWindow.isDestroyed()) createWindow();
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  startStatusPolling();
   // macOS 从 accessory 切回 regular 后窗口有时会先创建在后台；短延迟重试确保从托盘打开时直接前置。
   scheduleLauncherWindowPresent();
 }
@@ -1085,7 +1205,7 @@ if (!gotLock) {
   app.on("before-quit", () => {
     isQuitting = true;
     stopPreventSleepBlocker();
-    if (statusTimer) clearInterval(statusTimer);
+    stopStatusPolling();
     if (gatewayState.child) {
       try {
         gatewayState.child.kill("SIGTERM");

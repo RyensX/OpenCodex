@@ -85,6 +85,19 @@ test("prunes expired clients and enforces the client map cap", () => {
   assert.equal(limiter.snapshot().clientCount, 0);
 });
 
+test("bounds log throttle keys independently from client state", () => {
+  const { limiter } = createLimiterWithClock({
+    logger() {},
+    logThrottleMs: 0,
+    maxLogThrottleEntries: 2,
+  });
+
+  limiter.recordFailure(requestFrom("10.0.2.1"));
+  limiter.recordFailure(requestFrom("10.0.2.2"));
+  limiter.recordFailure(requestFrom("10.0.2.3"));
+  assert.equal(limiter.snapshot().logThrottleCount, 2);
+});
+
 test("global backpressure blocks new attempts only after the threshold is exceeded", () => {
   const { advance, limiter } = createLimiterWithClock({
     globalBackpressureMs: 5_000,

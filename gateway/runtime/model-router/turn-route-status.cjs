@@ -1,5 +1,7 @@
 const ROUTE_METADATA_KEY = "opencodex/smart-scheduling";
 const TERMINAL_TURN_METHODS = new Set(["turn/completed", "turn/failed", "turn/interrupted"]);
+const DEFAULT_MAX_TRACKED_THREADS = 512;
+const DEFAULT_MAX_PENDING_ROUTES_PER_THREAD = 64;
 
 function turnIdFromMessage(message) {
   return String(message?.params?.turnId || message?.params?.turn?.id || message?.result?.turn?.id || "");
@@ -25,16 +27,29 @@ function routeMetadata(route) {
   };
 }
 
-function createTurnRouteStatus() {
+function createTurnRouteStatus(options = {}) {
   const pendingByThread = new Map();
   const activeByThread = new Map();
+  const maxTrackedThreads = Math.max(1, Number(options.maxTrackedThreads) || DEFAULT_MAX_TRACKED_THREADS);
+  const maxPendingRoutesPerThread = Math.max(
+    1,
+    Number(options.maxPendingRoutesPerThread) || DEFAULT_MAX_PENDING_ROUTES_PER_THREAD
+  );
+
+  function setBoundedThreadEntry(map, threadId, value) {
+    map.delete(threadId);
+    map.set(threadId, value);
+    // 极端断线或异常客户端不能让未完成展示状态永久占用内存；旧线程重新活动时会自然重建。
+    while (map.size > maxTrackedThreads) map.delete(map.keys().next().value);
+  }
 
   function select({ requestKey, threadId, route }) {
     const normalizedThreadId = String(threadId || "");
     if (!normalizedThreadId || !route?.model || !route?.effort) return;
     const queue = pendingByThread.get(normalizedThreadId) || [];
     queue.push({ requestKey: String(requestKey || ""), route: safeRoute(route, normalizedThreadId, "") });
-    pendingByThread.set(normalizedThreadId, queue);
+    while (queue.length > maxPendingRoutesPerThread) queue.shift();
+    setBoundedThreadEntry(pendingByThread, normalizedThreadId, queue);
   }
 
   function cancel(requestKey, threadId) {
@@ -42,7 +57,7 @@ function createTurnRouteStatus() {
     const queue = pendingByThread.get(normalizedThreadId);
     if (!queue) return;
     const next = queue.filter((entry) => entry.requestKey !== String(requestKey || ""));
-    if (next.length > 0) pendingByThread.set(normalizedThreadId, next);
+    if (next.length > 0) setBoundedThreadEntry(pendingByThread, normalizedThreadId, next);
     else pendingByThread.delete(normalizedThreadId);
   }
 
@@ -63,7 +78,7 @@ function createTurnRouteStatus() {
       return message;
     }
     const route = safeRoute(pending.route, threadId, turnIdFromMessage(message));
-    activeByThread.set(threadId, route);
+    setBoundedThreadEntry(activeByThread, threadId, route);
     const params = message.params && typeof message.params === "object" ? message.params : {};
     const metadata = params._meta && typeof params._meta === "object" ? params._meta : {};
     return {
@@ -116,7 +131,9 @@ function createTurnRouteStatus() {
     snapshot() {
       return {
         active: Object.fromEntries(Array.from(activeByThread, ([threadId, route]) => [threadId, { ...route }])),
+        activeCount: activeByThread.size,
         pendingCount: Array.from(pendingByThread.values()).reduce((total, queue) => total + queue.length, 0),
+        pendingThreadCount: pendingByThread.size,
       };
     },
   };
@@ -125,6 +142,8 @@ function createTurnRouteStatus() {
 module.exports = {
   ROUTE_METADATA_KEY,
   TERMINAL_TURN_METHODS,
+  DEFAULT_MAX_PENDING_ROUTES_PER_THREAD,
+  DEFAULT_MAX_TRACKED_THREADS,
   createTurnRouteStatus,
   routeMetadata,
   safeRoute,

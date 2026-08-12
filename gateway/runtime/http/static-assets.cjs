@@ -1,5 +1,8 @@
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { Worker } = require("worker_threads");
+const zlib = require("zlib");
 const {
   PATCHED_OFFICIAL_PREFIX,
   WEB_SHELL_ASSETS_PREFIX,
@@ -18,6 +21,20 @@ const {
 } = require("../core/plugin-assets.cjs");
 const { gzipIfUseful, send } = require("./http-utils.cjs");
 const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
+
+const configuredPatchedAssetCacheMaxBytes = Number(
+  process.env.CODEX_WEB_PATCHED_ASSET_CACHE_MAX_BYTES || 96 * 1024 * 1024
+);
+const PATCHED_ASSET_CACHE_MAX_BYTES = Math.max(
+  16 * 1024 * 1024,
+  Number.isFinite(configuredPatchedAssetCacheMaxBytes)
+    ? configuredPatchedAssetCacheMaxBytes
+    : 96 * 1024 * 1024
+);
+const PATCHED_ASSET_PATCH_REVISION = "11";
+const ASYNC_PATCH_MIN_BYTES = 512 * 1024;
+const OFFICIAL_ASSET_PATCH_WORKER_IDLE_MS = 30_000;
+const OFFICIAL_ASSET_PATCH_WORKER_PATH = path.join(__dirname, "official-asset-patch-worker.cjs");
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
 const OPENCODEX_PLUGIN_SYSTEM_PATH = "/opencodex-plugin-system.js";
@@ -38,6 +55,12 @@ const CODEX_WORKSPACE_ROOT_PICKER_PATH = "/codex-workspace-root-picker.js";
 const CODEX_TOOLTIP_DISMISS_GUARD_PATH = "/codex-tooltip-dismiss-guard.js";
 const FAVICON_PATH = "/favicon.ico";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
+const OFFICIAL_LOADING_SHIMMER_POWER_GUARD = [
+  '<style id="codex-web-loading-shimmer-power-guard">',
+  // 官方加载 Logo 通过 background-position 无限刷新，每秒会触发约 120 次样式重算；保留三轮反馈后静止。
+  '#root > .relative.size-full [aria-hidden="true"].size-14 > [class*="_Overlay_"][style*="mask-image"] { animation-iteration-count: 3 !important; }',
+  "</style>",
+].join("");
 const WEB_SHELL_ASSETS_DIR = path.join(WEB_SHELL_DIR, "assets");
 const OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID = "artifactTab.preview.openInFolder";
 const OPENCODEX_DOWNLOAD_FILE_MESSAGE_ID = "web.remoteFile.downloadFile";
@@ -46,19 +69,23 @@ const REGEXP_SPECIAL_CHARS_RE = /[.*+?^${}()|[\]\\]/g;
 function escapeRegExp(value) {
   return String(value).replace(REGEXP_SPECIAL_CHARS_RE, "\\$&");
 }
-const OPEN_IN_FOLDER_LOCALE_VALUE_RE = new RegExp(
-  `("${escapeRegExp(OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID)}"\\s*:\\s*)${JS_STRING_LITERAL}`
+const OPEN_IN_FOLDER_LOCALE_TOKEN = `"${OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID}"`;
+const OPEN_IN_FOLDER_LOCALE_VALUE_AT_START_RE = new RegExp(
+  `("${escapeRegExp(OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID)}"\\s*:\\s*)${JS_STRING_LITERAL}`,
+  "y"
 );
-const APPLICATION_MENU_CAPABILITY_CHECK_RE =
-  /\b[A-Za-z_$][\w$]*\(\)\s*&&\s*[A-Za-z_$][\w$]*\??\.applicationMenu\s*!={1,2}\s*(?:null|void 0)\b/g;
+const APPLICATION_MENU_TOKEN = ".applicationMenu";
+const APPLICATION_MENU_CAPABILITY_CHECK_AT_START_RE =
+  /\b[A-Za-z_$][\w$]*\(\)\s*&&\s*[A-Za-z_$][\w$]*\??\.applicationMenu\s*!={1,2}\s*(?:null|void 0)\b/y;
 const APPLICATION_MENU_SERVICE_USAGE_RE =
   /\b[A-Za-z_$][\w$]*\??\.applicationMenu\??\.(?:getSnapshot|invokeItem)\b/;
 const APP_SERVER_REQUEST_CLIENT_FIELDS_RE =
   /pendingConfigReadRequests=new Map;queuedRequests=\[\]/;
+const APP_SERVER_REQUEST_CLIENT_DISPATCH_ERROR = "AppServerRequestClient is missing a message dispatcher";
 const APP_SERVER_REQUEST_CLIENT_SEND_RE =
   /async sendRequest\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{if\(this\.dispatchMessage==null\)throw Error\(`AppServerRequestClient is missing a message dispatcher`\);return \1===`config\/read`\?this\.sendConfigReadRequest\(\2,\3\):this\.enqueueRequest\(\1,\2,\3\)\}/;
 const APP_SERVER_BACKGROUND_METHODS_RE =
-  /new Set\(\[`app\/list`,`collaborationMode\/list`,`config\/read`,`configRequirements\/read`,`experimentalFeature\/list`,`hooks\/list`,`mcpServerStatus\/list`,`model\/list`,`permissionProfile\/list`,`plugin\/list`,`skills\/list`\]\)/;
+  /new Set\(\[(?:`app\/installed`,)?`app\/list`(?:,`app\/read`)?,`collaborationMode\/list`,`config\/read`,`configRequirements\/read`,`experimentalFeature\/list`,`hooks\/list`,`mcpServerStatus\/list`,`model\/list`,`permissionProfile\/list`,`plugin\/list`,`skills\/list`\]\)/;
 const APP_SERVER_BACKGROUND_METHODS = [
   "app/list",
   "hooks/list",
@@ -66,6 +93,100 @@ const APP_SERVER_BACKGROUND_METHODS = [
   "plugin/list",
   "skills/list",
 ];
+const PLUGIN_SUMMARY_IMAGE_EAGER_RE =
+  /Promise\.all\(\[\s*([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.composerIconPath\s*,\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\)\s*,\s*\1\(\2\.logoPath\s*,\s*\3\s*,\s*\4\)\s*,\s*\1\(\2\.logoDarkPath\s*,\s*\3\s*,\s*\4\)\s*\]\)/g;
+const PLUGIN_SUMMARY_IMAGE_LAYOUT_HINT_RE =
+  /Promise\.all\(\[[\s\S]{0,240}\.composerIconPath[\s\S]{0,240}\.logoPath[\s\S]{0,240}\.logoDarkPath[\s\S]{0,240}\]\)/;
+
+let officialAssetPatchWorker = null;
+let officialAssetPatchWorkerIdleTimer = null;
+let officialAssetPatchWorkerSequence = 0;
+const officialAssetPatchWorkerJobs = new Map();
+
+function officialAssetPatchWorkerHasJobs(worker) {
+  return Array.from(officialAssetPatchWorkerJobs.values()).some((job) => job.worker === worker);
+}
+
+function rejectOfficialAssetPatchWorkerJobs(worker, error) {
+  for (const [id, job] of officialAssetPatchWorkerJobs.entries()) {
+    if (job.worker !== worker) continue;
+    officialAssetPatchWorkerJobs.delete(id);
+    job.reject(error);
+  }
+}
+
+function clearOfficialAssetPatchWorkerIdleTimer() {
+  if (officialAssetPatchWorkerIdleTimer) clearTimeout(officialAssetPatchWorkerIdleTimer);
+  officialAssetPatchWorkerIdleTimer = null;
+}
+
+function releaseOfficialAssetPatchWorkerWhenIdle(worker) {
+  if (officialAssetPatchWorkerHasJobs(worker)) return;
+  worker.unref();
+  clearOfficialAssetPatchWorkerIdleTimer();
+  officialAssetPatchWorkerIdleTimer = setTimeout(() => {
+    officialAssetPatchWorkerIdleTimer = null;
+    if (officialAssetPatchWorker !== worker || officialAssetPatchWorkerHasJobs(worker)) return;
+    // 冷启动资源处理完成后释放整个 Worker isolate，避免网关空闲期常驻额外线程和堆。
+    officialAssetPatchWorker = null;
+    void worker.terminate().catch(() => {});
+  }, OFFICIAL_ASSET_PATCH_WORKER_IDLE_MS);
+  if (officialAssetPatchWorkerIdleTimer.unref) officialAssetPatchWorkerIdleTimer.unref();
+}
+
+function currentOfficialAssetPatchWorker() {
+  if (officialAssetPatchWorker) return officialAssetPatchWorker;
+  const worker = new Worker(OFFICIAL_ASSET_PATCH_WORKER_PATH);
+  officialAssetPatchWorker = worker;
+  worker.on("message", (message) => {
+    const job = officialAssetPatchWorkerJobs.get(message?.id);
+    if (!job) return;
+    officialAssetPatchWorkerJobs.delete(message.id);
+    if (message.error) {
+      job.reject(new Error(message.error));
+    } else {
+      const bytes = message.data;
+      const data = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      job.resolve({ data, patched: message.patched === true });
+    }
+    // 没有待处理资源时不让空闲 worker 阻止测试进程或 gateway 正常退出。
+    releaseOfficialAssetPatchWorkerWhenIdle(worker);
+  });
+  worker.on("error", (error) => {
+    if (officialAssetPatchWorker === worker) officialAssetPatchWorker = null;
+    rejectOfficialAssetPatchWorkerJobs(worker, error);
+  });
+  worker.on("exit", (code) => {
+    if (officialAssetPatchWorker === worker) officialAssetPatchWorker = null;
+    rejectOfficialAssetPatchWorkerJobs(
+      worker,
+      new Error(`official asset patch worker exited with code ${code}`)
+    );
+  });
+  return worker;
+}
+
+function patchOfficialAssetOffMainThread({ data, downloadMessage, host, locale, reqPath }) {
+  const worker = currentOfficialAssetPatchWorker();
+  clearOfficialAssetPatchWorkerIdleTimer();
+  worker.ref();
+  const id = ++officialAssetPatchWorkerSequence;
+  const transferable =
+    data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? data : Buffer.from(data);
+  return new Promise((resolve, reject) => {
+    officialAssetPatchWorkerJobs.set(id, { reject, resolve, worker });
+    try {
+      worker.postMessage(
+        { data: transferable, downloadMessage, host, id, locale, reqPath },
+        [transferable.buffer]
+      );
+    } catch (error) {
+      officialAssetPatchWorkerJobs.delete(id);
+      releaseOfficialAssetPatchWorkerWhenIdle(worker);
+      reject(error);
+    }
+  });
+}
 // 固定 web-shell 资源只在这里登记一次，白名单和文件映射共用同一份配置。
 const WEB_SHELL_STATIC_FILES = new Map([
   [FAVICON_PATH, path.join(WEB_SHELL_ASSETS_DIR, "icon.png")],
@@ -101,12 +222,41 @@ const WEB_SHELL_STATIC_FILES = new Map([
 ]);
 
 // 静态资源层把官方 renderer/web-shell 的路径差异统一隐藏起来，server 只需要按 URL 取文件。
-function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
+function createStaticAssetService({
+  getI18nSnapshot,
+  getOfficialBundle,
+  patchedAssetCacheMaxBytes = PATCHED_ASSET_CACHE_MAX_BYTES,
+}) {
+  const effectivePatchedAssetCacheMaxBytes = Math.max(
+    1,
+    Number.isFinite(Number(patchedAssetCacheMaxBytes))
+      ? Number(patchedAssetCacheMaxBytes)
+      : PATCHED_ASSET_CACHE_MAX_BYTES
+  );
   let hasWarnedHistoryPatchMiss = false;
   let hasWarnedApplicationMenuPatchMiss = false;
+  let hasWarnedPluginSummaryImagePatchMiss = false;
+  let hasWarnedPatchWorkerFailure = false;
+  let officialAssetFileNamesCache = null;
+  const patchedAssetCache = new Map();
+  const patchedAssetBuildPromises = new Map();
+  let patchedAssetCacheBytes = 0;
+  const patchedAssetCacheStats = {
+    compressionRuns: 0,
+    hits: 0,
+    misses: 0,
+    notModified: 0,
+    patchRuns: 0,
+  };
   // 旧版本曾经使用 /official-patched/；浏览器缓存的旧 chunk 可能还会懒加载这个前缀。
   const patchedOfficialPrefixes = Array.from(
-    new Set([PATCHED_OFFICIAL_PREFIX, "/official-patched-v5/", "/official-patched-v4/", "/official-patched/"])
+    new Set([
+      PATCHED_OFFICIAL_PREFIX,
+      "/official-patched-v6/",
+      "/official-patched-v5/",
+      "/official-patched-v4/",
+      "/official-patched/",
+    ])
   );
 
   function matchedPatchedOfficialPrefix(reqPath) {
@@ -123,6 +273,223 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (!prefix) return "";
     const assetPrefix = `${prefix}assets/`;
     return reqPath.startsWith(assetPrefix) ? reqPath.slice(assetPrefix.length) : "";
+  }
+
+  function touchPatchedAssetCacheEntry(key, entry) {
+    patchedAssetCache.delete(key);
+    patchedAssetCache.set(key, entry);
+  }
+
+  function evictPatchedAssetCache() {
+    while (patchedAssetCacheBytes > effectivePatchedAssetCacheMaxBytes && patchedAssetCache.size > 1) {
+      const oldestKey = patchedAssetCache.keys().next().value;
+      const oldest = patchedAssetCache.get(oldestKey);
+      patchedAssetCache.delete(oldestKey);
+      patchedAssetCacheBytes -= oldest?.byteSize || 0;
+    }
+  }
+
+  function patchedAssetVariant(reqPath, file, req) {
+    const stat = fs.statSync(file);
+    const loopback = isLoopbackHostHeader(req?.headers?.host);
+    const locale = currentHostI18n();
+    const remoteMessage = loopback ? "" : locale.messages?.[OPENCODEX_DOWNLOAD_FILE_MESSAGE_ID] || "Download file";
+    // 实际输出只取决于 Host 类型和最终文案；语言标签本身不产生字节差异，避免为同文案复制大型 chunk。
+    return {
+      host: String(req?.headers?.host || ""),
+      key: JSON.stringify([
+        PATCHED_ASSET_PATCH_REVISION,
+        reqPath,
+        file,
+        stat.dev,
+        stat.ino,
+        stat.size,
+        stat.mtimeMs,
+        loopback ? "loopback" : "remote",
+        remoteMessage,
+      ]),
+      locale: locale.locale || "",
+      remoteMessage,
+      size: stat.size,
+    };
+  }
+
+  function storePatchedAssetEntry(key, data, patched) {
+    const entry = {
+      byteSize: data.length,
+      data,
+      key,
+      patched,
+      representationPromises: new Map(),
+      representations: new Map(),
+    };
+    patchedAssetCache.set(key, entry);
+    patchedAssetCacheBytes += entry.byteSize;
+    evictPatchedAssetCache();
+    return entry;
+  }
+
+  function cachedPatchedAsset(reqPath, file, req) {
+    const variant = patchedAssetVariant(reqPath, file, req);
+    const { key } = variant;
+    const cached = patchedAssetCache.get(key);
+    if (cached) {
+      patchedAssetCacheStats.hits += 1;
+      touchPatchedAssetCacheEntry(key, cached);
+      return cached;
+    }
+    const pending = patchedAssetBuildPromises.get(key);
+    if (pending) {
+      patchedAssetCacheStats.hits += 1;
+      return pending;
+    }
+
+    patchedAssetCacheStats.misses += 1;
+    if (variant.size < ASYNC_PATCH_MIN_BYTES) {
+      const sourceData = fs.readFileSync(file);
+      patchedAssetCacheStats.patchRuns += 1;
+      const data = patchOfficialAsset(reqPath, sourceData, req, {
+        downloadMessage: variant.remoteMessage,
+      });
+      return storePatchedAssetEntry(key, data, data !== sourceData);
+    }
+
+    // 大 chunk 的磁盘读取、UTF-8 解码和文本改写都移出请求主调用栈，避免阻塞 WS/心跳和其它资源。
+    const build = fs.promises
+      .readFile(file)
+      .then(async (sourceData) => {
+        patchedAssetCacheStats.patchRuns += 1;
+        if (!officialAssetHasPatchCandidate(reqPath, sourceData, req)) {
+          return storePatchedAssetEntry(key, sourceData, false);
+        }
+        try {
+          const result = await patchOfficialAssetOffMainThread({
+            data: sourceData,
+            downloadMessage: variant.remoteMessage,
+            host: variant.host,
+            locale: variant.locale,
+            reqPath,
+          });
+          return storePatchedAssetEntry(key, result.data, result.patched);
+        } catch (error) {
+          if (!hasWarnedPatchWorkerFailure) {
+            hasWarnedPatchWorkerFailure = true;
+            console.warn("[gateway] official asset patch worker unavailable; using main-thread fallback", error);
+          }
+          // postMessage 转移后源 Buffer 已失效；失败回退需重新异步读取，保证响应内容完全一致。
+          const fallbackSourceData = await fs.promises.readFile(file);
+          const data = patchOfficialAsset(reqPath, fallbackSourceData, req, {
+            // Worker 失败期间语言设置可能已变化；仍按创建缓存键时的快照生成该条目。
+            downloadMessage: variant.remoteMessage,
+          });
+          return storePatchedAssetEntry(key, data, data !== fallbackSourceData);
+        }
+      })
+      .finally(() => {
+        if (patchedAssetBuildPromises.get(key) === build) patchedAssetBuildPromises.delete(key);
+      });
+    patchedAssetBuildPromises.set(key, build);
+    return build;
+  }
+
+  function acceptedEncodingQuality(req, name) {
+    const values = String(req?.headers?.["accept-encoding"] || "")
+      .split(",")
+      .map((part) => part.trim().toLowerCase())
+      .filter(Boolean);
+    let wildcardQuality = 0;
+    for (const part of values) {
+      const [token, ...parameters] = part.split(";").map((value) => value.trim());
+      const qualityParameter = parameters.find((parameter) => parameter.startsWith("q="));
+      const parsedQuality = qualityParameter ? Number(qualityParameter.slice(2)) : 1;
+      const quality = Number.isFinite(parsedQuality) ? Math.min(1, Math.max(0, parsedQuality)) : 0;
+      // 显式编码优先于通配符；例如“br;q=0, *”不能重新启用 br。
+      if (token === name) return quality;
+      if (token === "*") wildcardQuality = quality;
+    }
+    return wildcardQuality;
+  }
+
+  function representationEncoding(req, contentType, data) {
+    if (process.env.CODEX_WEB_DISABLE_GZIP === "1" || data.length < 1024) return "identity";
+    if (!/javascript|css|html|json|svg|wasm/i.test(contentType)) return "identity";
+    const brotliQuality = acceptedEncodingQuality(req, "br");
+    const gzipQuality = acceptedEncodingQuality(req, "gzip");
+    if (brotliQuality > 0 && brotliQuality >= gzipQuality) return "br";
+    if (gzipQuality > 0) return "gzip";
+    return "identity";
+  }
+
+  function compressRepresentation(data, encoding) {
+    return new Promise((resolve, reject) => {
+      const done = (error, body) => {
+        if (error) reject(error);
+        else resolve(body);
+      };
+      if (encoding === "br") {
+        // 使用异步 zlib，把大型官方 chunk 的冷启动压缩移出 Node 主事件循环。
+        zlib.brotliCompress(
+          data,
+          { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } },
+          done
+        );
+        return;
+      }
+      zlib.gzip(data, done);
+    });
+  }
+
+  function storeRepresentation(entry, encoding, body) {
+    const digest = crypto.createHash("sha256").update(body).digest("base64url");
+    const representation = { body, etag: `"${digest}"` };
+    entry.representations.set(encoding, representation);
+    if (encoding === "identity" || patchedAssetCache.get(entry.key) !== entry) return representation;
+
+    entry.byteSize += body.length;
+    patchedAssetCacheBytes += body.length;
+    touchPatchedAssetCacheEntry(entry.key, entry);
+    evictPatchedAssetCache();
+    return representation;
+  }
+
+  function cachedRepresentation(entry, encoding) {
+    const cached = entry.representations.get(encoding);
+    if (cached) return cached;
+
+    if (encoding === "identity") return storeRepresentation(entry, encoding, entry.data);
+
+    const pending = entry.representationPromises.get(encoding);
+    if (pending) return pending;
+
+    // 同一冷资源的并发请求共享一次压缩任务，避免瞬时重复占满 libuv 线程池。
+    const compression = compressRepresentation(entry.data, encoding)
+      .then((body) => {
+        patchedAssetCacheStats.compressionRuns += 1;
+        return storeRepresentation(entry, encoding, body);
+      })
+      .finally(() => {
+        if (entry.representationPromises.get(encoding) === compression) {
+          entry.representationPromises.delete(encoding);
+        }
+      });
+    entry.representationPromises.set(encoding, compression);
+    return compression;
+  }
+
+  function requestHasMatchingEtag(req, etag) {
+    return String(req?.headers?.["if-none-match"] || "")
+      .split(",")
+      .map((value) => value.trim())
+      .some((value) => value === "*" || value === etag || value === `W/${etag}`);
+  }
+
+  function assetCacheDiagnostics() {
+    return {
+      ...patchedAssetCacheStats,
+      bytes: patchedAssetCacheBytes,
+      entries: patchedAssetCache.size,
+      maxBytes: effectivePatchedAssetCacheMaxBytes,
+    };
   }
 
   /** 给官方 renderer HTML 注入 web-shell polyfill 和运行时配置。 */
@@ -154,6 +521,16 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     // 官方产物里的相对路径统一映射到 /official/，避免和 web-shell 自己的 /assets 冲突。
     html = html.replace(/(src|href)=["']\/(?!(?:official|assets)\/)([^"'#?]+)["']/g, '$1="/official/$2"');
     html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
+    html = html.replace(/<link\b[^>]*>/gi, (tag) => {
+      const isFontPreload =
+        /\brel=["'][^"']*\bpreload\b[^"']*["']/i.test(tag) &&
+        /\bas=["']font["']/i.test(tag);
+      /**
+       * 官方主 CSS 由运行时动态加载；实测 Chromium 无法复用 HTML 阶段的字体预载，
+       * 无论凭据模式为何都会再发一次 CSS 字体请求。移除这类预载，让字体按真实使用只加载一次。
+       */
+      return isFontPreload ? "" : tag;
+    });
     // manifest 在 Cloudflare Access 等前置认证后面也必须带同源凭据，否则 Chrome 可能拿不到受保护的 manifest。
     const base = [
       '<base href="/official/">',
@@ -164,6 +541,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       '<meta name="apple-mobile-web-app-title" content="OpenCodex">',
       '<meta name="apple-mobile-web-app-capable" content="yes">',
       '<meta name="apple-mobile-web-app-status-bar-style" content="default">',
+      OFFICIAL_LOADING_SHIMMER_POWER_GUARD,
       `<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH}">`,
       `<link id="codex-smart-model-router-settings-styles" rel="stylesheet" href="${CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH}">`,
       `<link id="codex-smart-scheduling-summary-styles" rel="stylesheet" href="${CODEX_SMART_SCHEDULING_SUMMARY_CSS_PATH}">`,
@@ -248,13 +626,22 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     // 官方 CSS 带 hash，不能写死文件名，只能按构建稳定前缀查找当前缓存中的实际文件。
     const officialBundle = getOfficialBundle();
     if (!officialBundle || !officialBundle.webviewDir) return null;
-    const assetsDir = path.join(officialBundle.webviewDir, "assets");
-    if (!exists(assetsDir)) return null;
-    const fileName = fs
-      .readdirSync(assetsDir)
+    const fileName = officialAssetFileNames(officialBundle)
       .filter((entry) => entry.startsWith(prefix) && entry.endsWith(".css"))
       .sort()[0];
     return fileName ? `/official/assets/${fileName}` : null;
+  }
+
+  function officialAssetFileNames(officialBundle = getOfficialBundle()) {
+    if (!officialBundle || !officialBundle.webviewDir) return [];
+    if (officialAssetFileNamesCache?.webviewDir === officialBundle.webviewDir) {
+      return officialAssetFileNamesCache.fileNames;
+    }
+    const assetsDir = path.join(officialBundle.webviewDir, "assets");
+    const fileNames = exists(assetsDir) ? fs.readdirSync(assetsDir) : [];
+    // 单个 runtime 的官方资源目录只读；缓存目录索引，避免每次打开页面重复扫描数百个文件。
+    officialAssetFileNamesCache = { fileNames, webviewDir: officialBundle.webviewDir };
+    return fileNames;
   }
 
   function officialStyleLinks() {
@@ -265,10 +652,18 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       .join("\n    ");
   }
 
+  function currentHostI18n() {
+    const snapshot = typeof getI18nSnapshot === "function"
+      ? getI18nSnapshot()
+      : { locale: "en-US", messages: {} };
+    return snapshot && typeof snapshot === "object"
+      ? snapshot
+      : { locale: "en-US", messages: {} };
+  }
+
   function currentI18n() {
-    // web-shell 登录页在未认证时也需要知道语言；这里消费 runtime 注入的系统语言快照。
-    const snapshot = typeof getI18nSnapshot === "function" ? getI18nSnapshot() : { locale: "en-US", messages: {} };
-    return withPluginI18nMessages(snapshot);
+    // HTML/配置需要合并插件语言包；静态 chunk 的缓存键只消费宿主下载文案，避免每个资源重复扫描插件目录。
+    return withPluginI18nMessages(currentHostI18n());
   }
 
   function patchHtmlLang(rawHtml, locale) {
@@ -416,14 +811,62 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   }
 
   function downloadFileMessage() {
-    const messages = currentI18n().messages || {};
+    const messages = currentHostI18n().messages || {};
     return messages[OPENCODEX_DOWNLOAD_FILE_MESSAGE_ID] || "Download file";
   }
 
-  function patchOpenInFolderLocaleMessage(source) {
-    if (!source.includes(OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID)) return source;
-    // 这里按官方 message id 改 locale 值，不匹配“打开所在文件夹”等展示文案，也不改官方缓存文件。
-    return source.replace(OPEN_IN_FOLDER_LOCALE_VALUE_RE, (_match, prefix) => `${prefix}${JSON.stringify(downloadFileMessage())}`);
+  function patchOpenInFolderLocaleMessage(source, message = downloadFileMessage()) {
+    let searchFrom = 0;
+    while (searchFrom < source.length) {
+      const tokenIndex = source.indexOf(OPEN_IN_FOLDER_LOCALE_TOKEN, searchFrom);
+      if (tokenIndex < 0) return source;
+      searchFrom = tokenIndex + OPEN_IN_FOLDER_LOCALE_TOKEN.length;
+      OPEN_IN_FOLDER_LOCALE_VALUE_AT_START_RE.lastIndex = tokenIndex;
+      const match = OPEN_IN_FOLDER_LOCALE_VALUE_AT_START_RE.exec(source);
+      if (!match) continue;
+      // 这里按官方 message id 改 locale 值，不匹配展示文案，也不改官方缓存文件。
+      return `${source.slice(0, tokenIndex)}${match[1]}${JSON.stringify(message)}${source.slice(
+        OPEN_IN_FOLDER_LOCALE_VALUE_AT_START_RE.lastIndex
+      )}`;
+    }
+    return source;
+  }
+
+  function isAsciiIdentifierStart(character) {
+    const code = character?.charCodeAt?.(0) ?? -1;
+    return (
+      (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122) ||
+      character === "_" ||
+      character === "$"
+    );
+  }
+
+  function isAsciiIdentifierPart(character) {
+    const code = character?.charCodeAt?.(0) ?? -1;
+    return isAsciiIdentifierStart(character) || (code >= 48 && code <= 57);
+  }
+
+  function applicationMenuCapabilityCheckStart(source, tokenIndex) {
+    let cursor = tokenIndex - 1;
+    if (source[cursor] === "?") cursor -= 1;
+    const serviceNameEnd = cursor + 1;
+    while (cursor >= 0 && isAsciiIdentifierPart(source[cursor])) cursor -= 1;
+    const serviceNameStart = cursor + 1;
+    if (serviceNameStart === serviceNameEnd || !isAsciiIdentifierStart(source[serviceNameStart])) return -1;
+
+    while (cursor >= 0 && /\s/.test(source[cursor])) cursor -= 1;
+    if (source[cursor] !== "&" || source[cursor - 1] !== "&") return -1;
+    cursor -= 2;
+    while (cursor >= 0 && /\s/.test(source[cursor])) cursor -= 1;
+    if (source[cursor] !== ")" || source[cursor - 1] !== "(") return -1;
+    cursor -= 2;
+
+    const predicateNameEnd = cursor + 1;
+    while (cursor >= 0 && isAsciiIdentifierPart(source[cursor])) cursor -= 1;
+    const predicateNameStart = cursor + 1;
+    if (predicateNameStart === predicateNameEnd || !isAsciiIdentifierStart(source[predicateNameStart])) return -1;
+    return predicateNameStart;
   }
 
   function patchApplicationMenuCapabilityCheck(source) {
@@ -431,7 +874,28 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
      * 旧版 renderer 通过 electronBridge.showApplicationMenu 判断是否展示菜单栏，polyfill 已不暴露该方法。
      * 新版改为检查 app-host 的 applicationMenu 服务；Web 端仍需保留其它 app-host 能力，因此只关闭菜单展示判定。
      */
-    const patched = source.replace(APPLICATION_MENU_CAPABILITY_CHECK_RE, "false");
+    let searchFrom = 0;
+    let copiedUntil = 0;
+    let outputParts = null;
+    // 先用固定 token 定位少量候选，再用与旧实现相同的正则做粘滞校验，避免为一处判断扫描整个大 chunk。
+    while (searchFrom < source.length) {
+      const tokenIndex = source.indexOf(APPLICATION_MENU_TOKEN, searchFrom);
+      if (tokenIndex < 0) break;
+      searchFrom = tokenIndex + APPLICATION_MENU_TOKEN.length;
+      const candidateStart = applicationMenuCapabilityCheckStart(source, tokenIndex);
+      if (candidateStart < copiedUntil) continue;
+      APPLICATION_MENU_CAPABILITY_CHECK_AT_START_RE.lastIndex = candidateStart;
+      const match = APPLICATION_MENU_CAPABILITY_CHECK_AT_START_RE.exec(source);
+      if (!match || tokenIndex >= APPLICATION_MENU_CAPABILITY_CHECK_AT_START_RE.lastIndex) continue;
+      outputParts ||= [];
+      outputParts.push(source.slice(copiedUntil, candidateStart), "false");
+      copiedUntil = APPLICATION_MENU_CAPABILITY_CHECK_AT_START_RE.lastIndex;
+    }
+    let patched = source;
+    if (outputParts) {
+      outputParts.push(source.slice(copiedUntil));
+      patched = outputParts.join("");
+    }
     if (
       patched === source &&
       source.includes("windowsMenuBar.") &&
@@ -450,7 +914,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
      * 这里只提升首屏读取优先级，并合并仍在进行中的完全相同请求；Promise 完成后立即删除，
      * 不保存返回值，也不延后 plugin/MCP/Apps 的首个初始化请求。
      */
-    if (!source.includes("AppServerRequestClient is missing a message dispatcher")) return source;
+    if (!source.includes(APP_SERVER_REQUEST_CLIENT_DISPATCH_ERROR)) return source;
     const hasFields = APP_SERVER_REQUEST_CLIENT_FIELDS_RE.test(source);
     const sendMatch = source.match(APP_SERVER_REQUEST_CLIENT_SEND_RE);
     const backgroundMatch = source.match(APP_SERVER_BACKGROUND_METHODS_RE);
@@ -470,7 +934,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       "if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);",
       `if(${methodVar}===\`config/read\`)return this.sendConfigReadRequest(${paramsVar},${optionsVar});`,
       `if(!(${coalescedMethods}))return this.enqueueRequest(${methodVar},${paramsVar},${optionsVar});`,
-      `let r=JSON.stringify({method:${methodVar},params:${paramsVar},priority:${optionsVar}?.priority??null,source:${optionsVar}?.source??null,timeoutMs:${optionsVar}?.timeoutMs??0}),`,
+      `let r=JSON.stringify({method:${methodVar},params:${paramsVar},priority:${optionsVar}?.priority??null,source:${optionsVar}?.source??null,timeoutMs:${optionsVar}?.timeoutMs??0,trace:${optionsVar}?.trace===void 0?\`auto\`:${optionsVar}.trace,widget:${optionsVar}?.widget??null}),`,
       "i=this.opencodexInFlightCapabilityReads.get(r);",
       "if(i!=null)return i;",
       `let a=this.enqueueRequest(${methodVar},${paramsVar},${optionsVar});`,
@@ -488,17 +952,58 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       .replace(APP_SERVER_BACKGROUND_METHODS_RE, `new Set([${backgroundMethods}])`);
   }
 
+  function patchPluginSummaryImageInlining(source) {
+    /**
+     * 官方 Pii() 会在插件列表返回后把每个插件的三张摘要图全部读成 base64，即使当前页面完全不可见。
+     * 远端 Web 改成同源图片 URL 后，React 数据结构与 fallback 都不变，二进制只在 img 挂载时由浏览器读取。
+     */
+    const patched = source.replace(
+      PLUGIN_SUMMARY_IMAGE_EAGER_RE,
+      (_match, inlineImage, plugin, hostId, queryClient) => {
+        const lazyOrInline = (property) =>
+          `window.__opencodexPluginImageUrl?.(${plugin}.${property},${hostId})??${inlineImage}(${plugin}.${property},${hostId},${queryClient})`;
+        return `Promise.all([${lazyOrInline("composerIconPath")},${lazyOrInline("logoPath")},${lazyOrInline("logoDarkPath")}])`;
+      }
+    );
+    if (
+      patched === source &&
+      PLUGIN_SUMMARY_IMAGE_LAYOUT_HINT_RE.test(source) &&
+      !hasWarnedPluginSummaryImagePatchMiss
+    ) {
+      hasWarnedPluginSummaryImagePatchMiss = true;
+      console.warn("[gateway] plugin summary image lazy-load patch skipped: current bundle shape did not match");
+    }
+    return patched;
+  }
+
+  function officialAssetHasPatchCandidate(reqPath, data, req) {
+    const loopback = isLoopbackHostHeader(req && req.headers && req.headers.host);
+    return (
+      /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath) ||
+      data.includes(APPLICATION_MENU_TOKEN) ||
+      data.includes(APP_SERVER_REQUEST_CLIENT_DISPATCH_ERROR) ||
+      (!loopback &&
+        (data.includes(OPEN_IN_FOLDER_LOCALE_TOKEN) ||
+          (data.includes("composerIconPath") && data.includes("read-file-binary"))))
+    );
+  }
+
   /** 对官方 chunk 做响应期 patch，不落盘改 vendor/官方构建产物。 */
-  function patchOfficialAsset(reqPath, data, req) {
+  function patchOfficialAsset(reqPath, data, req, options = {}) {
     if (!shouldPatchOfficialAsset(reqPath)) return data;
+    if (!officialAssetHasPatchCandidate(reqPath, data, req)) return data;
+    const loopback = isLoopbackHostHeader(req && req.headers && req.headers.host);
+    const isHistorySignalsChunk = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath);
+    // 绝大多数官方 chunk 已在候选检查中直接返回；只有命中的少量资源才进行 UTF-8 文本改写。
     const source = data.toString("utf-8");
-    let patched = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath)
+    let patched = isHistorySignalsChunk
       ? patchAppServerManagerSignalsChunk(source)
       : source;
     patched = patchApplicationMenuCapabilityCheck(patched);
     patched = patchAppServerRequestScheduling(patched);
-    if (!isLoopbackHostHeader(req && req.headers && req.headers.host)) {
-      patched = patchOpenInFolderLocaleMessage(patched);
+    if (!loopback) {
+      patched = patchPluginSummaryImageInlining(patched);
+      patched = patchOpenInFolderLocaleMessage(patched, options.downloadMessage || downloadFileMessage());
     }
     // 保留原 Buffer 身份，让缓存层能区分 content-hash 源文件与动态改写后的响应体。
     return patched === source ? data : Buffer.from(patched, "utf-8");
@@ -533,11 +1038,19 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   function cacheControlForRequestPath(reqPath, responsePatched = false) {
     if (process.env.CODEX_WEB_DISABLE_ASSET_CACHE === "1") return "no-store";
     if (patchedOfficialAssetName(reqPath)) {
-      // patched 前缀不包含官方 runtime 版本，只有 Vite content-hash 文件名能安全跨升级长期缓存。
+      if (responsePatched) {
+        // 动态 patch 仍要求每次校验，但允许浏览器保存响应并通过 ETag 复用，避免旧版本长期驻留。
+        return "private, no-cache, must-revalidate";
+      }
+      /**
+       * patched JS 的相对动态导入会让 CSS、字体和图片也落到当前 patched 命名空间；
+       * 这些文件不做响应期改写，只要文件名含 Vite content hash，就能和未改写 JS 一样安全长缓存。
+       */
       if (
         reqPath.startsWith(PATCHED_OFFICIAL_PREFIX) &&
-        !responsePatched &&
-        /-[A-Za-z0-9_-]{8}\.js$/.test(patchedOfficialAssetName(reqPath))
+        /-[A-Za-z0-9_-]{8}\.(?:avif|css|gif|ico|jpe?g|js|png|svg|webp|woff2?)$/i.test(
+          patchedOfficialAssetName(reqPath)
+        )
       ) {
         return "public, max-age=31536000, immutable";
       }
@@ -547,11 +1060,65 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
     if (reqPath.startsWith("/official/assets/")) return "public, max-age=31536000, immutable";
     if (reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) return "public, max-age=86400";
     if (reqPath.startsWith("/official/")) return "public, max-age=3600";
+    if (WEB_SHELL_STATIC_FILES.has(reqPath) || reqPath.startsWith(OPENCODEX_PLUGIN_URL_PREFIX)) {
+      // 文件名不带 hash，必须每次验证；内容未变时允许 304，避免远端刷新重复传输整套 Web 扩展脚本。
+      return "private, no-cache, must-revalidate";
+    }
     return "no-store";
+  }
+
+  function weakFileEtag(file) {
+    const stat = fs.statSync(file);
+    // size + mtime + ctime 足以表示只读构建资源版本，同时允许命中 304 前完全跳过读盘和压缩。
+    return `W/"${stat.size.toString(16)}-${Math.trunc(stat.mtimeMs).toString(16)}-${Math.trunc(stat.ctimeMs).toString(16)}"`;
   }
 
   /** 发送静态文件，并按路径套用合适的缓存策略。 */
   function serveFile(req, res, file, status = 200, reqPath = "") {
+    if (shouldPatchOfficialAsset(reqPath) && process.env.CODEX_WEB_DISABLE_ASSET_CACHE !== "1") {
+      const sendEntry = (entry) => {
+        const contentType = mimeType(file);
+        const encoding = representationEncoding(req, contentType, entry.data);
+        const sendRepresentation = (representation) => {
+          const headers = {
+            "content-type": contentType,
+            "cache-control": cacheControlForRequestPath(reqPath, entry.patched),
+            etag: representation.etag,
+            vary: "Accept-Encoding",
+          };
+          if (encoding !== "identity") headers["content-encoding"] = encoding;
+          if (status === 200 && requestHasMatchingEtag(req, representation.etag)) {
+            patchedAssetCacheStats.notModified += 1;
+            return send(res, 304, headers, "");
+          }
+          return send(res, status, headers, representation.body);
+        };
+        const representation = cachedRepresentation(entry, encoding);
+        return typeof representation?.then === "function"
+          ? representation.then(sendRepresentation)
+          : sendRepresentation(representation);
+      };
+      const entry = cachedPatchedAsset(reqPath, file, req);
+      return typeof entry?.then === "function" ? entry.then(sendEntry) : sendEntry(entry);
+    }
+
+    const cacheControl = cacheControlForRequestPath(reqPath);
+    const canRevalidateSource = !shouldPatchOfficialAsset(reqPath) && cacheControl !== "no-store";
+    const sourceEtag = canRevalidateSource ? weakFileEtag(file) : "";
+    if (status === 200 && sourceEtag && requestHasMatchingEtag(req, sourceEtag)) {
+      return send(
+        res,
+        304,
+        {
+          "content-type": mimeType(file),
+          "cache-control": cacheControl,
+          etag: sourceEtag,
+          vary: "Accept-Encoding",
+        },
+        ""
+      );
+    }
+
     const sourceData = fs.readFileSync(file);
     const data = patchOfficialAsset(reqPath, sourceData, req);
     const response = gzipIfUseful(
@@ -559,6 +1126,7 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       {
         "content-type": mimeType(file),
         "cache-control": cacheControlForRequestPath(reqPath, data !== sourceData),
+        ...(sourceEtag ? { etag: sourceEtag, vary: "Accept-Encoding" } : {}),
       },
       data
     );
@@ -585,9 +1153,11 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   }
 
   return {
+    assetCacheDiagnostics,
     createRendererResponse,
     isAppShellRoute,
     isPublicStaticPath,
+    patchOfficialAssetData: patchOfficialAsset,
     serveFile,
     servePluginLoader,
     serveWebShellIndex,

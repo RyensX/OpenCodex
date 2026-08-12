@@ -6,6 +6,8 @@
     // 这里集中管理 token 用量数据的惰性查询、被动解析和有界缓存，避免 bridge polyfill 继续膨胀。
     const TOKEN_USAGE_GLOBAL_CACHE_LIMIT = 500;
     const TOKEN_USAGE_THREAD_CACHE_LIMIT = 100;
+    const TOKEN_USAGE_THREAD_STATE_LIMIT = 256;
+    const TOKEN_USAGE_PENDING_QUERY_LIMIT = 256;
     const TOKEN_USAGE_TTL_MS = 24 * 60 * 60 * 1000;
     const TOKEN_USAGE_NEGATIVE_TTL_MS = 60 * 1000;
     const TOKEN_USAGE_TURN_ASSOCIATION_WINDOW_MS = 10 * 60 * 1000;
@@ -318,6 +320,17 @@
       tokenUsageState.pendingUsageByThread.delete(normalizedThreadId);
     }
 
+    function setBoundedTokenUsageThreadState(map, threadId, value) {
+      // 页面长期切换会话时只保留最近状态；过旧状态已经超过关联窗口，淘汰不会影响当前回合归属。
+      map.delete(threadId);
+      map.set(threadId, value);
+      while (map.size > TOKEN_USAGE_THREAD_STATE_LIMIT) {
+        const oldestThreadId = map.keys().next().value;
+        if (!oldestThreadId) break;
+        map.delete(oldestThreadId);
+      }
+    }
+
     function rememberTokenUsageTurn(threadId, turnId, status) {
       const normalizedThreadId = normalizeTokenUsageId(threadId);
       const normalizedTurnId = normalizeTokenUsageId(turnId);
@@ -326,17 +339,18 @@
       if (status === "completed" || status === "failed" || status === "interrupted") {
         // 有些 token usage 通知先于 completed 到达；完成事件出现后再把暂存 usage 绑定到确定的 turn。
         tokenUsageState.activeTurnsByThread.delete(normalizedThreadId);
-        tokenUsageState.recentTurnsByThread.set(normalizedThreadId, record);
+        setBoundedTokenUsageThreadState(tokenUsageState.recentTurnsByThread, normalizedThreadId, record);
         const pending = tokenUsageState.pendingUsageByThread.get(normalizedThreadId);
         if (pending && Date.now() - pending.seenAt <= TOKEN_USAGE_TURN_ASSOCIATION_WINDOW_MS) {
           const normalized = normalizeTokenUsagePayload(pending.rawUsage, normalizedThreadId, normalizedTurnId, pending.source);
           if (normalized) setTokenUsageCacheEntry(normalized);
-          tokenUsageState.pendingUsageByThread.delete(normalizedThreadId);
         }
+        // 无论是否仍在关联窗口内，完成事件都应结束该线程的暂存 usage 生命周期。
+        tokenUsageState.pendingUsageByThread.delete(normalizedThreadId);
         return;
       }
-      tokenUsageState.activeTurnsByThread.set(normalizedThreadId, record);
-      tokenUsageState.recentTurnsByThread.set(normalizedThreadId, record);
+      setBoundedTokenUsageThreadState(tokenUsageState.activeTurnsByThread, normalizedThreadId, record);
+      setBoundedTokenUsageThreadState(tokenUsageState.recentTurnsByThread, normalizedThreadId, record);
     }
 
     function recentTokenUsageTurnId(threadId) {
@@ -344,8 +358,10 @@
       if (!normalizedThreadId) return null;
       const active = tokenUsageState.activeTurnsByThread.get(normalizedThreadId);
       if (active && Date.now() - active.seenAt <= TOKEN_USAGE_TURN_ASSOCIATION_WINDOW_MS) return active.turnId;
+      if (active) tokenUsageState.activeTurnsByThread.delete(normalizedThreadId);
       const recent = tokenUsageState.recentTurnsByThread.get(normalizedThreadId);
       if (recent && Date.now() - recent.seenAt <= TOKEN_USAGE_TURN_ASSOCIATION_WINDOW_MS) return recent.turnId;
+      if (recent) tokenUsageState.recentTurnsByThread.delete(normalizedThreadId);
       return null;
     }
 
@@ -394,11 +410,18 @@
       const turnId = normalizeTokenUsageId(explicitTurnId) || recentTokenUsageTurnId(threadId);
       if (!turnId) {
         // 官方当前通知可能只有 threadId；没有活跃 turn 时先短暂暂存，等待 turn/completed 再绑定。
-        tokenUsageState.pendingUsageByThread.set(threadId, { rawUsage, seenAt: Date.now(), source });
+        setBoundedTokenUsageThreadState(tokenUsageState.pendingUsageByThread, threadId, {
+          rawUsage,
+          seenAt: Date.now(),
+          source,
+        });
         return;
       }
       const normalized = normalizeTokenUsagePayload(rawUsage, threadId, turnId, source);
-      if (normalized) setTokenUsageCacheEntry(normalized);
+      if (normalized) {
+        tokenUsageState.pendingUsageByThread.delete(threadId);
+        setTokenUsageCacheEntry(normalized);
+      }
     }
 
     function tokenUsageEventPayloadFromMessage(message) {
@@ -460,11 +483,18 @@
         null;
       const associatedTurnId = turnId || recentTokenUsageTurnId(threadId);
       if (!associatedTurnId) {
-        tokenUsageState.pendingUsageByThread.set(threadId, { rawUsage, seenAt: Date.now(), source });
+        setBoundedTokenUsageThreadState(tokenUsageState.pendingUsageByThread, threadId, {
+          rawUsage,
+          seenAt: Date.now(),
+          source,
+        });
         return;
       }
       const normalized = normalizeTokenUsagePayload(rawUsage, threadId, associatedTurnId, source);
-      if (normalized) setTokenUsageCacheEntry(normalized);
+      if (normalized) {
+        tokenUsageState.pendingUsageByThread.delete(threadId);
+        setTokenUsageCacheEntry(normalized);
+      }
     }
 
     function maybeTokenUsageContainerThreadId(object, parentThreadId) {
@@ -500,24 +530,35 @@
       let scanned = 0;
       while (stack.length && scanned < TOKEN_USAGE_PASSIVE_HINT_SCAN_LIMIT) {
         const current = stack.pop();
+        scanned += 1;
         const value = current.value;
         if (tokenUsageTextHasPassiveHint(value)) return true;
         if (!value || typeof value !== "object") continue;
         if (visited.has(value)) continue;
         visited.add(value);
-        scanned += 1;
+        const available = Math.max(0, TOKEN_USAGE_PASSIVE_HINT_SCAN_LIMIT - scanned - stack.length);
+        if (available === 0) continue;
+        // 深度限制对数组和普通对象一致生效，避免嵌套对象从普通属性分支绕过浅层探测边界。
+        if (current.depth >= TOKEN_USAGE_PASSIVE_HINT_DEPTH_LIMIT) continue;
         if (Array.isArray(value)) {
-          if (current.depth >= TOKEN_USAGE_PASSIVE_HINT_DEPTH_LIMIT) continue;
-          for (let index = value.length - 1; index >= 0; index -= 1) {
+          // 只把预算内的前部候选压栈，超宽数组不能先制造百万级临时 stack 再慢慢退出。
+          for (let index = Math.min(value.length, available) - 1; index >= 0; index -= 1) {
             stack.push({ depth: current.depth + 1, value: value[index] });
           }
           continue;
         }
-        for (const [key, child] of Object.entries(value)) {
-          if (tokenUsageTextHasPassiveHint(key) || tokenUsageTextHasPassiveHint(child)) return true;
-          if (child && typeof child === "object" && current.depth < TOKEN_USAGE_PASSIVE_HINT_DEPTH_LIMIT) {
-            stack.push({ depth: current.depth + 1, value: child });
-          }
+        const children = [];
+        for (const key in value) {
+          if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+          if (tokenUsageTextHasPassiveHint(key)) return true;
+          const child = value[key];
+          if (tokenUsageTextHasPassiveHint(child)) return true;
+          children.push(child);
+          if (children.length >= available) break;
+        }
+        for (let index = children.length - 1; index >= 0; index -= 1) {
+          // 原始值也进入统一预算；大量字符串/数字字段不能绕过只统计对象的上限。
+          stack.push({ depth: current.depth + 1, value: children[index] });
         }
       }
       return false;
@@ -525,7 +566,6 @@
 
     function shouldHandleTokenUsagePassiveMessage(message) {
       // 被动通道只做轻量表层筛选；真正展示仍以按 turnId 懒查询为主，避免每条官方 IPC 都深扫对象树。
-      if (Array.isArray(message)) return message.some((item) => tokenUsageObjectHasPassiveHint(item));
       return tokenUsageObjectHasPassiveHint(message);
     }
 
@@ -543,6 +583,7 @@
       const visited = new WeakSet();
       const stack = [{ depth: 0, threadId: null, turnId: null, value: root }];
       let scanned = 0;
+      let inspectedChildren = 0;
       while (stack.length && scanned < TOKEN_USAGE_TREE_SCAN_LIMIT) {
         const current = stack.pop();
         const value = current.value;
@@ -552,6 +593,10 @@
         scanned += 1;
         const threadId = maybeTokenUsageContainerThreadId(value, current.threadId);
         const turnId = maybeTokenUsageContainerTurnId(value, current.turnId);
+        // 批消息中的 JSON-RPC notification 也复用这次有界遍历，不能在数组外再逐项深扫一遍。
+        tokenUsageNotificationFromObject(value).forEach((notification) =>
+          handleTokenUsageNotification(notification, source)
+        );
         handleTokenUsageEventMessage(value, source, threadId);
         const rawUsage = tokenUsagePayloadFromContainer(value);
         if (rawUsage && threadId && turnId) {
@@ -559,16 +604,27 @@
           if (normalized) setTokenUsageCacheEntry(normalized);
         }
         if (current.depth >= 6) continue;
+        if (inspectedChildren >= TOKEN_USAGE_TREE_SCAN_LIMIT) continue;
         if (Array.isArray(value)) {
-          for (let index = value.length - 1; index >= 0; index -= 1) {
-            stack.push({ depth: current.depth + 1, threadId, turnId, value: value[index] });
+          const childCount = Math.min(value.length, TOKEN_USAGE_TREE_SCAN_LIMIT - inspectedChildren);
+          inspectedChildren += childCount;
+          // 限制一次展开宽度，避免异常列表在对象扫描上限生效前先占满内存。
+          for (let index = childCount - 1; index >= 0; index -= 1) {
+            const child = value[index];
+            if (child && typeof child === "object") {
+              stack.push({ depth: current.depth + 1, threadId, turnId, value: child });
+            }
           }
           continue;
         }
-        for (const child of Object.values(value)) {
+        for (const key in value) {
+          if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+          inspectedChildren += 1;
+          const child = value[key];
           if (child && typeof child === "object") {
             stack.push({ depth: current.depth + 1, threadId, turnId, value: child });
           }
+          if (inspectedChildren >= TOKEN_USAGE_TREE_SCAN_LIMIT) break;
         }
       }
     }
@@ -579,14 +635,16 @@
         markTokenUsagePassiveSkipped();
         return;
       }
-      if (Array.isArray(message)) {
-        message.forEach((item) => handleTokenUsageProtocolMessage(item, source, false));
-        return;
-      }
       if (typeof message !== "object") return;
       markTokenUsagePassiveHandled();
-      tokenUsageNotificationFromObject(message).forEach((notification) => handleTokenUsageNotification(notification, source));
-      collectTokenUsageFromTree(message.result ?? message.payload ?? message, source);
+      const treeRoot = message.result ?? message.payload ?? message;
+      // result/payload 包装之外的 notification 仍需先处理；根对象自身则由 collect 统一处理，避免重复回执。
+      if (treeRoot !== message) {
+        tokenUsageNotificationFromObject(message).forEach((notification) =>
+          handleTokenUsageNotification(notification, source)
+        );
+      }
+      collectTokenUsageFromTree(treeRoot, source);
     }
 
     function handleTokenUsageAppHostData(data) {
@@ -678,11 +736,18 @@
         if (cached) return Promise.resolve(cached.negative ? null : cached.value);
         // 同一回复的并发请求共用一个 Promise，避免多个可见 badge 同时触发重复后端查询。
         if (tokenUsageState.pendingQueries.has(key)) return tokenUsageState.pendingQueries.get(key);
+        if (tokenUsageState.pendingQueries.size >= TOKEN_USAGE_PENDING_QUERY_LIMIT) {
+          // 可见回复异常暴增时优先等待下一次滚动重试，避免同时保留无限 fetch/AbortController。
+          updateTokenUsageDiagnostics({ lastFetchError: "token usage query limit exceeded" });
+          return Promise.resolve(null);
+        }
         const pending = fetchTokenUsageForTurn(threadId, turnId)
           .then((usage) => {
             const refreshed = getTokenUsageCacheEntry(threadId, turnId);
             if (refreshed) return refreshed.negative ? null : refreshed.value;
             if (usage) {
+              // 插件在请求途中被停用时，已发出的 fetch 仍可能完成；零消费者状态不得重新回填已释放的缓存。
+              if (!tokenUsageConsumerActive()) return null;
               setTokenUsageCacheEntry(usage);
               return usage;
             }

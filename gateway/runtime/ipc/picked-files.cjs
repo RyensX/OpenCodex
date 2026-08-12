@@ -10,6 +10,9 @@ const {
   ensureDir,
 } = require("../core/config.cjs");
 
+// Node 单次定时器的安全上限；更长 TTL 通过再次调度分段等待。
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
 class PickedFilesError extends Error {
   constructor(status, message) {
     super(message);
@@ -110,8 +113,9 @@ function safeRemoveTree(targetPath) {
 }
 
 function prunePickedFiles() {
-  if (!fs.existsSync(CODEX_WEB_PICKED_FILES_DIR)) return;
+  if (!fs.existsSync(CODEX_WEB_PICKED_FILES_DIR)) return 0;
   const now = Date.now();
+  let nextExpiryAtMs = Infinity;
   for (const dayEntry of fs.readdirSync(CODEX_WEB_PICKED_FILES_DIR, { withFileTypes: true })) {
     const dayPath = path.join(CODEX_WEB_PICKED_FILES_DIR, dayEntry.name);
     if (!pathIsInside(dayPath, CODEX_WEB_PICKED_FILES_DIR)) continue;
@@ -125,19 +129,45 @@ function prunePickedFiles() {
       } catch {
         continue;
       }
-      if (now - stats.mtimeMs >= CODEX_WEB_PICKED_FILE_TTL_MS) safeRemoveTree(requestPath);
+      const expiryAtMs = stats.mtimeMs + CODEX_WEB_PICKED_FILE_TTL_MS;
+      if (expiryAtMs <= now) {
+        safeRemoveTree(requestPath);
+      } else {
+        nextExpiryAtMs = Math.min(nextExpiryAtMs, expiryAtMs);
+      }
     }
     try {
       if (fs.readdirSync(dayPath).length === 0) fs.rmdirSync(dayPath);
     } catch {}
   }
+  return Number.isFinite(nextExpiryAtMs) ? nextExpiryAtMs : 0;
 }
 
 function createPickedFilesService() {
   ensureDir(CODEX_WEB_PICKED_FILES_DIR);
-  prunePickedFiles();
-  const timer = setInterval(prunePickedFiles, Math.min(60 * 60 * 1000, CODEX_WEB_PICKED_FILE_TTL_MS));
-  if (timer && typeof timer.unref === "function") timer.unref();
+  let pruneTimer = null;
+  let scheduledExpiryAtMs = 0;
+  let disposed = false;
+
+  function schedulePickedFilesPrune(expiryAtMs) {
+    if (disposed || !Number.isFinite(expiryAtMs) || expiryAtMs <= 0) return;
+    // 已有更早的清理任务时无需重排；新附件只会把到期时间向后延伸。
+    if (pruneTimer && scheduledExpiryAtMs <= expiryAtMs) return;
+    if (pruneTimer) clearTimeout(pruneTimer);
+    scheduledExpiryAtMs = expiryAtMs;
+    pruneTimer = setTimeout(
+      () => {
+        pruneTimer = null;
+        scheduledExpiryAtMs = 0;
+        schedulePickedFilesPrune(prunePickedFiles());
+      },
+      Math.min(MAX_TIMER_DELAY_MS, Math.max(1, expiryAtMs - Date.now()))
+    );
+    if (typeof pruneTimer.unref === "function") pruneTimer.unref();
+  }
+
+  // 启动时只为实际存在的未过期附件安排清理，空目录不再每小时扫描磁盘。
+  schedulePickedFilesPrune(prunePickedFiles());
 
   function handlePickFilesPayload(payload) {
     const files = pickedFilesFromPayload(payload);
@@ -183,17 +213,24 @@ function createPickedFilesService() {
       throw error;
     }
 
+    schedulePickedFilesPrune(Date.now() + CODEX_WEB_PICKED_FILE_TTL_MS);
     return { files: resultFiles };
   }
 
   function dispose() {
-    clearInterval(timer);
+    disposed = true;
+    if (pruneTimer) clearTimeout(pruneTimer);
+    pruneTimer = null;
+    scheduledExpiryAtMs = 0;
   }
 
   return {
     dispose,
     handlePickFilesPayload,
     prunePickedFiles,
+    __test: {
+      timerActive: () => !!pruneTimer,
+    },
   };
 }
 

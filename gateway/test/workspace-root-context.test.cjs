@@ -43,3 +43,25 @@ test("ignores relative roots and cwd values without file tree context", () => {
     []
   );
 });
+
+test("bounds wide IPC traversal, handles cycles, and prioritizes protocol envelopes", () => {
+  let candidateReads = 0;
+  const payload = {};
+  payload.self = payload;
+  payload.items = Array.from({ length: 2000 }, (_, index) =>
+    Object.defineProperty({}, "value", {
+      enumerable: true,
+      get() {
+        candidateReads += 1;
+        return index;
+      },
+    })
+  );
+  payload.body = JSON.stringify({ params: { cwd: "/tmp/prioritized-project", path: "src/index.js" } });
+
+  assert.deepEqual(
+    workspaceRootsFromIpcPayload("codex_desktop:message-from-view", payload),
+    ["/tmp/prioritized-project"]
+  );
+  assert.ok(candidateReads > 0 && candidateReads < 1024);
+});

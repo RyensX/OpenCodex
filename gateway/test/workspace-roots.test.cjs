@@ -75,3 +75,11 @@ test("dynamic workspace roots are allowed by app-fs checks", (t) => {
   assert.equal(isAllowedAppFsFile(insideFile, service.workspaceRoots()), true);
   assert.equal(isAllowedAppFsFile(outsideFile, service.workspaceRoots()), false);
 });
+
+test("bounds dynamic workspace roots by recent registration order", (t) => {
+  const roots = [makeTempDir(t), makeTempDir(t), makeTempDir(t)];
+  const service = createWorkspaceRootsService({ maxRoots: 2 });
+  const resolved = roots.map((root) => service.registerWorkspaceRoot(root));
+
+  assert.deepEqual(service.workspaceRoots(), resolved.slice(1));
+});

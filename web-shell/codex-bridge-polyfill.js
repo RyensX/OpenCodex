@@ -23,7 +23,28 @@
   const CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS = 120;
   const CLIENT_DIAGNOSTIC_MAX_BATCH = 40;
   const LOW_PRIORITY_IPC_CONCURRENCY = 2;
+  const LOW_PRIORITY_IPC_QUEUE_MAX_ENTRIES = 512;
   const LOW_PRIORITY_IPC_LOG_EVERY = 25;
+  const CONNECTOR_LOGO_CACHE_MAX_ENTRIES = 256;
+  const CONNECTOR_LOGO_CACHE_MAX_CHARS = 8 * 1024 * 1024;
+  const CONNECTOR_LOGO_INFLIGHT_MAX_ENTRIES = 512;
+  const CONNECTOR_LOGO_WAITERS_MAX_ENTRIES = 512;
+  const CONNECTOR_LOGO_RESPONSE_TIMEOUT_MS = 20_000;
+  const BROWSER_NOTIFICATION_MAX_ACTIVE = 128;
+  const IPC_INVOKE_TIMEOUT_MS = 30_000;
+  const APP_HOST_RELAY_MAX_ENTRIES = 64;
+  const BRIDGE_TOAST_BODY_RETRY_MAX = 12;
+  const BRIDGE_TOAST_BODY_RETRY_BASE_MS = 40;
+  const FILE_PICKER_SESSION_TIMEOUT_MS = 10 * 60_000;
+  const TERMINAL_QUEUE_MAX_SESSIONS = 64;
+  const TERMINAL_QUEUE_MAX_PENDING_PER_SESSION = 512;
+  const TERMINAL_QUEUE_MAX_TOTAL_PENDING = 4096;
+  const TERMINAL_SESSION_ID_MAX_CHARS = 256;
+  const PLUGIN_IMAGE_PATH_MAX_CHARS = 8192;
+  const SHARED_OBJECT_SNAPSHOT_MAX_ENTRIES = 512;
+  const PERSISTED_ATOM_SNAPSHOT_MAX_ENTRIES = 512;
+  const DIAGNOSTIC_ROUTE_SCAN_MAX_NODES = 128;
+  const CLIENT_DIAGNOSTICS_ENABLED = cfg.debugClientDiagnostics === true || cfg.debugClientDiagnostics === "1";
   // debugWs 由 gateway 的 OPENCODEX_DEBUG_WS 注入；默认关闭，避免每条 WS 消息都额外计时/算长度。
   const WS_DEBUG_ENABLED = cfg.debugWs === true || cfg.debugWs === "1";
   // 下面三个阈值只在 debugWs 开启时生效，用来定位“远端首个会话打开慢”的浏览器侧瓶颈。
@@ -32,6 +53,7 @@
   const WS_INBOUND_HANDLE_SLOW_MS = Number(cfg.wsInboundHandleSlowMs || 80);
   // app-host RPC 首屏会连续发多条字符串帧；WS 未握手完成前先短暂排队，超过上限直接关闭端口。
   const APP_HOST_PENDING_MESSAGE_LIMIT = 2000;
+  const APP_HOST_PENDING_MESSAGE_CHARS_LIMIT = 16 * 1024 * 1024;
   const GATEWAY_AUTH_LOGOUT_LABEL = t("web.auth.logoutGateway");
   const GATEWAY_AUTH_LOGOUT_BUSY_LABEL = t("web.auth.logoutGatewayBusy");
   const OFFICIAL_LOGOUT_LABELS = [
@@ -45,6 +67,19 @@
   ];
   const MESSAGE_FOR_VIEW_CHANNEL = "codex_desktop:message-for-view";
   const WINDOW_FOCUS_CHANGED_MESSAGE = "electron-window-focus-changed";
+
+  /** 把本机插件摘要图标改成受认证的同源 URL；浏览器只会在 img 真正挂载时读取二进制。 */
+  function localPluginImageUrl(value, hostId) {
+    if (hostId !== "local" || typeof value !== "string") return null;
+    const filePath = value.trim();
+    if (!filePath || filePath.length > PLUGIN_IMAGE_PATH_MAX_CHARS) return null;
+    // 官方插件摘要提供绝对路径；相对路径和已有 URL 继续走官方 BI() 内联逻辑，避免改变兼容语义。
+    if (!filePath.startsWith("/") && !/^[a-zA-Z]:[\\/]/.test(filePath)) return null;
+    if (!/\.(?:svg|png|jpe?g|webp|gif|avif)$/i.test(filePath)) return null;
+    return `/api/plugin-image?path=${encodeURIComponent(filePath)}`;
+  }
+
+  w.__opencodexPluginImageUrl = localPluginImageUrl;
 
   function installLocaleOverride() {
     try {
@@ -360,9 +395,12 @@
   const listeners = new Map();
   const authStatusCallbacks = new Set();
   const terminalMessageQueues = new Map();
+  const terminalMessageQueueDepths = new Map();
+  let terminalMessagePendingCount = 0;
   // 每个官方 connect-app-host MessagePort 对应一条 relay，key 是仅在当前页面内有效的 portId。
   const appHostPortRelays = new Map();
   const activeBrowserNotifications = new Map();
+  let activeBrowserFilePickerCancel = null;
   const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
   const STATSIG_I18N_LAYER_CONFIG = "72216192";
   const STATSIG_I18N_LAYER_VALUES = {
@@ -381,14 +419,18 @@
   const wsReadyWaiters = new Set();
   let reconnectTimer = null;
   let reconnectDelay = 500;
+  let reconnectDeferredUntilVisible = false;
   const bridgeStartedAtMs = Date.now();
   const clientDiagnosticQueue = [];
   let clientDiagnosticFlushTimer = null;
   const lowPriorityIpcQueue = [];
   const connectorLogoResponseCache = new Map();
+  const connectorLogoResponseCacheChars = new Map();
   const connectorLogoInFlight = new Map();
   const connectorLogoRequestCacheKeys = new Map();
   const connectorLogoDiagnosticCounts = new Map();
+  let connectorLogoSweepTimer = null;
+  let connectorLogoResponseCacheTotalChars = 0;
   let activeLowPriorityIpcCount = 0;
   let lowPriorityIpcQueuedCount = 0;
   let lowPriorityIpcStartedCount = 0;
@@ -422,13 +464,16 @@
     return String(socket.readyState);
   }
 
-  function diagnosticRouteIdFromValue(value, depth = 0, seen = new WeakSet()) {
-    if (!value || typeof value !== "object" || depth > 4) return "";
-    if (seen.has(value)) return "";
-    seen.add(value);
+  function diagnosticRouteIdFromValue(value, depth = 0, state = null) {
+    const traversal = state || { remaining: DIAGNOSTIC_ROUTE_SCAN_MAX_NODES, seen: new WeakSet() };
+    if (!value || typeof value !== "object" || depth > 4 || traversal.remaining <= 0) return "";
+    if (traversal.seen.has(value)) return "";
+    traversal.seen.add(value);
+    traversal.remaining -= 1;
     if (Array.isArray(value)) {
-      for (const item of value) {
-        const nested = diagnosticRouteIdFromValue(item, depth + 1, seen);
+      const childCount = Math.min(value.length, traversal.remaining);
+      for (let index = 0; index < childCount && traversal.remaining > 0; index += 1) {
+        const nested = diagnosticRouteIdFromValue(value[index], depth + 1, traversal);
         if (nested) return nested;
       }
       return "";
@@ -437,7 +482,7 @@
     if (value.request && typeof value.request === "object" && value.request.id != null) return String(value.request.id);
     if (value.id != null && (depth > 0 || value.method || value.jsonrpc || value.type)) return String(value.id);
     for (const key of ["payload", "message", "response", "body"]) {
-      const nested = diagnosticRouteIdFromValue(value[key], depth + 1, seen);
+      const nested = diagnosticRouteIdFromValue(value[key], depth + 1, traversal);
       if (nested) return nested;
     }
     return "";
@@ -475,6 +520,8 @@
   }
 
   function clientDiagnostic(event, data) {
+    // 服务端默认不落浏览器诊断；未显式开启时在源头停止序列化、定时器和额外 HTTP 请求。
+    if (!CLIENT_DIAGNOSTICS_ENABLED) return;
     try {
       const diagnosticData = {
         ageMs: Date.now() - bridgeStartedAtMs,
@@ -645,6 +692,7 @@
   }
 
   function logConnectorLogoDiagnostic(event, details) {
+    if (!CLIENT_DIAGNOSTICS_ENABLED) return;
     const count = (connectorLogoDiagnosticCounts.get(event) || 0) + 1;
     connectorLogoDiagnosticCounts.set(event, count);
     // connector logo 数量很大，只抽样打点；否则日志又会反过来拖慢关键 IPC 排障。
@@ -668,6 +716,51 @@
     return cloned;
   }
 
+  function touchConnectorLogoCacheEntry(cacheKey, cachedResponse) {
+    // Map 的插入顺序直接作为 LRU 顺序；命中后移动到尾部，避免淘汰仍在频繁使用的图标。
+    connectorLogoResponseCache.delete(cacheKey);
+    connectorLogoResponseCache.set(cacheKey, cachedResponse);
+  }
+
+  function deleteConnectorLogoCacheEntry(cacheKey) {
+    if (!connectorLogoResponseCache.has(cacheKey)) return false;
+    connectorLogoResponseCache.delete(cacheKey);
+    connectorLogoResponseCacheTotalChars = Math.max(
+      0,
+      connectorLogoResponseCacheTotalChars - (connectorLogoResponseCacheChars.get(cacheKey) || 0)
+    );
+    connectorLogoResponseCacheChars.delete(cacheKey);
+    return true;
+  }
+
+  function connectorLogoResponseChars(payload) {
+    try {
+      return JSON.stringify(payload).length;
+    } catch {
+      return Infinity;
+    }
+  }
+
+  function cacheConnectorLogoResponse(cacheKey, payload) {
+    const clonedPayload = clonePlainPayload(payload);
+    const payloadChars = connectorLogoResponseChars(clonedPayload);
+    deleteConnectorLogoCacheEntry(cacheKey);
+    // 单张异常大图片仍正常投递给当前请求，但不允许进入长期缓存。
+    if (!Number.isFinite(payloadChars) || payloadChars > CONNECTOR_LOGO_CACHE_MAX_CHARS) return;
+    touchConnectorLogoCacheEntry(cacheKey, clonedPayload);
+    connectorLogoResponseCacheChars.set(cacheKey, payloadChars);
+    connectorLogoResponseCacheTotalChars += payloadChars;
+    // 同时限制条目数和完整 fetch-response 字符量，避免大量 base64 logo 长期占用移动端堆内存。
+    while (
+      connectorLogoResponseCache.size > CONNECTOR_LOGO_CACHE_MAX_ENTRIES ||
+      connectorLogoResponseCacheTotalChars > CONNECTOR_LOGO_CACHE_MAX_CHARS
+    ) {
+      const oldestKey = connectorLogoResponseCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      deleteConnectorLogoCacheEntry(oldestKey);
+    }
+  }
+
   function isSuccessfulFetchResponse(payload) {
     const status = Number(payload && payload.status);
     return !!(
@@ -683,6 +776,7 @@
   function emitConnectorLogoCachedResponse(cacheKey, requestId) {
     const cached = connectorLogoResponseCache.get(cacheKey);
     if (!cached) return false;
+    touchConnectorLogoCacheEntry(cacheKey, cached);
     emitFetchResponse(cloneConnectorLogoFetchResponse(cached, requestId));
     logConnectorLogoDiagnostic("logo_cache_hit", { cacheKey, requestId });
     return true;
@@ -692,6 +786,10 @@
     const inFlight = connectorLogoInFlight.get(cacheKey);
     if (!inFlight) return 0;
     connectorLogoInFlight.delete(cacheKey);
+    if (connectorLogoInFlight.size === 0 && connectorLogoSweepTimer) {
+      w.clearTimeout(connectorLogoSweepTimer);
+      connectorLogoSweepTimer = null;
+    }
     let delivered = 0;
     for (const waitingRequestId of inFlight.waitingRequestIds) {
       emitFetchResponse(cloneConnectorLogoFetchResponse(responsePayload, waitingRequestId));
@@ -700,13 +798,46 @@
     return delivered;
   }
 
+  function scheduleConnectorLogoInflightSweep() {
+    if (connectorLogoSweepTimer || connectorLogoInFlight.size === 0) return;
+    let nextExpiryAtMs = Infinity;
+    for (const inFlight of connectorLogoInFlight.values()) {
+      nextExpiryAtMs = Math.min(nextExpiryAtMs, inFlight.startedAtMs + CONNECTOR_LOGO_RESPONSE_TIMEOUT_MS);
+    }
+    connectorLogoSweepTimer = w.setTimeout(() => {
+      connectorLogoSweepTimer = null;
+      const now = Date.now();
+      for (const [cacheKey, inFlight] of Array.from(connectorLogoInFlight.entries())) {
+        if (now - inFlight.startedAtMs < CONNECTOR_LOGO_RESPONSE_TIMEOUT_MS) continue;
+        emitConnectorLogoInvokeError(
+          cacheKey,
+          inFlight.primaryRequestId,
+          new Error("Connector logo response timed out")
+        );
+      }
+      scheduleConnectorLogoInflightSweep();
+    }, Math.max(1, nextExpiryAtMs - Date.now()));
+  }
+
   function rememberConnectorLogoRequest(cacheKey, requestId) {
     if (!cacheKey || !requestId) return;
+    while (connectorLogoInFlight.size >= CONNECTOR_LOGO_INFLIGHT_MAX_ENTRIES) {
+      const [oldestKey, oldest] = connectorLogoInFlight.entries().next().value || [];
+      if (!oldestKey || !oldest) break;
+      // 异常目录或断线风暴下优先结束最旧请求，不能让低优先级图片挤占无限内存。
+      emitConnectorLogoInvokeError(
+        oldestKey,
+        oldest.primaryRequestId,
+        new Error("Connector logo in-flight limit exceeded")
+      );
+    }
     connectorLogoRequestCacheKeys.set(requestId, cacheKey);
     connectorLogoInFlight.set(cacheKey, {
       primaryRequestId: requestId,
+      startedAtMs: Date.now(),
       waitingRequestIds: [],
     });
+    scheduleConnectorLogoInflightSweep();
   }
 
   function handleConnectorLogoFetchResponse(payload) {
@@ -719,7 +850,7 @@
     const waiterCount = connectorLogoInFlight.get(cacheKey)?.waitingRequestIds.length || 0;
     if (isSuccessfulFetchResponse(payload)) {
       // 缓存完整 fetch-response 模板，后续只替换 requestId，确保官方请求管理器收到的数据形状完全一致。
-      connectorLogoResponseCache.set(cacheKey, clonePlainPayload(payload));
+      cacheConnectorLogoResponse(cacheKey, payload);
       const delivered = emitConnectorLogoWaitingResponses(cacheKey, payload);
       logConnectorLogoDiagnostic("logo_cache_store", {
         cacheKey,
@@ -742,6 +873,9 @@
 
   function emitConnectorLogoInvokeError(cacheKey, requestId, error) {
     if (!cacheKey || !requestId) return;
+    const trackedCacheKey = connectorLogoRequestCacheKeys.get(requestId);
+    const inFlight = connectorLogoInFlight.get(cacheKey);
+    if (trackedCacheKey !== cacheKey && inFlight?.primaryRequestId !== requestId) return;
     connectorLogoRequestCacheKeys.delete(requestId);
     const errorPayload = {
       requestId,
@@ -768,8 +902,11 @@
       const item = lowPriorityIpcQueue.shift();
       activeLowPriorityIpcCount += 1;
       lowPriorityIpcStartedCount += 1;
-      const waitMs = Date.now() - item.enqueuedAtMs;
-      if (shouldLogLowPriorityIpcQueue(lowPriorityIpcQueue.length + 1, lowPriorityIpcStartedCount)) {
+      const waitMs = CLIENT_DIAGNOSTICS_ENABLED ? Date.now() - item.enqueuedAtMs : 0;
+      if (
+        CLIENT_DIAGNOSTICS_ENABLED &&
+        shouldLogLowPriorityIpcQueue(lowPriorityIpcQueue.length + 1, lowPriorityIpcStartedCount)
+      ) {
         clientDiagnostic("ipc-low-priority-start", {
           ...item.summary,
           activeCount: activeLowPriorityIpcCount,
@@ -790,15 +927,25 @@
 
   function enqueueLowPriorityIpc(summary, task) {
     lowPriorityIpcQueuedCount += 1;
-    const enqueuedAtMs = Date.now();
+    const enqueuedAtMs = CLIENT_DIAGNOSTICS_ENABLED ? Date.now() : 0;
     const queueDepth = lowPriorityIpcQueue.length + 1;
-    if (shouldLogLowPriorityIpcQueue(queueDepth, lowPriorityIpcQueuedCount)) {
+    if (CLIENT_DIAGNOSTICS_ENABLED && shouldLogLowPriorityIpcQueue(queueDepth, lowPriorityIpcQueuedCount)) {
       clientDiagnostic("ipc-low-priority-queued", {
         ...summary,
         activeCount: activeLowPriorityIpcCount,
         queuedCount: queueDepth,
         totalQueuedCount: lowPriorityIpcQueuedCount,
       });
+    }
+    if (lowPriorityIpcQueue.length >= LOW_PRIORITY_IPC_QUEUE_MAX_ENTRIES) {
+      // 队列已经饱和时立即失败，让上层给官方 fetch promise 回明确错误，不能继续积压闭包和图片正文。
+      const error = new Error("Low-priority IPC queue limit exceeded");
+      clientDiagnostic("ipc-low-priority-overflow", {
+        ...summary,
+        activeCount: activeLowPriorityIpcCount,
+        queuedCount: lowPriorityIpcQueue.length,
+      });
+      return Promise.reject(error);
     }
     return new Promise((resolve, reject) => {
       lowPriorityIpcQueue.push({ enqueuedAtMs, reject, resolve, summary, task });
@@ -1008,13 +1155,33 @@
   function installGatewayAuthMenuInjection() {
     if (!document || document.__codexGatewayAuthMenuInjectionInstalled) return;
     document.__codexGatewayAuthMenuInjectionInstalled = true;
+    const MENU_SESSION_TTL_MS = 2_500;
     let scheduled = false;
-    const scheduleScan = () => {
+    let menuObserver = null;
+    let menuObserverExpiryTimer = 0;
+    const pendingScanRoots = new Set();
+    const stopMenuObservation = () => {
+      menuObserver?.disconnect();
+      if (menuObserverExpiryTimer) w.clearTimeout(menuObserverExpiryTimer);
+      menuObserverExpiryTimer = 0;
+    };
+    const scheduleScan = (root = document) => {
+      if (root === document) pendingScanRoots.clear();
+      pendingScanRoots.add(root);
       if (scheduled) return;
       scheduled = true;
       const run = () => {
         scheduled = false;
-        scanGatewayAuthLogoutMenuItems(document);
+        const roots = Array.from(pendingScanRoots);
+        pendingScanRoots.clear();
+        let injected = 0;
+        for (const scanRoot of roots) {
+          if (scanRoot === document || scanRoot?.isConnected !== false) {
+            injected += scanGatewayAuthLogoutMenuItems(scanRoot);
+          }
+        }
+        // 一次菜单生命周期最多需要注入一项；成功后立即停止记录后续页面 DOM 变化。
+        if (injected > 0) stopMenuObservation();
       };
       if (typeof w.requestAnimationFrame === "function") {
         w.requestAnimationFrame(run);
@@ -1022,22 +1189,63 @@
         w.setTimeout(run, 0);
       }
     };
-    const start = () => {
-      scheduleScan();
-      document.addEventListener("pointerdown", handleGatewayAuthLogoutPointer, true);
-      document.addEventListener("click", handleGatewayAuthLogoutPointer, true);
-      document.addEventListener("keydown", handleGatewayAuthLogoutKeydown, true);
-      const observer = new MutationObserver((mutations) => {
-        for (const mutation of mutations) {
-          for (const node of mutation.addedNodes || []) {
-            if (node && node.nodeType === 1) {
-              scheduleScan();
-              return;
-            }
+    const handleMenuMutations = (mutations) => {
+      for (const mutation of mutations) {
+        if (!(mutation.addedNodes || []).length) continue;
+        for (const node of mutation.addedNodes || []) {
+          const menuSelector = "button,a,[role='menuitem'],[role='menuitemradio']";
+          let candidate = null;
+          if (node?.nodeType === 1) {
+            candidate =
+              node.closest?.(menuSelector) ||
+              (node.matches?.(menuSelector) ||
+                (node.firstElementChild && node.querySelector?.(menuSelector))
+                ? node
+                : null);
+          } else {
+            // 纯文本变化不可能新增菜单结构，只允许检查其现有菜单项祖先，不能扫描 mutation.target 子树。
+            candidate =
+              mutation.target?.matches?.(menuSelector) === true
+                ? mutation.target
+                : mutation.target?.closest?.(menuSelector) || null;
           }
+          if (candidate) scheduleScan(candidate);
         }
-      });
-      observer.observe(document.documentElement, { childList: true, subtree: true });
+      }
+    };
+    const observeGatewayAuthMenuSession = () => {
+      menuObserver ||= new MutationObserver(handleMenuMutations);
+      menuObserver.disconnect();
+      menuObserver.observe(document.documentElement, { childList: true, subtree: true });
+      if (menuObserverExpiryTimer) w.clearTimeout(menuObserverExpiryTimer);
+      // 菜单通常在同一帧挂载；有限会话兼容慢设备，同时不让观察器进入正文流式热路径。
+      menuObserverExpiryTimer = w.setTimeout(stopMenuObservation, MENU_SESSION_TTL_MS);
+    };
+    const eventMayOpenMenu = (event) => {
+      const target = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
+      // Radix/ARIA 菜单触发器都会声明 haspopup；普通按钮（尤其发送按钮）不能开启整页观察会话。
+      return !!target?.closest?.('[aria-haspopup="menu"],[aria-haspopup="true"]');
+    };
+    const handlePointerInteraction = (event) => {
+      if (gatewayAuthLogoutItemFromEvent(event)) {
+        handleGatewayAuthLogoutPointer(event);
+        return;
+      }
+      if (eventMayOpenMenu(event)) observeGatewayAuthMenuSession();
+    };
+    const handleKeyInteraction = (event) => {
+      if (gatewayAuthLogoutItemFromEvent(event)) {
+        handleGatewayAuthLogoutKeydown(event);
+        return;
+      }
+      if (["Enter", " ", "ArrowDown"].includes(event.key) && eventMayOpenMenu(event)) {
+        observeGatewayAuthMenuSession();
+      }
+    };
+    const start = () => {
+      document.addEventListener("pointerdown", handlePointerInteraction, true);
+      document.addEventListener("click", handlePointerInteraction, true);
+      document.addEventListener("keydown", handleKeyInteraction, true);
     };
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", start, { once: true });
@@ -1194,7 +1402,8 @@
   function payloadShape(payload) {
     if (payload === null) return "null";
     if (Array.isArray(payload)) return `array(${payload.length})`;
-    if (typeof payload === "object") return `object(${Object.keys(payload).length})`;
+    // debug 摘要也不能为大快照额外枚举全部键；路由相关字段会在后续单独提取。
+    if (typeof payload === "object") return "object";
     return typeof payload;
   }
 
@@ -1290,9 +1499,12 @@
   }
 
   /** 官方 toast signal 不暴露给 polyfill，fetch 兜底只复用官方 Toast/Alert DOM 类名。 */
-  function renderBridgeErrorToast(payload) {
+  function renderBridgeErrorToast(payload, retryCount = 0) {
     if (!document || !document.body) {
-      w.setTimeout(() => renderBridgeErrorToast(payload), 0);
+      // 页面切换期间 body 可能短暂不存在；指数退避并限制次数，避免 0ms 重试形成主线程热循环。
+      if (retryCount >= BRIDGE_TOAST_BODY_RETRY_MAX) return;
+      const retryDelayMs = Math.min(BRIDGE_TOAST_BODY_RETRY_BASE_MS * 2 ** retryCount, 500);
+      w.setTimeout(() => renderBridgeErrorToast(payload, retryCount + 1), retryDelayMs);
       return;
     }
     const root = ensureBridgeToastRoot();
@@ -1445,9 +1657,13 @@
 
   /** 使用浏览器原生 input[type=file] 实现官方 pick-files IPC 的选择动作。 */
   function openBrowserFilePicker(params) {
+    // 浏览器同一时刻只能可靠承载一个原生文件面板；新请求先结束遗留会话，避免监听器和 Promise 累积。
+    activeBrowserFilePickerCancel?.();
     return new Promise((resolve, reject) => {
       const input = document.createElement("input");
       let finished = false;
+      let focusCheckTimer = 0;
+      let sessionTimeout = 0;
       const allowMultiple = pickFilesAllowsMultiple(params);
       const accept = pickFilesAccept(params);
 
@@ -1460,7 +1676,12 @@
       input.style.opacity = "0";
 
       const cleanup = () => {
-        window.removeEventListener("focus", handleFocus, true);
+        w.removeEventListener("focus", handleFocus, true);
+        if (focusCheckTimer) w.clearTimeout(focusCheckTimer);
+        if (sessionTimeout) w.clearTimeout(sessionTimeout);
+        focusCheckTimer = 0;
+        sessionTimeout = 0;
+        if (activeBrowserFilePickerCancel === cancelPicker) activeBrowserFilePickerCancel = null;
         input.remove();
       };
       const finish = (files) => {
@@ -1469,9 +1690,14 @@
         cleanup();
         resolve(files);
       };
+      function cancelPicker() {
+        finish([]);
+      }
       function handleFocus() {
         // macOS 文件选择器取消时不一定触发 change，用重新聚焦后的空列表表示取消。
-        window.setTimeout(() => {
+        if (focusCheckTimer) w.clearTimeout(focusCheckTimer);
+        focusCheckTimer = w.setTimeout(() => {
+          focusCheckTimer = 0;
           if (!finished && (!input.files || input.files.length === 0)) finish([]);
         }, 250);
       }
@@ -1485,12 +1711,16 @@
         { once: true }
       );
       input.addEventListener("cancel", () => finish([]), { once: true });
-      window.addEventListener("focus", handleFocus, true);
+      w.addEventListener("focus", handleFocus, true);
+      activeBrowserFilePickerCancel = cancelPicker;
+      // 某些 WebView 既不触发 cancel 也不恢复 focus；兜底释放离屏 input 与窗口监听。
+      sessionTimeout = w.setTimeout(cancelPicker, FILE_PICKER_SESSION_TIMEOUT_MS);
 
       try {
         (document.body || document.documentElement).appendChild(input);
         input.click();
       } catch (error) {
+        finished = true;
         cleanup();
         reject(error);
       }
@@ -1600,6 +1830,52 @@
     return true;
   }
 
+  function isPostLoginStatsigBootstrapUrl(value) {
+    try {
+      const parsed = new URL(String(value || ""), location.href);
+      return parsed.pathname.replace(/\/+$/, "") === "/wham/statsig/bootstrap";
+    } catch {
+      return false;
+    }
+  }
+
+  /** 当前官方版本把登录后 Statsig 初始化改走 /wham IPC；Web 侧沿用已有本地默认配置，避免固定五秒超时。 */
+  function handlePostLoginStatsigBootstrapFetchMessage(payload) {
+    if (!payload || typeof payload !== "object" || payload.type !== "fetch") return false;
+    if (String(payload.method || "GET").toUpperCase() !== "POST" || !isPostLoginStatsigBootstrapUrl(payload.url)) {
+      return false;
+    }
+    const requestId = String(payload.requestId || "");
+    if (!requestId) return false;
+    let request = {};
+    try {
+      request = payload.body ? JSON.parse(payload.body) : {};
+    } catch {}
+    const stableId = typeof request.stable_id === "string" ? request.stable_id : "";
+    const user = {
+      ...(typeof request.locale === "string" ? { locale: request.locale } : {}),
+      ...(typeof request.app_version === "string" ? { appVersion: request.app_version } : {}),
+      ...(stableId
+        ? { customIDs: { stableID: stableId, source_surface_stable_id: stableId } }
+        : {}),
+    };
+    emitFetchSuccess(requestId, {
+      // 官方会先 JSON.parse(statsigPayload) 校验 user，再交给 Statsig data adapter；必须保持字符串协议。
+      statsigPayload: JSON.stringify({ ...buildStatsigInitializeResponse(), user }),
+    });
+    return true;
+  }
+
+  /** Electron 版会把 Statsig 上报转给 main 进程；Web 壳直接确认成功，避免空闲期反复跨进程请求与超时重试。 */
+  function handleStatsigTelemetryFetchMessage(payload) {
+    if (!payload || typeof payload !== "object" || payload.type !== "fetch") return false;
+    if (!isTelemetryRegisterUrl(payload.url)) return false;
+    const requestId = String(payload.requestId || "");
+    if (!requestId) return false;
+    emitFetchSuccess(requestId, {});
+    return true;
+  }
+
   /** 短延迟 Promise，用于启动期 transient fetch 失败后的重试。 */
   function delay(ms) {
     return new Promise((resolve) => w.setTimeout(resolve, ms));
@@ -1608,7 +1884,7 @@
   /** 只把浏览器网络层的瞬时失败视为可重试，HTTP 500 等业务错误不在这里吞。 */
   function isTransientGatewayFetchError(error) {
     const message = error instanceof Error ? error.message : String(error || "");
-    return /failed to fetch|networkerror|load failed/i.test(message);
+    return /failed to fetch|networkerror|load failed|aborted|timed? ?out/i.test(message);
   }
 
   /** 判断 fetch-message 是否适合短重试；避免用户发送消息这类写操作被重复提交。 */
@@ -1656,7 +1932,9 @@
         !state.connected &&
         !state.pending.some((payload) => payload.type === "app-host-connect")
       ) {
-        state.pending.unshift(appHostWsPayload(state, { type: "app-host-connect" }));
+        const connectPayload = appHostWsPayload(state, { type: "app-host-connect" });
+        state.pending.unshift(connectPayload);
+        state.pendingChars += appHostPendingPayloadChars(connectPayload);
       }
     }
     flushAllAppHostRelayMessages();
@@ -1773,15 +2051,34 @@
 
     try {
       // 不主动 requestPermission；只有用户已经授予浏览器通知权限时才展示。
+      const previous = activeBrowserNotifications.get(notificationId);
+      if (previous) {
+        activeBrowserNotifications.delete(notificationId);
+        try {
+          previous.close();
+        } catch {}
+      }
       const notification = new w.Notification(String(message.title || ""), browserNotificationOptions(message));
       activeBrowserNotifications.set(notificationId, notification);
       notification.onclick = () => {
         sendBrowserNotificationEvent(notificationId, "click");
       };
       notification.onclose = () => {
-        activeBrowserNotifications.delete(notificationId);
+        // 同 ID 通知可能已被更新；旧对象迟到的 close 不能把新对象从路由表移除。
+        if (activeBrowserNotifications.get(notificationId) === notification) {
+          activeBrowserNotifications.delete(notificationId);
+        }
         sendBrowserNotificationEvent(notificationId, "close");
       };
+      while (activeBrowserNotifications.size > BROWSER_NOTIFICATION_MAX_ACTIVE) {
+        const oldestNotificationId = activeBrowserNotifications.keys().next().value;
+        if (!oldestNotificationId) break;
+        const oldestNotification = activeBrowserNotifications.get(oldestNotificationId);
+        activeBrowserNotifications.delete(oldestNotificationId);
+        try {
+          oldestNotification?.close();
+        } catch {}
+      }
     } catch {}
     return true;
   }
@@ -1793,7 +2090,8 @@
       while (!state.closed && state.pending.length > 0) {
         // 保持 MessagePort 的 FIFO 语义：只要第一条没发出去，后面的帧也不能越过它。
         if (!sendAppHostWsPayload(state.pending[0])) return;
-        state.pending.shift();
+        const sentPayload = state.pending.shift();
+        state.pendingChars = Math.max(0, state.pendingChars - appHostPendingPayloadChars(sentPayload));
       }
     } finally {
       state.flushing = false;
@@ -1806,10 +2104,28 @@
     }
   }
 
+  function appHostPendingPayloadChars(payload) {
+    // app-host 绝大部分体积都在 JSON-RPC data 字符串；固定控制字段只计一个小额上界。
+    return 256 + (typeof payload?.data === "string" ? payload.data.length : 0);
+  }
+
   function queueAppHostRelayPayload(state, payload) {
     if (!state || state.closed) return;
-    if (state.pending.length >= APP_HOST_PENDING_MESSAGE_LIMIT) {
-      // 队列溢出通常意味着 WS 建连或认证异常，主动关闭比无限堆积更容易恢复。
+    const framedPayload = appHostWsPayload(state, payload);
+    const nextPendingChars = state.pendingChars + appHostPendingPayloadChars(framedPayload);
+    if (
+      state.pending.length === 0 &&
+      nextPendingChars > APP_HOST_PENDING_MESSAGE_CHARS_LIMIT &&
+      sendAppHostWsPayload(framedPayload)
+    ) {
+      // 大于断线缓存上限的单帧在连接正常时仍可直送，保留大型 app-host RPC 的现有能力。
+      return;
+    }
+    if (
+      state.pending.length >= APP_HOST_PENDING_MESSAGE_LIMIT ||
+      nextPendingChars > APP_HOST_PENDING_MESSAGE_CHARS_LIMIT
+    ) {
+      // 只有无法直送时才占用断线队列；第一条大帧也不能绕过内存上限。
       clientDiagnostic("app-host-queue-overflow", {
         portId: state.portId,
         queuedCount: state.pending.length,
@@ -1817,7 +2133,8 @@
       closeAppHostRelay(state, "queue_overflow", true);
       return;
     }
-    state.pending.push(appHostWsPayload(state, payload));
+    state.pending.push(framedPayload);
+    state.pendingChars = nextPendingChars;
     flushAppHostRelayMessages(state);
   }
 
@@ -1832,6 +2149,9 @@
     try {
       state.port.close();
     } catch {}
+    // 端口关闭后立刻释放可能很大的离线 RPC 帧，不等待 MessagePort 闭包被垃圾回收。
+    state.pending.length = 0;
+    state.pendingChars = 0;
     clientDiagnostic("app-host-port-closed", {
       portId: state.portId,
       reason,
@@ -1927,9 +2247,16 @@
         connected: false,
         flushing: false,
         pending: [],
+        pendingChars: 0,
         port,
         portId: appHostPortId(),
       };
+      while (appHostPortRelays.size >= APP_HOST_RELAY_MAX_ENTRIES) {
+        const oldestRelay = appHostPortRelays.values().next().value;
+        if (!oldestRelay) break;
+        // 页面组件异常重复创建端口时关闭最旧 relay，不能让每个端口继续持有队列和事件监听。
+        closeAppHostRelay(oldestRelay, "relay_limit", true);
+      }
       appHostPortRelays.set(state.portId, state);
       port.addEventListener("message", (portEvent) => {
         // MessageEvent.data 可能不是自有属性，直接读取才能拿到官方 RPC 字符串。
@@ -1982,6 +2309,20 @@
     const inFlight = connectorLogoInFlight.get(cacheKey);
     if (inFlight) {
       // 同一个页面内相同 logo 只让第一条请求进入官方 IPC，其余 requestId 等待第一条回包后本地克隆。
+      if (inFlight.waitingRequestIds.length >= CONNECTOR_LOGO_WAITERS_MAX_ENTRIES) {
+        emitFetchResponse({
+          requestId,
+          responseType: "error",
+          status: 429,
+          error: "Connector logo waiter limit exceeded",
+        });
+        logConnectorLogoDiagnostic("logo_waiter_overflow", {
+          cacheKey,
+          requestId,
+          waiterCount: inFlight.waitingRequestIds.length,
+        });
+        return Promise.resolve({ ok: false, limited: true });
+      }
       inFlight.waitingRequestIds.push(requestId);
       logConnectorLogoDiagnostic("logo_inflight_join", {
         cacheKey,
@@ -1993,33 +2334,42 @@
 
     rememberConnectorLogoRequest(cacheKey, requestId);
     logConnectorLogoDiagnostic("logo_cache_miss", { cacheKey, requestId });
-    return enqueueLowPriorityIpc(diagnosticSummary, () =>
-      invokeGatewayImmediate(channel, ipcArgs, payload).catch((error) => {
+    return enqueueLowPriorityIpc(diagnosticSummary, () => {
+      // 排队期间可能已因断线超时；此时不能再把陈旧 requestId 发送给官方 runtime。
+      if (connectorLogoRequestCacheKeys.get(requestId) !== cacheKey) {
+        return { ok: false, cancelled: true };
+      }
+      return invokeGatewayImmediate(channel, ipcArgs, payload).catch((error) => {
         emitConnectorLogoInvokeError(cacheKey, requestId, error);
         throw error;
-      })
-    );
+      });
+    }).catch((error) => {
+      // 入队阶段和执行阶段都统一结束官方 fetch promise；幂等保护会忽略执行阶段的第二次回调。
+      emitConnectorLogoInvokeError(cacheKey, requestId, error);
+      throw error;
+    });
   }
 
   /** 只负责把 IPC 请求发给 gateway，不做 web-shell 侧能力拦截。 */
   async function invokeGateway(channel, args) {
     const ipcArgs = Array.isArray(args) ? args : [args];
     const payload = payloadFromIpcArgs(ipcArgs);
-    const diagnosticSummary = ipcDiagnosticSummary(channel, payload);
     if (isLowPriorityFetchPayload(payload)) {
       /**
        * connector logo 属于首屏非关键资产，但官方 renderer 会一次性发很多。
        * 这里使用页内缓存 + in-flight 去重 + 低优先级队列，避免非关键图片和会话/终端 IPC 抢通道。
        */
+      const diagnosticSummary = CLIENT_DIAGNOSTICS_ENABLED ? ipcDiagnosticSummary(channel, payload) : {};
       return handleConnectorLogoFetchInvoke(channel, ipcArgs, payload, diagnosticSummary);
     }
     return invokeGatewayImmediate(channel, ipcArgs, payload);
   }
 
   async function invokeGatewayImmediate(channel, ipcArgs, payload) {
-    const diagnosticSummary = ipcDiagnosticSummary(channel, payload);
-    const invokeStartedAtMs = Date.now();
-    const suppressRoutineDiagnostic = shouldSuppressRoutineIpcDiagnostic(payload);
+    const diagnosticSummary = CLIENT_DIAGNOSTICS_ENABLED ? ipcDiagnosticSummary(channel, payload) : {};
+    const invokeStartedAtMs = CLIENT_DIAGNOSTICS_ENABLED ? Date.now() : 0;
+    const suppressRoutineDiagnostic =
+      !CLIENT_DIAGNOSTICS_ENABLED || shouldSuppressRoutineIpcDiagnostic(payload);
     if (!suppressRoutineDiagnostic) {
       clientDiagnostic("ipc-invoke-start", {
         ...diagnosticSummary,
@@ -2028,7 +2378,7 @@
       });
     }
     if (shouldWaitForWsBeforeInvoke(channel)) {
-      const waitStartedAtMs = Date.now();
+      const waitStartedAtMs = CLIENT_DIAGNOSTICS_ENABLED ? Date.now() : 0;
       if (!suppressRoutineDiagnostic) {
         clientDiagnostic("ipc-ws-wait-start", {
           ...diagnosticSummary,
@@ -2047,15 +2397,18 @@
         });
       }
     }
-    // args 是新的自适应传输格式；payload 保留给旧 gateway 或调试工具读取。
-    const body = stringifyForIpc({ channel, args: ipcArgs, payload, clientId });
+    /**
+     * gateway 已以 args 作为权威入参；再附带 payload 会让消息、附件元数据等单参数对象在请求 JSON 中复制一遍。
+     * 服务端仍保留 payload-only 解析用于兼容旧页面，但当前页面只发送一份，避免额外序列化与网络流量。
+     */
+    const body = stringifyForIpc({ channel, args: ipcArgs, clientId });
     const retryDelays = shouldRetryGatewayInvoke(channel, payload) ? [0, 80, 250] : [0];
     let res = null;
     let lastFetchError = null;
     try {
       for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
         if (retryDelays[attempt] > 0) await delay(retryDelays[attempt]);
-        const attemptStartedAtMs = Date.now();
+        const attemptStartedAtMs = CLIENT_DIAGNOSTICS_ENABLED ? Date.now() : 0;
         if (!suppressRoutineDiagnostic) {
           clientDiagnostic("ipc-http-attempt", {
             ...diagnosticSummary,
@@ -2064,12 +2417,17 @@
             wsState: websocketStateName(ws),
           });
         }
+        const controller = typeof w.AbortController === "function" ? new w.AbortController() : null;
+        const requestTimeout = controller
+          ? w.setTimeout(() => controller.abort(), IPC_INVOKE_TIMEOUT_MS)
+          : null;
         try {
           res = await w.fetch("/api/ipc/invoke", {
             method: "POST",
             credentials: "same-origin",
             headers: gatewayAuthHeaders({ "content-type": "application/json" }),
             body,
+            signal: controller?.signal,
           });
           if (!suppressRoutineDiagnostic) {
             clientDiagnostic("ipc-http-response", {
@@ -2092,6 +2450,8 @@
             errorName: error && error.name ? String(error.name) : "",
           });
           if (!isTransientGatewayFetchError(error) || attempt === retryDelays.length - 1) throw error;
+        } finally {
+          if (requestTimeout) w.clearTimeout(requestTimeout);
         }
       }
 
@@ -2152,23 +2512,57 @@
 
   /** 终端消息按 sessionId 串行化，避免 write/resize/attach 乱序。 */
   function terminalSessionId(payload) {
-    return payload && typeof payload === "object" && typeof payload.sessionId === "string"
-      ? payload.sessionId
-      : "__global__";
+    const sessionId =
+      payload && typeof payload === "object" && typeof payload.sessionId === "string"
+        ? payload.sessionId
+        : "__global__";
+    // 官方 sessionId 很短；异常超长键统一收敛到全局队列，避免仅 Map key 就占用大量内存。
+    return sessionId.length <= TERMINAL_SESSION_ID_MAX_CHARS ? sessionId : "__global__";
+  }
+
+  function terminalQueueOverflow(sessionId) {
+    clientDiagnostic("terminal-queue-overflow", {
+      pendingCount: terminalMessagePendingCount,
+      sessionCount: terminalMessageQueues.size,
+      sessionPendingCount: terminalMessageQueueDepths.get(sessionId) || 0,
+    });
+    const error = new Error("Terminal message queue is full");
+    error.code = "terminal_queue_overflow";
+    return Promise.reject(error);
   }
 
   /** 对同一个终端 session 的 invoke 排队执行。 */
   function enqueueTerminalInvoke(sessionId, payload) {
-    const previous = terminalMessageQueues.get(sessionId) || Promise.resolve();
+    const normalizedSessionId =
+      typeof sessionId === "string" && sessionId.length <= TERMINAL_SESSION_ID_MAX_CHARS
+        ? sessionId
+        : "__global__";
+    const sessionPendingCount = terminalMessageQueueDepths.get(normalizedSessionId) || 0;
+    if (
+      sessionPendingCount >= TERMINAL_QUEUE_MAX_PENDING_PER_SESSION ||
+      terminalMessagePendingCount >= TERMINAL_QUEUE_MAX_TOTAL_PENDING ||
+      (!terminalMessageQueues.has(normalizedSessionId) &&
+        terminalMessageQueues.size >= TERMINAL_QUEUE_MAX_SESSIONS)
+    ) {
+      // 极端积压显式失败，不能继续保留闭包；正常终端吞吐远低于这些上限。
+      return terminalQueueOverflow(normalizedSessionId);
+    }
+    const previous = terminalMessageQueues.get(normalizedSessionId) || Promise.resolve();
+    terminalMessageQueueDepths.set(normalizedSessionId, sessionPendingCount + 1);
+    terminalMessagePendingCount += 1;
     const next = previous
       .catch(() => {})
       .then(() => invoke("codex_desktop:message-from-view", payload))
       .finally(() => {
-        if (terminalMessageQueues.get(sessionId) === next) {
-          terminalMessageQueues.delete(sessionId);
+        terminalMessagePendingCount = Math.max(0, terminalMessagePendingCount - 1);
+        const remaining = Math.max(0, (terminalMessageQueueDepths.get(normalizedSessionId) || 1) - 1);
+        if (remaining > 0) terminalMessageQueueDepths.set(normalizedSessionId, remaining);
+        else terminalMessageQueueDepths.delete(normalizedSessionId);
+        if (terminalMessageQueues.get(normalizedSessionId) === next) {
+          terminalMessageQueues.delete(normalizedSessionId);
         }
       });
-    terminalMessageQueues.set(sessionId, next);
+    terminalMessageQueues.set(normalizedSessionId, next);
     return next;
   }
 
@@ -2180,10 +2574,7 @@
 
   /** 所有 terminal-* 消息统一进入 session 队列。 */
   function enqueueTerminalMessage(payload) {
-    const sessionId =
-      payload && typeof payload === "object" && typeof payload.sessionId === "string"
-        ? payload.sessionId
-        : "__global__";
+    const sessionId = terminalSessionId(payload);
     if (payload && typeof payload === "object" && payload.type === "terminal-write") {
       return enqueueTerminalWrite(payload);
     }
@@ -2266,35 +2657,54 @@
     element.setAttribute("src", rewritten);
   }
 
-  /** 只扫描本次新增节点内部的 app://fs 图片，避免对整页 DOM 做全量遍历。 */
-  function rewriteAppFsImagesInAddedNode(node) {
-    rewriteAppFsImageElement(node);
-    if (!node || node.nodeType !== 1 || typeof node.querySelectorAll !== "function") return;
-    node.querySelectorAll("img[src^='app://fs/']").forEach((element) => rewriteAppFsImageElement(element));
+  /** 图片以预设 src 插入时不会产生属性 mutation，由资源错误捕获补做协议改写。 */
+  function handleAppFsImageError(event) {
+    rewriteAppFsImageElement(event?.target);
   }
 
-  /** 安装 MutationObserver，只处理新增图片节点和 src 更新，避免启动时全量扫描 DOM。 */
+  /** 只观察 src 属性；正文流式新增节点不会再唤醒图片协议适配器。 */
   function installAppFsImageRewrite() {
     if (!document || document.__codexAppFsImageRewriteInstalled) return;
     document.__codexAppFsImageRewriteInstalled = true;
-    const start = () => {
-      const observer = new MutationObserver((mutations) => {
+    let observer = null;
+
+    const scanExistingImages = () => {
+      document
+        .querySelectorAll?.("img[src^='app://fs/']")
+        .forEach((element) => rewriteAppFsImageElement(element));
+    };
+
+    const stopObservation = () => {
+      observer?.disconnect();
+    };
+
+    const startObservation = () => {
+      if (document.visibilityState === "hidden") return;
+      // 后台期间可能新增图片；回前台先补扫一次，再恢复仅 src 属性观察。
+      scanExistingImages();
+      if (typeof MutationObserver !== "function") return;
+      observer ||= new MutationObserver((mutations) => {
         for (const mutation of mutations) {
-          if (mutation.type === "attributes") {
-            rewriteAppFsImageElement(mutation.target);
-            continue;
-          }
-          for (const node of mutation.addedNodes || []) {
-            rewriteAppFsImagesInAddedNode(node);
-          }
+          rewriteAppFsImageElement(mutation.target);
         }
       });
       observer.observe(document.documentElement, {
         attributes: true,
         attributeFilter: ["src"],
-        childList: true,
         subtree: true,
       });
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "hidden") stopObservation();
+      else startObservation();
+    };
+
+    const start = () => {
+      // 安装前已经存在或已经失败的图片只在启动时扫描一次。
+      document.addEventListener("error", handleAppFsImageError, true);
+      document.addEventListener("visibilitychange", handleVisibility);
+      startObservation();
     };
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", start, { once: true });
@@ -2345,6 +2755,25 @@
     "guardian-approvals": true,
     "full-access": true,
   };
+  const PINNED_SHARED_OBJECT_SNAPSHOT_KEYS = new Set(["host_config", STATSIG_DEFAULT_FEATURES_CONFIG]);
+  const PINNED_PERSISTED_ATOM_SNAPSHOT_KEYS = new Set([
+    "prompt-history",
+    COMPOSER_PERMISSION_MODE_VISIBILITY_KEY,
+  ]);
+
+  /** 按最近写入顺序裁剪快照；基础配置键常驻，正常桌面状态不受影响。 */
+  function trimSnapshotMap(snapshot, maxEntries, pinnedKeys) {
+    while (snapshot.size > maxEntries) {
+      let evicted = false;
+      for (const key of snapshot.keys()) {
+        if (pinnedKeys.has(key)) continue;
+        snapshot.delete(key);
+        evicted = true;
+        break;
+      }
+      if (!evicted) break;
+    }
+  }
 
   /** 判断普通对象。 */
   function isPlainObject(value) {
@@ -2364,7 +2793,10 @@
   function setSharedObjectSnapshotValue(key, value) {
     if (!key) return null;
     const normalized = normalizeSharedObjectSnapshotValue(key, value);
+    // 重写已有键时刷新 LRU 顺序，避免活跃状态被一次性的扩展键挤出。
+    sharedObjectSnapshot.delete(key);
     sharedObjectSnapshot.set(key, normalized);
+    trimSnapshotMap(sharedObjectSnapshot, SHARED_OBJECT_SNAPSHOT_MAX_ENTRIES, PINNED_SHARED_OBJECT_SNAPSHOT_KEYS);
     return normalized;
   }
 
@@ -2429,7 +2861,9 @@
       return undefined;
     }
     const normalized = normalizePersistedAtomValue(key, value);
+    persistedAtomSnapshot.delete(key);
     persistedAtomSnapshot.set(key, normalized);
+    trimSnapshotMap(persistedAtomSnapshot, PERSISTED_ATOM_SNAPSHOT_MAX_ENTRIES, PINNED_PERSISTED_ATOM_SNAPSHOT_KEYS);
     return normalized;
   }
 
@@ -2560,6 +2994,12 @@
         if (handleIdeContextFetchMessage(payload)) {
           return true;
         }
+        if (handlePostLoginStatsigBootstrapFetchMessage(payload)) {
+          return true;
+        }
+        if (handleStatsigTelemetryFetchMessage(payload)) {
+          return true;
+        }
         emitOpenCodexPluginEvent("view:message", payload);
         const workspaceRootResult = handleRemoteWorkspaceRootOption(payload);
         if (workspaceRootResult) return workspaceRootResult;
@@ -2580,6 +3020,8 @@
     target.getBuildFlavor = () => "prod";
     // 这些方法是当前官方 preload 明确暴露的能力；Web 侧给出等价或保守结果，避免 renderer 走缺失 IPC。
     target.getPreloadStartedAtMs = () => preloadStartedAtMs;
+    // AnalyticsLogger 同步读取该值作为请求头，不能落入自适应异步 IPC fallback。
+    target.getDesktopUserAgent = () => navigator.userAgent;
     // 侧栏快照必须同步返回；刷新时官方启动广播不会重放，不能再固定返回 null。
     target.getInitialSidebarBootstrap = () => cfg.initialSidebarBootstrap ?? null;
     // DeviceCheck 依赖桌面原生能力，Web 壳必须同步报告不支持，不能让 Promise 被误判为 true。
@@ -2852,6 +3294,7 @@
   /** 建立到 gateway 的 WebSocket，接收 app-server/业务广播事件。 */
   function connect() {
     if (!cfg.gatewayWsUrl || !("WebSocket" in w)) return;
+    if (ws && (ws.readyState === w.WebSocket.CONNECTING || ws.readyState === w.WebSocket.OPEN)) return;
     wsReady = false;
     let socket = null;
     clientDiagnostic("ws-connect-start", {
@@ -2960,7 +3403,7 @@
           const effectiveChannel = effectiveGatewayMessageChannel(msg.channel, messagePayload);
           const trackedConnectorLogoResponse =
             effectiveChannel === "fetch-response" && isTrackedConnectorLogoResponse(messagePayload);
-          if (!trackedConnectorLogoResponse) {
+          if (CLIENT_DIAGNOSTICS_ENABLED && !trackedConnectorLogoResponse) {
             // 常规 ws-message 摘要仍保留，便于排查基础 IPC 路由；真正的大包耗时采样由 debugWs 控制。
             clientDiagnostic("ws-message", {
               ...ipcDiagnosticSummary(effectiveChannel, messagePayload),
@@ -3054,6 +3497,11 @@
   /** WebSocket 断开后的指数退避重连。 */
   function scheduleReconnect() {
     if (reconnectTimer) return;
+    if (document.visibilityState === "hidden") {
+      reconnectDeferredUntilVisible = true;
+      return;
+    }
+    reconnectDeferredUntilVisible = false;
     clientDiagnostic("ws-reconnect-scheduled", {
       elapsedMs: reconnectDelay,
       wsReady,
@@ -3066,5 +3514,17 @@
     }, reconnectDelay);
   }
 
+  function handleReconnectVisibilityChange() {
+    if (document.visibilityState === "hidden") {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      if (!ws || ws.readyState === w.WebSocket.CLOSED) reconnectDeferredUntilVisible = true;
+      return;
+    }
+    if (reconnectDeferredUntilVisible || !ws || ws.readyState === w.WebSocket.CLOSED) scheduleReconnect();
+  }
+
+  // 已连接 socket 保持后台业务语义；只有断线重试暂停，回到前台后再按原退避策略恢复。
+  document.addEventListener("visibilitychange", handleReconnectVisibilityChange);
   connect();
 })();

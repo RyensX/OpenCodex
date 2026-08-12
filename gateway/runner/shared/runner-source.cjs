@@ -11,6 +11,14 @@ if (!entry) {
   throw new Error("Missing OPENCODEX_GATEWAY_ENTRY for OpenCodex gateway runtime runner");
 }
 
+try {
+  /**
+   * gateway 的网络由 Node HTTP/WS/app-server 承载，不使用 Chromium 后台同步/GCM。
+   * 关闭这组后台网络任务可避免隐藏 runtime 周期注册已废弃的 push endpoint；不影响网页端通知桥接。
+   */
+  app.commandLine.appendSwitch("disable-background-networking");
+} catch {}
+
 function hideGatewayDockIcon() {
   if (process.platform !== "darwin") return;
   if (gatewayAgentMode) return;

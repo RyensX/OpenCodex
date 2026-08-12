@@ -5,6 +5,7 @@
 
   const ENDPOINT = "/api/opencodex/model-router/injections";
   const MOUNT_SELECTOR = "[data-opencodex-smart-scheduling-injection-health]";
+  const SETTINGS_VISIBILITY_EVENT = "opencodex:smart-scheduling-settings-visibility-changed";
   const POLL_INTERVAL_MS = 4_000;
   const POINTS = [
     "app-server-router",
@@ -196,7 +197,9 @@
   function syncPolling() {
     syncScheduled = false;
     const roots = Array.from(document.querySelectorAll(MOUNT_SELECTOR));
-    const active = roots.some((root) => root.closest(".opencodex-router-settings-page")?.dataset.active === "true");
+    const active =
+      document.visibilityState !== "hidden" &&
+      roots.some((root) => root.closest(".opencodex-router-settings-page")?.dataset.active === "true");
     if (active) {
       void refresh();
       if (!pollTimer) pollTimer = w.setInterval(() => void refresh(), POLL_INTERVAL_MS);
@@ -212,12 +215,16 @@
     w.requestAnimationFrame(syncPolling);
   }
 
-  const observer = new MutationObserver(schedulePollingSync);
-  observer.observe(document.documentElement, {
-    attributes: true,
-    attributeFilter: ["data-active"],
-    childList: true,
-    subtree: true,
+  // 设置页由同仓脚本创建，直接消费其生命周期事件，避免为一个低频页面常驻整页 DOM observer。
+  w.addEventListener(SETTINGS_VISIBILITY_EVENT, schedulePollingSync);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      // 后台标签的 rAF 可能暂停，必须同步停掉分钟轮询，不能等待下一帧。
+      if (pollTimer) w.clearInterval(pollTimer);
+      pollTimer = 0;
+      return;
+    }
+    schedulePollingSync();
   });
 
   w.__OpenCodexSmartSchedulingInjectionHealth = Object.freeze({

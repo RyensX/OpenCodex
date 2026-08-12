@@ -7,6 +7,7 @@
   const BADGE_ATTR = "data-opencodex-token-usage-inline";
   const REQUEST_RETRY_MS = 65 * 1000;
   const MAX_REQUESTED_KEYS = 600;
+  const MAX_PENDING_SCAN_ROOTS = 64;
   const DIAGNOSTIC_KEY = "__OpenCodexTokenUsageInline";
 
   // 只暴露计数型诊断，方便确认“没显示”时区分没扫到 DOM、没取到数据还是没渲染。
@@ -80,8 +81,10 @@
   }
 
   function findForkButton(row) {
-    const buttons = Array.from(row.querySelectorAll("button")).filter(visibleElement);
-    return buttons.find(isForkButton) || null;
+    // 先按静态标签筛选，再读取少量候选的布局，避免为 action row 内每个按钮强制计算样式。
+    return Array.from(row.querySelectorAll("button")).find(
+      (button) => isForkButton(button) && visibleElement(button)
+    ) || null;
   }
 
   function actionRowForForkButton(button) {
@@ -303,7 +306,21 @@
       `;
       (document.head || document.documentElement).appendChild(style);
 
-      const releaseConsumer = tokenUsage.acquireConsumer(PLUGIN_ID);
+      let releaseConsumer = () => {};
+      let consumerActive = false;
+      const activateConsumer = () => {
+        if (consumerActive || document.visibilityState === "hidden") return;
+        const release = tokenUsage.acquireConsumer(PLUGIN_ID);
+        releaseConsumer = typeof release === "function" ? release : () => {};
+        consumerActive = true;
+      };
+      const deactivateConsumer = () => {
+        if (!consumerActive) return;
+        releaseConsumer();
+        releaseConsumer = () => {};
+        consumerActive = false;
+      };
+      activateConsumer();
 
       const idsForRow = (row) => rowIds.get(row) || idsForElement(row);
 
@@ -336,7 +353,8 @@
       };
 
       const requestUsageForRow = (row, providedIds) => {
-        if (disposed || !context.plugin.isEnabled()) return;
+        // 后台标签只保留权威缓存更新，不主动发文件查询；恢复前台后由 IO 重新确认可见行。
+        if (disposed || document.visibilityState === "hidden" || !context.plugin.isEnabled()) return;
         const ids = rememberRowIds(row, providedIds || idsForRow(row));
         if (!ids) return;
         diagnostics.lastIds = ids;
@@ -374,13 +392,18 @@
 
       const observeRow = (row, ids) => {
         rememberRowIds(row, ids);
-        if (observedRows.has(row)) return;
+        if (observedRows.has(row)) {
+          // 老浏览器没有 IO，重新扫描可继续承担可见行的有限重试语义。
+          if (!intersectionObserver) requestUsageForRow(row, ids);
+          return;
+        }
         observedRows.add(row);
         if (intersectionObserver) {
           intersectionObserver.observe(row);
+        } else {
+          // 仅在缺少 IntersectionObserver 时保留旧版立即查询回退。
+          requestUsageForRow(row, ids);
         }
-        // DOM 已经渲染出来时立即懒查一次；observer 只作为后续滚动进入视口的补偿。
-        requestUsageForRow(row, ids);
       };
 
       const pruneObservedRows = () => {
@@ -408,14 +431,14 @@
         if (root.hasAttribute?.(BADGE_ATTR) || root.closest?.(`[${BADGE_ATTR}]`)) return false;
         if (root.tagName === "BUTTON") return true;
         // 增量观察只关心可能含有 action row 的新增子树，避免流式文本节点触发全页查询。
-        return typeof root.querySelector === "function" && !!root.querySelector("button");
+        return !!root.firstElementChild && typeof root.querySelector === "function" && !!root.querySelector("button");
       };
 
       const scanRoot = (root) => {
         if (disposed || !context.plugin.isEnabled() || !root) return;
-        pruneObservedRows();
         const rows = new Map();
-        const forkButtons = buttonsFromRoot(root).filter((button) => visibleElement(button) && isForkButton(button));
+        // aria 标签判断不触发布局；只给真正的分叉按钮读取几何值，显著降低首屏全树扫描成本。
+        const forkButtons = buttonsFromRoot(root).filter((button) => isForkButton(button) && visibleElement(button));
         for (const button of forkButtons) {
           // 同一 action row 可能包含多个 tooltip 包装，Map 去重后每条回复只观察一次。
           const row = actionRowForForkButton(button);
@@ -435,6 +458,8 @@
         scanTimer = null;
         const roots = Array.from(pendingScanRoots);
         pendingScanRoots.clear();
+        // 移除-only mutation 也会走这个 flush，保证虚拟列表卸载后不遗留 DOM/IO 引用。
+        pruneObservedRows();
         for (const root of roots) {
           if (root?.isConnected) scanRoot(root);
         }
@@ -448,18 +473,31 @@
           if (root.contains?.(existing)) pendingScanRoots.delete(existing);
         }
         pendingScanRoots.add(root);
+        if (pendingScanRoots.size > MAX_PENDING_SCAN_ROOTS) {
+          // 同一批独立 portal/列表节点过多时合并为一次根扫描，避免保留和遍历无限候选集合。
+          pendingScanRoots.clear();
+          pendingScanRoots.add(document.documentElement);
+        }
+      };
+
+      const scheduleScanFlush = () => {
+        if (scanTimer) return;
+        scanTimer = w.setTimeout(flushPendingScans, 80);
       };
 
       const scheduleScan = (root) => {
         if (disposed) return;
         addPendingScanRoot(root);
-        if (scanTimer) return;
-        scanTimer = w.setTimeout(flushPendingScans, 80);
+        scheduleScanFlush();
       };
 
       const mutationObserver = new MutationObserver((mutations) => {
+        // 后台流式 DOM 不做按钮候选查询；回到前台后从根节点补扫一次即可恢复全部徽标。
+        if (document.visibilityState === "hidden") return;
+        let removedNodes = false;
         for (const mutation of mutations) {
           if (mutation.type !== "childList") continue;
+          if (mutation.removedNodes?.length) removedNodes = true;
           for (const node of mutation.addedNodes || []) {
             if (rootMayContainForkButton(node)) {
               // mutation 只把候选新增子树入队，真正查询延迟合并到一次 flush。
@@ -467,12 +505,49 @@
             }
           }
         }
+        if (removedNodes) scheduleScanFlush();
       });
+      let mutationObservationActive = false;
+      const startMutationObservation = () => {
+        if (mutationObservationActive || document.visibilityState === "hidden") return;
+        mutationObserver.observe(document.documentElement, { childList: true, subtree: true });
+        mutationObservationActive = true;
+      };
+      const stopMutationObservation = () => {
+        if (mutationObservationActive) mutationObserver.disconnect();
+        mutationObservationActive = false;
+      };
+
+      const handleVisibility = () => {
+        if (document.visibilityState !== "visible") {
+          // 后台不消费 token IPC、不观察 DOM/几何，也不保留等待扫描的子树引用。
+          stopMutationObservation();
+          intersectionObserver?.disconnect();
+          deactivateConsumer();
+          if (scanTimer) w.clearTimeout(scanTimer);
+          scanTimer = null;
+          pendingScanRoots.clear();
+          return;
+        }
+        activateConsumer();
+        startMutationObservation();
+        if (intersectionObserver) {
+          // 重新 observe 会让浏览器按当前视口重发交叉状态，补回后台期间跳过的可见行。
+          for (const row of observedRows) {
+            if (!row.isConnected) continue;
+            intersectionObserver.unobserve(row);
+            intersectionObserver.observe(row);
+          }
+        }
+        scheduleScan(document.documentElement);
+      };
 
       const disposeUpdate = typeof tokenUsage.onUpdate === "function" ? tokenUsage.onUpdate((usage) => {
-        if (!usage || disposed) return;
+        if (!usage || disposed || document.visibilityState === "hidden") return;
         for (const row of Array.from(observedRows)) {
           if (!row.isConnected) {
+            // 被动更新也可能先于下一轮 DOM 扫描到达，必须在这里同步释放原生观察引用。
+            intersectionObserver?.unobserve(row);
             observedRows.delete(row);
             continue;
           }
@@ -484,15 +559,20 @@
         }
       }) : () => {};
 
-      scanRoot(document.documentElement);
-      mutationObserver.observe(document.documentElement, { childList: true, subtree: true });
+      if (document.visibilityState === "visible") {
+        pruneObservedRows();
+        scanRoot(document.documentElement);
+        startMutationObservation();
+      }
+      document.addEventListener("visibilitychange", handleVisibility);
 
       return () => {
         disposed = true;
         if (scanTimer) w.clearTimeout(scanTimer);
         disposeUpdate();
-        releaseConsumer();
-        mutationObserver.disconnect();
+        deactivateConsumer();
+        stopMutationObservation();
+        document.removeEventListener("visibilitychange", handleVisibility);
         intersectionObserver?.disconnect();
         for (const element of Array.from(document.querySelectorAll(`[${BADGE_ATTR}]`))) {
           element.remove();

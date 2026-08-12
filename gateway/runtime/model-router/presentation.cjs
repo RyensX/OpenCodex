@@ -1,5 +1,8 @@
 const PROTOCOL_ENVELOPE_KEYS = ["message", "request", "payload", "body"];
 const PRESENTATION_MESSAGE_TYPE = "opencodex:smart-scheduling-route";
+const MAX_TRACKED_THREADS = 512;
+const MAX_CLIENTS_PER_THREAD = 64;
+const MAX_PROTOCOL_SCAN_NODES = 2048;
 
 function normalizedId(value) {
   return value == null ? "" : String(value).trim();
@@ -21,25 +24,33 @@ function safeRoute(route, displayNameForModel) {
   };
 }
 
-function visitProtocolMessages(value, visitor, depth = 0) {
-  if (!value || typeof value !== "object" || depth > 4) return;
+function visitProtocolMessages(value, visitor, depth = 0, state = null) {
+  const traversal = state || { remaining: MAX_PROTOCOL_SCAN_NODES, seen: new WeakSet() };
+  if (!value || typeof value !== "object" || depth > 4 || traversal.remaining <= 0) return;
+  if (traversal.seen.has(value)) return;
+  traversal.seen.add(value);
+  traversal.remaining -= 1;
   if (Array.isArray(value)) {
-    for (const item of value) visitProtocolMessages(item, visitor, depth + 1);
+    // IPC/app-host 批帧共享一次扫描额度，避免异常超宽数组长期占用 gateway 事件循环。
+    const childCount = Math.min(value.length, traversal.remaining);
+    for (let index = 0; index < childCount && traversal.remaining > 0; index += 1) {
+      visitProtocolMessages(value[index], visitor, depth + 1, traversal);
+    }
     return;
   }
   visitor(value);
   for (const key of PROTOCOL_ENVELOPE_KEYS) {
     const nested = value[key];
-    if (nested && typeof nested === "object") visitProtocolMessages(nested, visitor, depth + 1);
+    if (nested && typeof nested === "object") visitProtocolMessages(nested, visitor, depth + 1, traversal);
     else if (typeof nested === "string" && (nested.includes("turn/") || nested.includes("thread/"))) {
       try {
-        visitProtocolMessages(JSON.parse(nested), visitor, depth + 1);
+        visitProtocolMessages(JSON.parse(nested), visitor, depth + 1, traversal);
       } catch {}
     }
   }
 }
 
-function createSmartSchedulingPresentation({ modelRouter, sendTo } = {}) {
+function createSmartSchedulingPresentation({ modelRouter, onClientRemoved, sendTo } = {}) {
   const clientsByThread = new Map();
 
   function rememberClient(threadId, clientId) {
@@ -47,8 +58,24 @@ function createSmartSchedulingPresentation({ modelRouter, sendTo } = {}) {
     const normalizedClientId = normalizedId(clientId);
     if (!normalizedThreadId || !normalizedClientId) return;
     const clients = clientsByThread.get(normalizedThreadId) || new Set();
+    clients.delete(normalizedClientId);
     clients.add(normalizedClientId);
+    while (clients.size > MAX_CLIENTS_PER_THREAD) clients.delete(clients.values().next().value);
+    // Map 插入顺序作为任务 LRU；当前页重新访问旧任务时会自然恢复到队尾。
+    clientsByThread.delete(normalizedThreadId);
     clientsByThread.set(normalizedThreadId, clients);
+    while (clientsByThread.size > MAX_TRACKED_THREADS) {
+      clientsByThread.delete(clientsByThread.keys().next().value);
+    }
+  }
+
+  function forgetClient(clientId) {
+    const normalizedClientId = normalizedId(clientId);
+    if (!normalizedClientId) return;
+    for (const [threadId, clients] of clientsByThread.entries()) {
+      clients.delete(normalizedClientId);
+      if (clients.size === 0) clientsByThread.delete(threadId);
+    }
   }
 
   function observeAppHostFrame({ clientId, data, direction = "client" } = {}) {
@@ -107,10 +134,12 @@ function createSmartSchedulingPresentation({ modelRouter, sendTo } = {}) {
   }
 
   const unsubscribe = modelRouter?.onRouteStatus?.(deliver) || (() => {});
+  const unsubscribeClientRemoved = onClientRemoved?.(({ clientId }) => forgetClient(clientId)) || (() => {});
 
   return {
     dispose() {
       unsubscribe();
+      unsubscribeClientRemoved();
       clientsByThread.clear();
     },
     observeAppHostFrame,
@@ -122,6 +151,7 @@ function createSmartSchedulingPresentation({ modelRouter, sendTo } = {}) {
 }
 
 module.exports = {
+  MAX_PROTOCOL_SCAN_NODES,
   PRESENTATION_MESSAGE_TYPE,
   createSmartSchedulingPresentation,
   safeRoute,

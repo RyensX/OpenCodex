@@ -93,8 +93,16 @@ function virtualizeModelFields(value) {
   return result;
 }
 
-function createVirtualModelController({ stateStore, isEnabled, fallbackRoute, catalog, onAutoModelInjected }) {
+function createVirtualModelController({
+  stateStore,
+  isEnabled,
+  fallbackRoute,
+  catalog,
+  onAutoModelInjected,
+  maxPendingRequests = 4096,
+}) {
   const pending = new Map();
+  const effectiveMaxPendingRequests = Math.max(1, Number(maxPendingRequests) || 4096);
 
   function concreteForDefault() {
     const current = stateStore.defaultState();
@@ -270,7 +278,13 @@ function createVirtualModelController({ stateStore, isEnabled, fallbackRoute, ca
       else if (message.method === "turn/start") prepareTurnStart(message, meta);
     }
     if (message.method === "thread/delete") meta.threadId = String(message.params?.threadId || "");
-    if (message.id != null) pending.set(requestKey(message.id), meta);
+    if (message.id != null) {
+      const key = requestKey(message.id);
+      pending.delete(key);
+      pending.set(key, meta);
+      // 断线丢响应时旧元数据没有继续保留的价值；新请求仍按原协议正常虚拟化。
+      while (pending.size > effectiveMaxPendingRequests) pending.delete(pending.keys().next().value);
+    }
     return { message, autoTurn: meta.autoTurn === true, meta };
   }
 
@@ -364,9 +378,15 @@ function createVirtualModelController({ stateStore, isEnabled, fallbackRoute, ca
 
   return {
     autoCatalogModel,
+    clearPending() {
+      pending.clear();
+    },
     concreteForThread,
     injectAutoModel,
     prepareClientMessage,
+    pendingCount() {
+      return pending.size;
+    },
     processServerMessage(message) {
       return message?.id != null ? processServerResponse(message) : processServerNotification(message);
     },

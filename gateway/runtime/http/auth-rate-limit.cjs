@@ -10,6 +10,7 @@ const DEFAULT_LIMIT_OPTIONS = {
   lockMs: 15 * 60 * 1_000,
   logThrottleMs: 10_000,
   maxClients: 512,
+  maxLogThrottleEntries: 2048,
   pruneIntervalMs: 60_000,
   windowMs: 10 * 60 * 1_000,
 };
@@ -53,7 +54,12 @@ function createAuthRateLimiter(options = {}) {
     const key = `${event}:${details.client || "global"}`;
     const lastAt = logThrottle.get(key) || 0;
     if (now - lastAt < config.logThrottleMs) return;
+    logThrottle.delete(key);
     logThrottle.set(key, now);
+    // 来源地址不断变化时也只保留最近告警键，避免日志节流表绕过 client map 上限无限增长。
+    while (logThrottle.size > config.maxLogThrottleEntries) {
+      logThrottle.delete(logThrottle.keys().next().value);
+    }
     const logger = typeof config.logger === "function" ? config.logger : diagnosticWarn;
     logger("auth-rate-limit", event, details);
   }
@@ -240,6 +246,7 @@ function createAuthRateLimiter(options = {}) {
       clientCount: clients.size,
       globalBackpressureUntilMs,
       globalFailureCount: globalFailures.length,
+      logThrottleCount: logThrottle.size,
     };
   }
 

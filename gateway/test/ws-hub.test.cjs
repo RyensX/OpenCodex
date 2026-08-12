@@ -3,7 +3,7 @@ const http = require("node:http");
 const test = require("node:test");
 const WebSocket = require("ws");
 
-const { createWsHub } = require("../runtime/ipc/ws-hub.cjs");
+const { createWsHub, __test } = require("../runtime/ipc/ws-hub.cjs");
 
 function waitForMessage(socket, predicate) {
   return new Promise((resolve, reject) => {
@@ -97,4 +97,122 @@ test("recreates an app-host relay when the browser WebSocket reconnects", async 
 
   assert.equal(relays.length, 2);
   assert.deepEqual(relays[1].messages, ["thread/list"]);
+});
+
+test("caps app-host relays per browser socket", async (t) => {
+  const server = http.createServer();
+  const relays = [];
+  createWsHub(server, {
+    createAppHostRelay() {
+      const relay = {
+        closeReason: "",
+        close(reason) {
+          this.closeReason = reason;
+        },
+        postMessage() {},
+      };
+      relays.push(relay);
+      return relay;
+    },
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+    maxAppHostRelays: 2,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  t.after(async () => {
+    socket.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  await waitForOpen(socket);
+  socket.send(JSON.stringify({ type: "hello", clientId: "relay-limit-client" }));
+  await waitForMessage(socket, (message) => message.type === "hello-ack");
+
+  for (let index = 0; index < 3; index += 1) {
+    const portId = `relay-limit-${index}`;
+    socket.send(JSON.stringify({ type: "app-host-connect", clientId: "relay-limit-client", portId }));
+    await waitForMessage(
+      socket,
+      (message) => message.type === "app-host-port-connected" && message.portId === portId
+    );
+  }
+
+  assert.equal(relays.length, 3);
+  assert.equal(relays[0].closeReason, "relay_limit");
+  assert.equal(relays[1].closeReason, "");
+});
+
+test("skips serialization without clients and terminates a heavily backpressured socket", () => {
+  const server = http.createServer();
+  const hub = createWsHub(server, {
+    createAppHostRelay() {},
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+    maxBufferedBytes: 1024,
+  });
+  const unserializable = {
+    toJSON() {
+      throw new Error("must not serialize without a client");
+    },
+  };
+  assert.equal(hub.broadcast(unserializable), 0);
+
+  const slowSocket = {
+    OPEN: 1,
+    readyState: 1,
+    bufferedAmount: 2048,
+    terminated: false,
+    terminate() {
+      this.terminated = true;
+      this.readyState = 3;
+    },
+  };
+  hub.clients.add(slowSocket);
+  assert.equal(hub.broadcast(unserializable), 0);
+  assert.equal(slowSocket.terminated, true);
+  assert.equal(slowSocket.__opencodexBackpressureTerminated, true);
+  hub.clients.delete(slowSocket);
+  server.close();
+});
+
+test("deduplicates only identical short-window broadcasts per browser socket", () => {
+  const server = http.createServer();
+  const hub = createWsHub(server, {
+    createAppHostRelay() {},
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  const messages = [];
+  const socket = {
+    OPEN: 1,
+    bufferedAmount: 0,
+    readyState: 1,
+    send(message) {
+      messages.push(message);
+    },
+  };
+  hub.clients.add(socket);
+  const options = { dedupeKey: "app-list", dedupeWindowMs: 10_000 };
+
+  assert.equal(hub.broadcast({ type: "app-list", revision: 1 }, options), 1);
+  assert.equal(hub.broadcast({ type: "app-list", revision: 1 }, options), 0);
+  assert.equal(hub.broadcast({ type: "app-list", revision: 2 }, options), 1);
+  assert.equal(messages.length, 2);
+  assert.notEqual(messages[0], messages[1]);
+
+  hub.clients.delete(socket);
+  server.close();
+});
+
+test("bounds diagnostic route extraction for wide payload arrays", () => {
+  assert.equal(__test.routeIdFromPayload({ payload: [{ requestId: "route-1" }] }), "route-1");
+  let reads = 0;
+  const wide = new Proxy(Array.from({ length: 50_000 }, () => ({})), {
+    get(target, key, receiver) {
+      if (/^\d+$/.test(String(key))) reads += 1;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  assert.equal(__test.routeIdFromPayload(wide), "");
+  assert.ok(reads > 0 && reads <= 128, `diagnostic route scan read ${reads} array items`);
 });

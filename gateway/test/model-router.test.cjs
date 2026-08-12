@@ -21,6 +21,7 @@ const {
 const { defaultTierDefinitions } = require("../runtime/model-router/tiers.cjs");
 const { createAutoStateStore } = require("../runtime/model-router/state-store.cjs");
 const { ROUTE_METADATA_KEY, createTurnRouteStatus } = require("../runtime/model-router/turn-route-status.cjs");
+const { __test: serviceTest } = require("../runtime/model-router/service.cjs");
 
 function tempFile(t, name) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-router-test-"));
@@ -54,6 +55,19 @@ function tiersWithCustom(patch) {
   });
   return tiers;
 }
+
+test("model router metadata caches are bounded and refresh LRU order", () => {
+  const cache = new Map();
+  serviceTest.setBoundedMapEntry(cache, "thread-1", { revision: 1 }, 2);
+  serviceTest.setBoundedMapEntry(cache, "thread-2", { revision: 2 }, 2);
+  serviceTest.setBoundedMapEntry(cache, "thread-1", { revision: 3 }, 2);
+  serviceTest.setBoundedMapEntry(cache, "thread-3", { revision: 4 }, 2);
+
+  assert.deepEqual(Array.from(cache.entries()), [
+    ["thread-1", { revision: 3 }],
+    ["thread-3", { revision: 4 }],
+  ]);
+});
 
 test("default tier criteria preserve the intended scene boundaries", () => {
   const criteria = Object.fromEntries(defaultTierDefinitions().map((tier) => [tier.id, tier.prompt]));
@@ -276,6 +290,20 @@ test("auto state survives restart and clear keeps the last concrete route", (t) 
   assert.equal(second.threadState("thread-1").lastModel, "terra");
 });
 
+test("auto state store bounds persisted threads and prioritizes active Auto state", (t) => {
+  const filePath = tempFile(t, "bounded-state.json");
+  const store = createAutoStateStore({ filePath, maxThreads: 2 });
+  store.setThreadAuto("auto-thread", true, { model: "luna", effort: "high" });
+  store.setThreadAuto("manual-old", false, { model: "spark", effort: "low" });
+  store.setThreadAuto("manual-new", false, { model: "terra", effort: "medium" });
+
+  assert.equal(store.threadState("auto-thread")?.auto, true);
+  assert.equal(store.threadState("manual-old"), null);
+  assert.equal(store.threadState("manual-new")?.lastModel, "terra");
+  const persisted = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  assert.deepEqual(Object.keys(persisted.threads).sort(), ["auto-thread", "manual-new"]);
+});
+
 test("turn route status is visible only between real turn start and termination", () => {
   const status = createTurnRouteStatus();
   status.select({
@@ -320,4 +348,19 @@ test("failed external turn start cancels its pending route", () => {
     { method: "turn/start", requestKey: "string:user-turn", threadId: "thread-1" }
   );
   assert.equal(status.snapshot().pendingCount, 0);
+});
+
+test("turn route status bounds pending routes and tracked threads", () => {
+  const status = createTurnRouteStatus({ maxPendingRoutesPerThread: 2, maxTrackedThreads: 2 });
+  for (let thread = 0; thread < 3; thread += 1) {
+    for (let request = 0; request < 3; request += 1) {
+      status.select({
+        requestKey: `${thread}-${request}`,
+        threadId: `thread-${thread}`,
+        route: { tier: "balanced", model: "luna", effort: "high" },
+      });
+    }
+  }
+  assert.equal(status.snapshot().pendingThreadCount, 2);
+  assert.equal(status.snapshot().pendingCount, 4);
 });

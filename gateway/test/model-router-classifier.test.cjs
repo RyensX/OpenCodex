@@ -5,6 +5,7 @@ const {
   classifierTurnFailureCategory,
   classifierOutputSchema,
   createClassifier,
+  createSemaphore,
 } = require("../runtime/model-router/classifier.cjs");
 const { defaultTierDefinitions } = require("../runtime/model-router/tiers.cjs");
 
@@ -269,4 +270,30 @@ test("classifier transport timeout is normalized to the timeout error category",
     classifier.classify({ context: { current: {}, recentTurns: [] }, model: "spark", effort: "low" }),
     (error) => error instanceof ClassificationError && error.category === "timeout"
   );
+});
+
+test("classifier semaphore removes timed-out waiters before an active task releases", async () => {
+  const semaphore = createSemaphore(1);
+  const release = await semaphore.acquire(100);
+  await assert.rejects(
+    semaphore.acquire(5),
+    (error) => error instanceof ClassificationError && error.category === "timeout"
+  );
+  assert.deepEqual(semaphore.status(), { active: 1, queued: 0, limit: 1 });
+  release();
+  assert.deepEqual(semaphore.status(), { active: 0, queued: 0, limit: 1 });
+});
+
+test("classifier semaphore rejects queue overflow without retaining another waiter", async () => {
+  const semaphore = createSemaphore(1, { maxQueued: 1 });
+  const release = await semaphore.acquire(100);
+  const queued = semaphore.acquire(100);
+  await assert.rejects(
+    semaphore.acquire(100),
+    (error) => error instanceof ClassificationError && error.category === "capacity"
+  );
+  assert.deepEqual(semaphore.status(), { active: 1, queued: 1, limit: 1 });
+  release();
+  const releaseQueued = await queued;
+  releaseQueued();
 });

@@ -6,8 +6,22 @@
   const TRIGGER_SELECTOR = '[data-codex-intelligence-trigger="true"]';
   const MODEL_TEXT_SELECTOR = '[class*="_ModelPickerTriggerModelText_"]';
   const EFFORT_TEXT_SELECTOR = '[class*="_ModelPickerTriggerEffortLabel_"]';
+  const MENU_RELEVANT_SELECTOR =
+    '[data-model-picker-model-row="true"],[data-opencodex-auto-model-menu="true"],[data-opencodex-auto-effort-item="true"]';
+  const MAIN_OBSERVER_OPTIONS = {
+    attributes: true,
+    attributeFilter: ["aria-controls", "data-selected-reasoning-effort"],
+    childList: true,
+    subtree: true,
+  };
   const AUTO_MODEL = "auto";
   let syncScheduled = false;
+  let linkedMenuIds = new Set();
+  let linkedMenus = new Set();
+  const triggerTextObserver = new MutationObserver(() => {
+    // 只监听实际模型触发器内的文字变化，正文流式 characterData 不再进入全页观察队列。
+    if (document.visibilityState !== "hidden") scheduleSync();
+  });
 
   function visibleNode(root, selector) {
     return Array.from(root.querySelectorAll(selector)).find((node) => !node.closest('[aria-hidden="true"]')) || null;
@@ -48,17 +62,29 @@
 
   function syncComposer() {
     syncScheduled = false;
+    if (document.visibilityState === "hidden") {
+      triggerTextObserver.disconnect();
+      return;
+    }
     const activeMenus = new Set();
     const activeEffortItems = new Set();
+    const nextLinkedMenuIds = new Set();
+    const nextLinkedMenus = new Set();
 
-    for (const trigger of document.querySelectorAll(TRIGGER_SELECTOR)) {
+    const triggers = Array.from(document.querySelectorAll(TRIGGER_SELECTOR));
+    triggerTextObserver.disconnect();
+    for (const trigger of triggers) {
+      triggerTextObserver.observe(trigger, { characterData: true, childList: true, subtree: true });
+      const menuId = trigger.getAttribute("aria-controls");
+      if (menuId) nextLinkedMenuIds.add(menuId);
+      const menu = linkedMenu(trigger);
+      if (menu) nextLinkedMenus.add(menu);
       const modelText = modelTextForTrigger(trigger);
       const isAuto = modelText.toLowerCase() === AUTO_MODEL;
       if (isAuto) trigger.dataset.opencodexAutoModel = "true";
       else trigger.removeAttribute("data-opencodex-auto-model");
       if (!isAuto) continue;
 
-      const menu = linkedMenu(trigger);
       if (!menu) continue;
       menu.dataset.opencodexAutoModelMenu = "true";
       activeMenus.add(menu);
@@ -74,6 +100,9 @@
     for (const item of document.querySelectorAll('[data-opencodex-auto-effort-item="true"]')) {
       if (!activeEffortItems.has(item)) item.removeAttribute("data-opencodex-auto-effort-item");
     }
+    // MutationObserver 热路径只使用这份小型索引，不能为每个流式文本记录重新扫描整页 trigger。
+    linkedMenuIds = nextLinkedMenuIds;
+    linkedMenus = nextLinkedMenus;
   }
 
   function scheduleSync() {
@@ -82,14 +111,66 @@
     requestAnimationFrame(syncComposer);
   }
 
-  const observer = new MutationObserver(scheduleSync);
-  observer.observe(document.documentElement, {
-    attributes: true,
-    attributeFilter: ["aria-controls", "data-selected-reasoning-effort"],
-    characterData: true,
-    childList: true,
-    subtree: true,
+  function elementTouchesComposer(element, includeDescendants = false) {
+    if (!element || element.nodeType !== 1) return false;
+    if (element.matches?.(`${TRIGGER_SELECTOR},${MENU_RELEVANT_SELECTOR}`)) return true;
+    if (element.closest?.(`${TRIGGER_SELECTOR},${MENU_RELEVANT_SELECTOR}`)) return true;
+    if (element.id && linkedMenuIds.has(element.id)) return true;
+    if (
+      includeDescendants &&
+      element.firstElementChild &&
+      (element.querySelector?.(`${TRIGGER_SELECTOR},${MENU_RELEVANT_SELECTOR}`) ||
+        Array.from(element.querySelectorAll?.("[id]") || []).some(
+          (node) => node.id && linkedMenuIds.has(node.id)
+        ))
+    ) {
+      return true;
+    }
+    // Portal 菜单没有稳定 class，使用上次同步得到的有限集合判断，不触发 document 级查询。
+    return Array.from(linkedMenus).some(
+      (menu) => menu === element || menu.contains?.(element) || (includeDescendants && element.contains?.(menu))
+    );
+  }
+
+  function mutationsTouchComposer(records) {
+    return Array.from(records || []).some((record) => {
+      if (record.type === "attributes") return elementTouchesComposer(record.target);
+      if (record.type !== "childList") return false;
+      if (elementTouchesComposer(record.target)) return true;
+      return [...Array.from(record.addedNodes || []), ...Array.from(record.removedNodes || [])].some(
+        (node) => elementTouchesComposer(node, true)
+      );
+    });
+  }
+
+  const observer = new MutationObserver((records) => {
+    // 流式回答会持续修改正文文本；只有 Composer trigger 或菜单 portal 相关变化才需要重新标记。
+    if (document.visibilityState === "hidden" || !mutationsTouchComposer(records)) return;
+    scheduleSync();
   });
+  let observerActive = false;
+  function startComposerObservation() {
+    if (observerActive || document.visibilityState === "hidden") return;
+    observer.observe(document.documentElement, MAIN_OBSERVER_OPTIONS);
+    observerActive = true;
+  }
+
+  function stopComposerObservation() {
+    if (observerActive) observer.disconnect();
+    observerActive = false;
+    // trigger 内的文字观察同样只服务可见 UI，后台不保留任何 DOM observer。
+    triggerTextObserver.disconnect();
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      stopComposerObservation();
+      return;
+    }
+    startComposerObservation();
+    scheduleSync();
+  });
+  startComposerObservation();
   scheduleSync();
   // observer 安装完成才代表 Composer 适配器已注入；回执请求保持旁路，不参与 DOM 同步。
   void w.__OpenCodexSmartSchedulingInjectionHealth?.report("composer-adapter");

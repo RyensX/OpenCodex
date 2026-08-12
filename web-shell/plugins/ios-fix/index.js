@@ -85,16 +85,16 @@
       ) {
         return null;
       }
+      const viewportCoordinator = w.__OpenCodexViewportCoordinator;
+      if (!viewportCoordinator || typeof viewportCoordinator.subscribe !== "function") return null;
       document.__opencodexIosFixInstalled = true;
 
-      let animationFrame = 0;
       let keyboardOpeningUntilMs = 0;
       let mutationObserver = null;
       let mutationSettleTimer = 0;
       let markedAppShell = null;
       let largestObservedLayoutHeight = 0;
       let lastDebugState = null;
-      const settleTimers = new Set();
 
       const isEnabled = () => context.plugin.isEnabled();
       const isActive = () => isEnabled() && isIOSWebKitDevice();
@@ -102,6 +102,14 @@
       const threadScrollElement = () => document.querySelector(THREAD_SCROLL_SELECTOR);
       const threadFooterElement = () => document.querySelector(THREAD_FOOTER_SELECTOR);
       const composerElement = () => document.querySelector(COMPOSER_SELECTOR);
+
+      const setDatasetValue = (root, key, value) => {
+        if (root.dataset[key] !== value) root.dataset[key] = value;
+      };
+
+      const setStyleValue = (root, name, value) => {
+        if (root.style.getPropertyValue(name) !== value) root.style.setProperty(name, value);
+      };
 
       const findAppShellElement = () => {
         const rootNode = rootElement();
@@ -131,7 +139,7 @@
         const next = findAppShellElement();
         if (markedAppShell && markedAppShell !== next) clearAppShellMark();
         if (isElement(next)) {
-          next.dataset[APP_SHELL_DATA_ATTR] = "true";
+          if (next.dataset[APP_SHELL_DATA_ATTR] !== "true") next.dataset[APP_SHELL_DATA_ATTR] = "true";
           markedAppShell = next;
         }
         return markedAppShell;
@@ -394,16 +402,15 @@
         lastDebugState = null;
       };
 
-      const viewportMetrics = () => {
+      const viewportMetrics = (snapshot = viewportCoordinator.snapshot()) => {
         const root = document.documentElement;
-        const viewport = w.visualViewport;
-        const visualHeight = Number(viewport?.height || w.innerHeight || root.clientHeight || 0);
-        const offsetTop = Number(viewport?.offsetTop || 0);
-        const visualBottom = visualHeight + offsetTop;
+        const visualHeight = Number(snapshot.visualHeight || w.innerHeight || root.clientHeight || 0);
+        const offsetTop = Number(snapshot.offsetTop || 0);
+        const visualBottom = Number(snapshot.visualBottom || visualHeight + offsetTop);
         const rawLayoutHeight = Math.max(
-          Number(w.innerHeight || 0),
-          Number(root.clientHeight || 0),
-          Number(document.body?.clientHeight || 0),
+          Number(snapshot.innerHeight || 0),
+          Number(snapshot.layoutHeight || 0),
+          Number(snapshot.bodyHeight || 0),
           visualHeight
         );
         const editable = activeEditableElement();
@@ -435,20 +442,30 @@
         };
       };
 
-      const updateViewportState = () => {
+      const updateViewportState = (snapshot, reason = "viewport") => {
         const root = document.documentElement;
         if (!isActive()) {
           clearViewportState();
           return;
         }
 
-        const metrics = viewportMetrics();
-        root.dataset[ROOT_DATA_ATTR] = "true";
-        root.dataset[KEYBOARD_DATA_ATTR] = metrics.keyboardVisible ? "true" : "false";
-        root.dataset[STANDALONE_DATA_ATTR] = isStandaloneDisplayMode() ? "true" : "false";
-        root.style.setProperty("--opencodex-ios-visual-viewport-height", cssPixel(metrics.visualHeight));
-        root.style.setProperty("--opencodex-ios-visual-viewport-offset-top", cssPixel(metrics.offsetTop));
-        root.style.setProperty("--opencodex-ios-keyboard-inset-bottom", cssPixel(metrics.keyboardInset));
+        if (reason === "orientationchange") {
+          // 横竖屏的布局高度不可复用；先清空旧方向峰值，防止聚焦输入框时产生虚假键盘留白。
+          largestObservedLayoutHeight = 0;
+        }
+        if (reason === "focusin" && activeEditableElement()) {
+          keyboardOpeningUntilMs = Date.now() + KEYBOARD_OPENING_GUARD_MS;
+        } else if (reason === "focusout") {
+          keyboardOpeningUntilMs = 0;
+        }
+
+        const metrics = viewportMetrics(snapshot);
+        setDatasetValue(root, ROOT_DATA_ATTR, "true");
+        setDatasetValue(root, KEYBOARD_DATA_ATTR, metrics.keyboardVisible ? "true" : "false");
+        setDatasetValue(root, STANDALONE_DATA_ATTR, isStandaloneDisplayMode() ? "true" : "false");
+        setStyleValue(root, "--opencodex-ios-visual-viewport-height", cssPixel(metrics.visualHeight));
+        setStyleValue(root, "--opencodex-ios-visual-viewport-offset-top", cssPixel(metrics.offsetTop));
+        setStyleValue(root, "--opencodex-ios-keyboard-inset-bottom", cssPixel(metrics.keyboardInset));
         syncAppShellMark(true);
 
         lastDebugState = {
@@ -468,85 +485,72 @@
         }
       };
 
-      const clearSettleTimers = () => {
-        for (const timer of settleTimers) w.clearTimeout(timer);
-        settleTimers.clear();
+      const scheduleViewportUpdate = (reason = "ios-plugin") => {
+        // iOS 地址栏/键盘动画结束后仍保留原有分段校准，但由共享协调器合并同一事件风暴。
+        viewportCoordinator.request(reason, { immediate: true, settleDelays: SETTLE_DELAYS_MS });
       };
 
-      const scheduleViewportUpdate = () => {
-        updateViewportState();
-        if (animationFrame) w.cancelAnimationFrame?.(animationFrame);
-        animationFrame = w.requestAnimationFrame
-          ? w.requestAnimationFrame(() => {
-              animationFrame = 0;
-              updateViewportState();
-            })
-          : 0;
-
-        clearSettleTimers();
-        for (const delay of SETTLE_DELAYS_MS) {
-          // iOS 地址栏/键盘动画结束后还会补发 visualViewport 尺寸，分段校准更稳。
-          const timer = w.setTimeout(() => {
-            settleTimers.delete(timer);
-            updateViewportState();
-          }, delay);
-          settleTimers.add(timer);
+      const observeAppRoot = () => {
+        if (
+          document.visibilityState === "hidden" ||
+          mutationObserver ||
+          !document.body ||
+          typeof w.MutationObserver !== "function"
+        ) {
+          return;
         }
-      };
-
-      const observeAppTree = () => {
-        if (mutationObserver || !document.body || typeof w.MutationObserver !== "function") return;
-        mutationObserver = new w.MutationObserver(() => {
+        let observedRoot = null;
+        const observeCurrentRoot = () => {
+          const nextRoot = rootElement();
+          if (nextRoot === observedRoot) return !!nextRoot;
+          mutationObserver.disconnect();
+          observedRoot = nextRoot;
+          if (observedRoot) {
+            // app shell 永远是 #root 的第一层容器，只观察这一层即可避开正文流式 DOM 热路径。
+            mutationObserver.observe(observedRoot, { childList: true });
+            return true;
+          }
+          // 极早加载时 #root 可能尚未创建；这里只短暂观察 body 直属子节点，出现后立即收窄。
+          mutationObserver.observe(document.body, { childList: true });
+          return false;
+        };
+        mutationObserver = new w.MutationObserver((records) => {
+          const wasWaitingForRoot = !observedRoot;
+          const hasRoot = observeCurrentRoot();
+          if (!hasRoot || (!wasWaitingForRoot && !records.some((record) => record.target === observedRoot))) return;
           if (mutationSettleTimer) w.clearTimeout(mutationSettleTimer);
-          // 官方 renderer 会分批挂载节点，稍后统一定位 app shell，减少重复测量。
-          mutationSettleTimer = w.setTimeout(scheduleViewportUpdate, 50);
+          // 顶层容器批量替换后稍后统一定位 app shell，避免在 React 提交中间态重复测量。
+          mutationSettleTimer = w.setTimeout(() => scheduleViewportUpdate("ios-dom"), 50);
         });
-        mutationObserver.observe(document.body, {
-          attributeFilter: ["class", "style"],
-          attributes: true,
-          childList: true,
-          subtree: true,
-        });
+        observeCurrentRoot();
       };
 
-      const handleFocusIn = () => {
-        if (activeEditableElement()) {
-          // 键盘动画开始前先进入 keyboard-visible 状态，避免 iOS 自动滚动留下旧布局空白。
-          keyboardOpeningUntilMs = Date.now() + KEYBOARD_OPENING_GUARD_MS;
+      const handleDocumentVisibility = () => {
+        if (document.visibilityState === "hidden") {
+          // 隐藏页不需要追踪 React 顶层容器替换；前台恢复时重新定位当前根节点即可。
+          if (mutationSettleTimer) w.clearTimeout(mutationSettleTimer);
+          mutationSettleTimer = 0;
+          mutationObserver?.disconnect();
+          mutationObserver = null;
+          return;
         }
-        scheduleViewportUpdate();
-      };
-
-      const handleFocusOut = () => {
-        keyboardOpeningUntilMs = 0;
-        scheduleViewportUpdate();
+        observeAppRoot();
       };
 
       const disposePreference = context.events.on("plugin:enabled-changed", (payload) => {
-        if (payload && payload.id === context.plugin.id) scheduleViewportUpdate();
+        if (payload && payload.id === context.plugin.id) scheduleViewportUpdate("ios-preference");
       });
 
-      scheduleViewportUpdate();
-      observeAppTree();
-      w.addEventListener("resize", scheduleViewportUpdate, { passive: true });
-      w.addEventListener("orientationchange", scheduleViewportUpdate, { passive: true });
-      w.visualViewport?.addEventListener("resize", scheduleViewportUpdate, { passive: true });
-      w.visualViewport?.addEventListener("scroll", scheduleViewportUpdate, { passive: true });
-      document.addEventListener("focusin", handleFocusIn, true);
-      document.addEventListener("focusout", handleFocusOut, true);
+      const disposeViewport = viewportCoordinator.subscribe(updateViewportState);
+      document.addEventListener("visibilitychange", handleDocumentVisibility);
+      observeAppRoot();
 
       return () => {
         disposePreference();
-        if (animationFrame) w.cancelAnimationFrame?.(animationFrame);
-        clearSettleTimers();
+        disposeViewport();
+        document.removeEventListener("visibilitychange", handleDocumentVisibility);
         if (mutationSettleTimer) w.clearTimeout(mutationSettleTimer);
         if (mutationObserver) mutationObserver.disconnect();
-        w.removeEventListener("resize", scheduleViewportUpdate, { passive: true });
-        w.removeEventListener("orientationchange", scheduleViewportUpdate, { passive: true });
-        w.visualViewport?.removeEventListener("resize", scheduleViewportUpdate, { passive: true });
-        w.visualViewport?.removeEventListener("scroll", scheduleViewportUpdate, { passive: true });
-        document.removeEventListener("focusin", handleFocusIn, true);
-        document.removeEventListener("focusout", handleFocusOut, true);
         if (style.parentNode) style.parentNode.removeChild(style);
         if (w[DEBUG_GLOBAL] === debugSnapshot) delete w[DEBUG_GLOBAL];
         clearViewportState();

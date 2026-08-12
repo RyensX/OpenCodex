@@ -118,6 +118,89 @@ test("serves local file tokens inline or as attachment", async (t) => {
   assert.equal(pathDownload.downloadUrl.endsWith("?download=1"), true);
 });
 
+test("keeps local file token pruning idle until a token exists", (t) => {
+  const service = createLocalFileService();
+  t.after(() => service.dispose());
+  assert.equal(service.__test.timerActive(), false);
+  assert.equal(service.__test.tokenCount(), 0);
+
+  const filePath = makeTempFile(t, "lazy-timer.txt", "idle");
+  service.createLocalFilePreview(filePath);
+  assert.equal(service.__test.timerActive(), true);
+  assert.equal(service.__test.tokenCount(), 1);
+
+  service.dispose();
+  assert.equal(service.__test.timerActive(), false);
+  assert.equal(service.__test.tokenCount(), 0);
+});
+
+test("bounds local file tokens and expires the oldest preview", async (t) => {
+  const service = createLocalFileService({ maxTokens: 2 });
+  t.after(() => service.dispose());
+  const firstFile = makeTempFile(t, "first.txt", "first");
+  const secondFile = makeTempFile(t, "second.txt", "second");
+  const thirdFile = makeTempFile(t, "third.txt", "third");
+
+  const first = service.createLocalFilePreview(firstFile);
+  service.createLocalFilePreview(secondFile);
+  const third = service.createLocalFilePreview(thirdFile);
+  assert.equal(service.__test.tokenCount(), 2);
+
+  const expiredResponse = createResponseRecorder();
+  await service.serveLocalFile(pathnameFromLocalFileUrl(first.url), expiredResponse);
+  await waitForResponseBody(expiredResponse);
+  assert.equal(expiredResponse.status, 404);
+
+  const currentResponse = createResponseRecorder();
+  await service.serveLocalFile(pathnameFromLocalFileUrl(third.url), currentResponse);
+  const currentBody = await waitForResponseBody(currentResponse);
+  assert.equal(currentResponse.status, 200);
+  assert.equal(currentBody.toString("utf8"), "third");
+});
+
+test("streams plugin summary images as cacheable binary responses", async (t) => {
+  const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const imagePath = makeTempFile(t, "plugin-logo.png", imageBytes);
+  const service = createLocalFileService();
+  t.after(() => service.dispose());
+  const url = new URL(`/api/plugin-image?path=${encodeURIComponent(imagePath)}`, "http://opencodex.local");
+
+  const response = createResponseRecorder();
+  await service.servePluginImage(url, { headers: {} }, response);
+  const body = await waitForResponseBody(response);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["content-type"], "image/png");
+  assert.equal(response.headers["content-length"], String(imageBytes.length));
+  assert.equal(response.headers["cache-control"], "private, no-cache");
+  assert.equal(response.headers["cross-origin-resource-policy"], "same-origin");
+  assert.equal(Buffer.compare(body, imageBytes), 0);
+
+  const cachedResponse = createResponseRecorder();
+  await service.servePluginImage(
+    url,
+    { headers: { "if-none-match": response.headers.etag } },
+    cachedResponse
+  );
+  await waitForResponseBody(cachedResponse);
+  assert.equal(cachedResponse.status, 304);
+  assert.equal(cachedResponse.headers["content-length"], undefined);
+});
+
+test("rejects non-image and oversized plugin summary files", async (t) => {
+  const textPath = makeTempFile(t, "private.txt", "not an image");
+  const imagePath = makeTempFile(t, "oversized.png", Buffer.alloc(9));
+  const service = createLocalFileService({ pluginImageMaxBytes: 8 });
+  t.after(() => service.dispose());
+
+  for (const filePath of [textPath, imagePath]) {
+    const response = createResponseRecorder();
+    const url = new URL(`/api/plugin-image?path=${encodeURIComponent(filePath)}`, "http://opencodex.local");
+    await service.servePluginImage(url, { headers: {} }, response);
+    await waitForResponseBody(response);
+    assert.equal(response.status, 404);
+  }
+});
+
 test("creates temporary zip downloads for directories", async (t) => {
   const dir = makeTempDir(t);
   const folder = path.join(dir, "bundle");

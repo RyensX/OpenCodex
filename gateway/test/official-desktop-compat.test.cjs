@@ -11,11 +11,13 @@ const {
 const { AsarWebviewExtractor } = require("../dist/official/AsarWebviewExtractor.js");
 const { OfficialBundleCache } = require("../dist/official/OfficialBundleCache.js");
 const { OfficialBundleFileSystem } = require("../dist/official/OfficialBundleFileSystem.js");
+const { OfficialRuntimeOptimizer } = require("../dist/official/OfficialRuntimeOptimizer.js");
 const {
   LEGACY_RUNTIME_ENTRY_PATH,
   OfficialRuntimeEntryResolver,
 } = require("../dist/official/OfficialRuntimeEntryResolver.js");
 const { __test: layoutTest } = require("../runner/official-layout.cjs");
+const { MANIFEST_SCHEMA_VERSION } = require("../dist/official/constants.js");
 
 function temporaryDirectory(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-desktop-compat-"));
@@ -140,7 +142,7 @@ test("ASAR extractor normalizes Windows entries and returns the declared early b
   assert.equal(fs.existsSync(path.join(destDir, ".vite", "build", "early-bootstrap.js")), true);
 });
 
-test("schema 4 cache resolves both dynamic and legacy bootstrap paths", (t) => {
+test("current cache schema resolves both dynamic and legacy bootstrap paths", (t) => {
   const projectRoot = temporaryDirectory(t);
   const fileSystem = new OfficialBundleFileSystem();
   const bundleDir = path.join(projectRoot, "bundle");
@@ -154,9 +156,16 @@ test("schema 4 cache resolves both dynamic and legacy bootstrap paths", (t) => {
     fileSystem,
   });
   const manifest = {
-    schemaVersion: 4,
+    schemaVersion: MANIFEST_SCHEMA_VERSION,
     sourceAsarPath,
     sourceResourcesPath,
+    runtimeOptimizations: {
+      nativePetComposition: "not-present",
+      nativePetPrewarm: "not-present",
+      macPushRegistration: "not-present",
+      patchedFileCount: 0,
+      unsupportedFiles: [],
+    },
   };
 
   // 构造最小可复用缓存，先验证新版 main，再切换到无 main 的旧版 package。
@@ -176,6 +185,243 @@ test("schema 4 cache resolves both dynamic and legacy bootstrap paths", (t) => {
 
   assert.equal(cache.reuseWithoutSourceScanBlockReason(manifest), "");
   assert.equal(cache.bootstrapPath, path.join(bundleDir, ".vite", "build", "bootstrap.js"));
+});
+
+test("runtime optimizer keeps native pet lazy and disables composition only for the hidden gateway", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const buildDir = path.join(bundleDir, ".vite", "build");
+  const mainPath = path.join(buildDir, "main-fixture.js");
+  const source =
+    "function L_e({devAppPath:e,platform:t=process.platform}={}){" +
+    "if(t!==`darwin`)return null;return{log:`Native pet material attachment completed`}}" +
+    "class Pet{async restoreOpenState(e){this.globalState.get(`electron-avatar-overlay-open`)===!0&&await this.open(e)}" +
+    "async prewarm(e){if(this.window!=null||this.openingWindowPromise!=null||this.isAppQuitting)return;this.open(e)}}";
+  writeFile(mainPath, source);
+
+  const optimizer = new OfficialRuntimeOptimizer({
+    fileSystem: new OfficialBundleFileSystem(),
+  });
+  const result = optimizer.optimize(bundleDir);
+  const optimized = fs.readFileSync(mainPath, "utf8");
+
+  assert.deepEqual(result, {
+    nativePetComposition: "gateway-css-fallback",
+    nativePetPrewarm: "gateway-lazy",
+    macPushRegistration: "not-present",
+    patchedFileCount: 1,
+    unsupportedFiles: [],
+  });
+  assert.match(
+    optimized,
+    /t!==`darwin`\|\|process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`/
+  );
+  assert.match(optimized, /Native pet material attachment completed/);
+  assert.match(
+    optimized,
+    /process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`\|\|this\.window!=null/
+  );
+  assert.match(
+    optimized,
+    /process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME!==`1`&&this\.globalState\.get\(`electron-avatar-overlay-open`\)/
+  );
+});
+
+test("runtime optimizer patches every native pet factory and prewarm in one chunk", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const mainPath = path.join(bundleDir, ".vite", "build", "main-multiple.js");
+  const factory = (name, platform) =>
+    `function ${name}({devAppPath:e,platform:${platform}=process.platform}={}){` +
+    `if(${platform}!==\`darwin\`)return null;return{log:\`Native pet material attachment completed\`}}`;
+  const prewarm = (name, argument) =>
+    `class ${name}{async prewarm(${argument}){if(this.window!=null||this.openingWindowPromise!=null||this.isAppQuitting)return;this.open(${argument})}}`;
+  writeFile(
+    mainPath,
+    `${factory("First", "t")}${prewarm("FirstPet", "e")}${factory("Second", "p")}${prewarm("SecondPet", "n")}`
+  );
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+
+  const result = optimizer.optimize(bundleDir);
+  const optimized = fs.readFileSync(mainPath, "utf8");
+
+  assert.equal(result.nativePetComposition, "gateway-css-fallback");
+  assert.equal(result.nativePetPrewarm, "gateway-lazy");
+  assert.equal(
+    (optimized.match(/OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`/g) || []).length,
+    4
+  );
+  assert.doesNotMatch(optimized, /if\([tp]!==`darwin`\)return null/);
+  assert.doesNotMatch(
+    optimized,
+    /if\(this\.window!=null\|\|this\.openingWindowPromise!=null\|\|this\.isAppQuitting\)return/
+  );
+});
+
+test("runtime optimizer reports a partially recognized native pet chunk", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const mainPath = path.join(bundleDir, ".vite", "build", "main-partial.js");
+  const supported =
+    "function Supported({devAppPath:e,platform:t=process.platform}={}){" +
+    "if(t!==`darwin`)return null;return{log:`Native pet material attachment completed`}}" +
+    "class SupportedPet{async prewarm(e){if(this.window!=null||this.openingWindowPromise!=null||this.isAppQuitting)return;this.open(e)}}";
+  const changed =
+    "function Changed({platform:p=process.platform}={}){" +
+    "if(p!==`darwin`)return null;return{log:`Native pet material attachment completed`}}" +
+    "class ChangedPet{async prewarm(e){if(this.window||this.isAppQuitting)return;this.open(e)}}";
+  writeFile(mainPath, `${supported}${changed}`);
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+
+  const result = optimizer.optimize(bundleDir);
+  const optimized = fs.readFileSync(mainPath, "utf8");
+
+  // 已识别部分仍安全改写，但 manifest 必须明确告警，不能把混合新旧布局误报为全部成功。
+  assert.deepEqual(result, {
+    nativePetComposition: "unsupported-layout",
+    nativePetPrewarm: "unsupported-layout",
+    macPushRegistration: "not-present",
+    patchedFileCount: 1,
+    unsupportedFiles: ["main-partial.js:native-bridge,prewarm"],
+  });
+  assert.equal((optimized.match(/OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`/g) || []).length, 2);
+  assert.match(optimized, /function Changed\(\{platform:p=process\.platform\}/);
+});
+
+test("runtime optimizer is idempotent for an already optimized cache", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const mainPath = path.join(bundleDir, ".vite", "build", "main-idempotent.js");
+  writeFile(
+    mainPath,
+    "function PetFactory({devAppPath:e,platform:t=process.platform}={}){" +
+      "if(t!==`darwin`)return null;return{log:`Native pet material attachment completed`}}" +
+      "class Pet{async prewarm(e){if(this.window!=null||this.openingWindowPromise!=null||this.isAppQuitting)return;this.open(e)}}"
+  );
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+
+  assert.equal(optimizer.optimize(bundleDir).nativePetComposition, "gateway-css-fallback");
+  const once = fs.readFileSync(mainPath, "utf8");
+  const second = optimizer.optimize(bundleDir);
+
+  assert.equal(second.nativePetComposition, "gateway-css-fallback");
+  assert.equal(second.nativePetPrewarm, "gateway-lazy");
+  assert.equal(second.macPushRegistration, "not-present");
+  assert.equal(second.patchedFileCount, 0);
+  assert.deepEqual(second.unsupportedFiles, []);
+  assert.equal(fs.readFileSync(mainPath, "utf8"), once);
+});
+
+test("runtime optimizer skips unavailable macOS push registration only in the hidden gateway", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const mainPath = path.join(bundleDir, ".vite", "build", "main-push.js");
+  writeFile(
+    mainPath,
+    "const register=()=>{process.platform!==`darwin`||g!==a.a.Prod||Lie({appServerClient:ce,desktopApiOptions:le})" +
+      ".catch(e=>logger.warning(`Failed to register macOS push notifications`,e))};"
+  );
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+
+  assert.deepEqual(optimizer.optimize(bundleDir), {
+    nativePetComposition: "not-present",
+    nativePetPrewarm: "not-present",
+    macPushRegistration: "gateway-disabled",
+    patchedFileCount: 1,
+    unsupportedFiles: [],
+  });
+  const optimized = fs.readFileSync(mainPath, "utf8");
+  assert.match(
+    optimized,
+    /process\.platform!==`darwin`\|\|process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`/
+  );
+  // 二次执行必须识别已优化结构，不能重复改写缓存文件。
+  assert.equal(optimizer.optimize(bundleDir).patchedFileCount, 0);
+  assert.equal(fs.readFileSync(mainPath, "utf8"), optimized);
+});
+
+test("runtime optimizer reports an unsupported macOS push layout without unsafe rewriting", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const mainPath = path.join(bundleDir, ".vite", "build", "main-push-changed.js");
+  const source = 'logger.warning("Failed to register macOS push notifications");';
+  writeFile(mainPath, source);
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+
+  assert.deepEqual(optimizer.optimize(bundleDir), {
+    nativePetComposition: "not-present",
+    nativePetPrewarm: "not-present",
+    macPushRegistration: "unsupported-layout",
+    patchedFileCount: 0,
+    unsupportedFiles: ["main-push-changed.js:mac-push"],
+  });
+  assert.equal(fs.readFileSync(mainPath, "utf8"), source);
+});
+
+test("runtime optimizer leaves bundles without native pet composition unchanged", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const mainPath = path.join(bundleDir, ".vite", "build", "main-fixture.js");
+  writeFile(mainPath, "module.exports = { ok: true };");
+  const optimizer = new OfficialRuntimeOptimizer({
+    fileSystem: new OfficialBundleFileSystem(),
+  });
+
+  assert.deepEqual(optimizer.optimize(bundleDir), {
+    nativePetComposition: "not-present",
+    nativePetPrewarm: "not-present",
+    macPushRegistration: "not-present",
+    patchedFileCount: 0,
+    unsupportedFiles: [],
+  });
+  assert.equal(fs.readFileSync(mainPath, "utf8"), "module.exports = { ok: true };");
+});
+
+test("runtime optimizer keeps gateway compatible when an official native pet layout changes", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const mainPath = path.join(bundleDir, ".vite", "build", "main-new-layout.js");
+  writeFile(mainPath, 'console.log("Native pet material attachment completed");');
+  const optimizer = new OfficialRuntimeOptimizer({
+    fileSystem: new OfficialBundleFileSystem(),
+  });
+
+  assert.deepEqual(optimizer.optimize(bundleDir), {
+    nativePetComposition: "unsupported-layout",
+    nativePetPrewarm: "unsupported-layout",
+    macPushRegistration: "not-present",
+    patchedFileCount: 0,
+    unsupportedFiles: ["main-new-layout.js:native-bridge,prewarm"],
+  });
+  assert.equal(
+    fs.readFileSync(mainPath, "utf8"),
+    'console.log("Native pet material attachment completed");'
+  );
+});
+
+test("runtime optimizer reports unsupported when any native pet marker file cannot be fully patched", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const buildDir = path.join(bundleDir, ".vite", "build");
+  const supportedPath = path.join(buildDir, "main-supported.js");
+  const unsupportedPath = path.join(buildDir, "main-unsupported.js");
+  const supportedSource =
+    "function L_e({devAppPath:e,platform:t=process.platform}={}){" +
+    "if(t!==`darwin`)return null;return{log:`Native pet material attachment completed`}}" +
+    "class Pet{async prewarm(e){if(this.window!=null||this.openingWindowPromise!=null||this.isAppQuitting)return;this.open(e)}}";
+  writeFile(supportedPath, supportedSource);
+  writeFile(unsupportedPath, 'console.log("Native pet material attachment completed");');
+  const optimizer = new OfficialRuntimeOptimizer({
+    fileSystem: new OfficialBundleFileSystem(),
+  });
+
+  // 多个官方产物只要有一个布局不受支持，聚合状态就必须触发上层兼容性告警。
+  assert.deepEqual(optimizer.optimize(bundleDir), {
+    nativePetComposition: "unsupported-layout",
+    nativePetPrewarm: "unsupported-layout",
+    macPushRegistration: "not-present",
+    patchedFileCount: 1,
+    unsupportedFiles: ["main-unsupported.js:native-bridge,prewarm"],
+  });
+  assert.match(
+    fs.readFileSync(supportedPath, "utf8"),
+    /process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`/
+  );
+  assert.equal(
+    fs.readFileSync(unsupportedPath, "utf8"),
+    'console.log("Native pet material attachment completed");'
+  );
 });
 
 test("Windows unpacked fallback merges into an existing runtime bundle", (t) => {

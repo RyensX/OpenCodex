@@ -11,11 +11,19 @@
   const OVERLAY_SUMMARY_CONTENT_CLASS =
     "max-h-[min(var(--radix-popover-content-available-height),calc(100vh-16px))]";
   const NATIVE_SUMMARY_ITEM_SELECTOR = '[data-slot="thread-summary-panel-item"]';
+  const SUMMARY_MARKER_DISCOVERY_SELECTOR = [
+    PINNED_SUMMARY_ROOT_SELECTOR,
+    OVERLAY_SUMMARY_MARKER_SELECTOR,
+    NATIVE_SUMMARY_ITEM_SELECTOR,
+  ].join(",");
   const SECTION_ATTRIBUTE = "data-opencodex-smart-scheduling-summary";
   const ACTIVE_SIDEBAR_THREAD_SELECTOR =
     '[data-app-action-sidebar-thread-row][data-app-action-sidebar-thread-active="true"]';
   const LOCAL_SIDEBAR_THREAD_PREFIX = "local:";
   const CLIENT_THREAD_PREFIXES = ["client-new-thread:", "client-local-thread:"];
+  const MAX_TRACKED_THREADS = 256;
+  const MAX_PENDING_REQUESTS = 512;
+  const MAX_PROTOCOL_SCAN_NODES = 2048;
   const TERMINAL_METHODS = new Set(["turn/completed", "turn/failed", "turn/interrupted"]);
   const VISIBLE_THREAD_METHODS = new Set(["thread/read", "thread/resume", "turn/start"]);
   const AUTHORITATIVE_VISIBLE_THREAD_SOURCES = new Set(["thread/read", "thread/resume", "view-activity"]);
@@ -58,6 +66,7 @@
   let pendingNavigationThreadId = null;
   let pendingNavigationSequence = 0;
   let visibleThreadActivitySequence = 0;
+  let nextHydrationSequence = 0;
   let configurationRetryTimer = null;
   let configurationRetryCount = 0;
 
@@ -70,6 +79,20 @@
     } catch {
       return raw;
     }
+  }
+
+  function setBoundedEntry(map, key, value, limit) {
+    // 展示缓存只保留最近状态；被淘汰的旧会话再次打开时会从 gateway 核心重新回读。
+    map.delete(key);
+    map.set(key, value);
+    while (map.size > limit) map.delete(map.keys().next().value);
+    return value;
+  }
+
+  function addBoundedValue(set, value, limit) {
+    set.delete(value);
+    set.add(value);
+    while (set.size > limit) set.delete(set.values().next().value);
   }
 
   function updateTierNames(tiers) {
@@ -134,7 +157,7 @@
     ) {
       return false;
     }
-    threadAliases.set(alias, target);
+    setBoundedEntry(threadAliases, alias, target, MAX_TRACKED_THREADS);
     if (pendingNavigationThreadId === alias) setPendingNavigation(target);
     if (visibleThreadKnown && visibleThreadId === alias) visibleThreadId = target;
     return true;
@@ -184,7 +207,8 @@
   function invalidateHydration(threadId) {
     const normalizedThreadId = resolvedThreadId(threadId);
     if (!normalizedThreadId) return;
-    hydrateSequences.set(normalizedThreadId, (hydrateSequences.get(normalizedThreadId) || 0) + 1);
+    // 全局单调序号避免某个 key 被 LRU 淘汰后从 1 重启，误接受更早请求的迟到响应。
+    setBoundedEntry(hydrateSequences, normalizedThreadId, ++nextHydrationSequence, MAX_TRACKED_THREADS);
   }
 
   function clearRoute(threadId) {
@@ -444,6 +468,7 @@
 
   function render() {
     observerScheduled = false;
+    if (document.visibilityState === "hidden") return;
     const threadId = currentThreadId();
     const route = threadId ? activeRoutes.get(threadId) : null;
     if (!pluginEnabled || !displayEnabled || !route) {
@@ -474,16 +499,24 @@
   }
 
   function scheduleRender() {
-    if (observerScheduled) return;
+    if (observerScheduled || document.visibilityState === "hidden") return;
     observerScheduled = true;
     w.requestAnimationFrame(render);
   }
 
   async function hydrateActiveRoute(threadId) {
     const normalizedThreadId = resolvedThreadId(threadId);
-    if (!normalizedThreadId || !pluginEnabled || !displayEnabled) return;
-    const sequence = (hydrateSequences.get(normalizedThreadId) || 0) + 1;
-    hydrateSequences.set(normalizedThreadId, sequence);
+    // 后台 route 事件只更新内存摘要；可见时再统一校验，避免每个状态变更触发 HTTP 与 DOM 工作。
+    if (
+      document.visibilityState === "hidden" ||
+      !normalizedThreadId ||
+      !pluginEnabled ||
+      !displayEnabled
+    ) {
+      return;
+    }
+    const sequence = ++nextHydrationSequence;
+    setBoundedEntry(hydrateSequences, normalizedThreadId, sequence, MAX_TRACKED_THREADS);
     try {
       const response = await fetch(
         `/api/opencodex/model-router/active-route?threadId=${encodeURIComponent(normalizedThreadId)}`,
@@ -495,7 +528,7 @@
       const route = normalizedRoute(payload?.route, normalizedThreadId, payload?.route?.turnId);
       if (route) {
         manuallySelectedThreads.delete(normalizedThreadId);
-        activeRoutes.set(normalizedThreadId, route);
+        setBoundedEntry(activeRoutes, normalizedThreadId, route, MAX_TRACKED_THREADS);
       } else {
         const cachedRoute = activeRoutes.get(normalizedThreadId);
         // 分类完成前核心尚无具体 route；空回读不能覆盖已经确认的“正在判断”状态。
@@ -551,8 +584,32 @@
     if (!node || node.nodeType !== 1) return false;
     return (
       node.matches?.("[data-app-action-sidebar-thread-row]") === true ||
-      !!node.querySelector?.("[data-app-action-sidebar-thread-row]")
+      (!!node.firstElementChild && !!node.querySelector?.("[data-app-action-sidebar-thread-row]"))
     );
+  }
+
+  function nodeOrAncestorHasOverlaySummaryClass(node) {
+    let current = node;
+    while (current && current.nodeType === 1) {
+      if (hasClass(current, OVERLAY_SUMMARY_CONTENT_CLASS)) return true;
+      current = current.parentElement;
+    }
+    return false;
+  }
+
+  function nodeTouchesSummaryMount(node, includeDescendants = false) {
+    if (!node || node.nodeType !== 1) return false;
+    const selectors = [
+      PINNED_SUMMARY_ROOT_SELECTOR,
+      OVERLAY_SUMMARY_MARKER_SELECTOR,
+      NATIVE_SUMMARY_ITEM_SELECTOR,
+    ];
+    if (selectors.some((selector) => node.matches?.(selector) || node.closest?.(selector))) return true;
+    if (nodeOrAncestorHasOverlaySummaryClass(node)) return true;
+    if (!includeDescendants || !node.firstElementChild) return false;
+    // marker 合并成一次局部查询；专用高度类走浏览器原生 class 索引，避免逐 selector/逐 div 扫描。
+    if (node.querySelector?.(SUMMARY_MARKER_DISCOVERY_SELECTOR)) return true;
+    return (node.getElementsByClassName?.(OVERLAY_SUMMARY_CONTENT_CLASS)?.length || 0) > 0;
   }
 
   function handleMutations(records) {
@@ -571,15 +628,22 @@
       );
     });
     if (sidebarChanged) syncCurrentThread();
-    else scheduleRender();
+    else {
+      const summaryChanged = mutations.some((record) => {
+        if (record.type !== "childList") return false;
+        if (nodeTouchesSummaryMount(record.target)) return true;
+        return [...Array.from(record.addedNodes || []), ...Array.from(record.removedNodes || [])].some(
+          (node) => nodeTouchesSummaryMount(node, true)
+        );
+      });
+      // 正文流式更新与摘要容器无关，过滤后不会再触发全局容器搜索和重绘。
+      if (summaryChanged) scheduleRender();
+    }
   }
 
   function handleNotification(message) {
     if (!message || typeof message !== "object") return;
-    if (Array.isArray(message)) {
-      message.forEach(handleNotification);
-      return;
-    }
+    if (Array.isArray(message)) return;
     const method = String(message.method || "");
     const params = message.params && typeof message.params === "object" ? message.params : {};
     const threadId = resolvedThreadId(params.threadId || params.thread?.id);
@@ -591,7 +655,9 @@
       if (route) {
         // 先使用同一 turn/started 携带的安全路由，接口回读只负责最终校正，不能成为唯一展示来源。
         pluginEnabled = true;
-        if (!manuallySelectedThreads.has(threadId)) activeRoutes.set(threadId, route);
+        if (!manuallySelectedThreads.has(threadId)) {
+          setBoundedEntry(activeRoutes, threadId, route, MAX_TRACKED_THREADS);
+        }
         void hydrateActiveRoute(threadId);
       } else {
         const pending = activeRoutes.get(threadId);
@@ -601,7 +667,7 @@
           // 部分官方版本会规范化通知字段；保留“判断中”并从核心活动路由补取最终结果。
           pluginEnabled = true;
           if (!pending) {
-            activeRoutes.set(threadId, {
+            setBoundedEntry(activeRoutes, threadId, {
               threadId,
               turnId: normalizedId(params.turn?.id || params.turnId),
               tier: "",
@@ -609,7 +675,7 @@
               effort: copy.determining,
               fallback: false,
               pending: true,
-            });
+            }, MAX_TRACKED_THREADS);
           }
           void hydrateActiveRoute(threadId);
         } else {
@@ -624,7 +690,7 @@
       const turnId = normalizedId(params.turn?.id || params.turnId);
       if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
         // 回合结束只清除运行标记，具体路由继续作为 Auto 的最近一次分类结果展示。
-        activeRoutes.set(threadId, { ...active, turnId: "", pending: false });
+        setBoundedEntry(activeRoutes, threadId, { ...active, turnId: "", pending: false }, MAX_TRACKED_THREADS);
       }
       void hydrateActiveRoute(threadId);
       scheduleRender();
@@ -639,10 +705,7 @@
 
   function handleClientMessage(message) {
     if (!message || typeof message !== "object") return;
-    if (Array.isArray(message)) {
-      message.forEach(handleClientMessage);
-      return;
-    }
+    if (Array.isArray(message)) return;
     const method = String(message.method || "");
     const params = message.params && typeof message.params === "object" ? message.params : {};
     const threadId = resolvedThreadId(params.threadId || params.thread?.id);
@@ -666,7 +729,9 @@
       if (!model) return;
       selectVisibleThread(threadId, false, "settings");
       const key = requestId(message.id);
-      if (key) pendingModelSelections.set(key, { auto: model === "auto", threadId });
+      if (key) {
+        setBoundedEntry(pendingModelSelections, key, { auto: model === "auto", threadId }, MAX_PENDING_REQUESTS);
+      }
       clearRoute(threadId);
       if (model === "auto") {
         // 成功响应或网关状态事件会从核心重新补取，避免复用切换前的缓存。
@@ -674,7 +739,7 @@
         pluginEnabled = true;
       } else {
         // 手动选择是本页最即时的否定信号，阻止仍在路上的 selected/turn metadata 短暂回显。
-        manuallySelectedThreads.add(threadId);
+        addBoundedValue(manuallySelectedThreads, threadId, MAX_TRACKED_THREADS);
       }
       scheduleRender();
       return;
@@ -682,7 +747,7 @@
     if (method !== "turn/start" || !threadId) return;
 
     const key = requestId(message.id);
-    if (key) pendingTurnStarts.set(key, threadId);
+    if (key) setBoundedEntry(pendingTurnStarts, key, threadId, MAX_PENDING_REQUESTS);
     clearRoute(threadId);
     const autoTurn = isAutoTurn(params, threadId);
     if (autoTurn) {
@@ -690,7 +755,7 @@
       manuallySelectedThreads.delete(threadId);
       pluginEnabled = true;
       // 分类本身属于本轮执行：结果未定时明确显示判断中，避免七秒分类阶段看起来像功能未生效。
-      activeRoutes.set(threadId, {
+      setBoundedEntry(activeRoutes, threadId, {
         threadId,
         turnId: "",
         tier: "",
@@ -698,19 +763,16 @@
         effort: copy.determining,
         fallback: false,
         pending: true,
-      });
+      }, MAX_TRACKED_THREADS);
     } else {
-      manuallySelectedThreads.add(threadId);
+      addBoundedValue(manuallySelectedThreads, threadId, MAX_TRACKED_THREADS);
     }
     scheduleRender();
   }
 
   function handleServerMessage(message) {
     if (!message || typeof message !== "object") return;
-    if (Array.isArray(message)) {
-      message.forEach(handleServerMessage);
-      return;
-    }
+    if (Array.isArray(message)) return;
     const key = requestId(message.id);
     if (key && pendingModelSelections.has(key)) {
       const selection = pendingModelSelections.get(key);
@@ -748,7 +810,7 @@
       manuallySelectedThreads.delete(threadId);
       pluginEnabled = true;
       invalidateHydration(threadId);
-      activeRoutes.set(threadId, {
+      setBoundedEntry(activeRoutes, threadId, {
         threadId,
         turnId: "",
         tier: "",
@@ -756,12 +818,14 @@
         effort: copy.determining,
         fallback: false,
         pending: true,
-      });
+      }, MAX_TRACKED_THREADS);
     } else if (["selected", "started", "idle"].includes(status)) {
       // WS 事件本身已来自核心且只含安全字段，先显示它；HTTP 回读用于处理跨页和延迟清理。
       pluginEnabled = true;
       const route = normalizedRoute(event.route, threadId, event.route?.turnId);
-      if (route && !manuallySelectedThreads.has(threadId)) activeRoutes.set(threadId, route);
+      if (route && !manuallySelectedThreads.has(threadId)) {
+        setBoundedEntry(activeRoutes, threadId, route, MAX_TRACKED_THREADS);
+      }
       void hydrateActiveRoute(threadId);
     } else if (["cleared", "deleted", "unsubscribed"].includes(status)) {
       clearRoute(threadId);
@@ -816,23 +880,37 @@
     if (NEW_THREAD_MESSAGE_TYPES.has(payload.type)) clearVisibleThread();
   }
 
-  function visitProtocolMessages(value, direction, depth = 0) {
-    if (!value || typeof value !== "object" || depth > 4) return;
+  function visitProtocolMessages(value, direction, depth = 0, state = null) {
+    const traversal = state || { remaining: MAX_PROTOCOL_SCAN_NODES, seen: new WeakSet() };
+    if (!value || typeof value !== "object" || depth > 4 || traversal.remaining <= 0) return;
+    if (traversal.seen.has(value)) return;
+    traversal.seen.add(value);
+    traversal.remaining -= 1;
+    if (Array.isArray(value)) {
+      // 批协议帧共享一次总预算；异常超宽数组不能为每项重新获得完整递归额度。
+      const childCount = Math.min(value.length, traversal.remaining);
+      for (let index = 0; index < childCount && traversal.remaining > 0; index += 1) {
+        visitProtocolMessages(value[index], direction, depth + 1, traversal);
+      }
+      return;
+    }
     if (direction === "client") handleClientMessage(value);
     else handleServerMessage(value);
     // App Server 帧通常是直接 JSON-RPC；有界解包兼容官方 renderer 增加的传输 envelope。
     for (const key of PROTOCOL_ENVELOPE_KEYS) {
       const nested = value[key];
-      if (nested && typeof nested === "object") visitProtocolMessages(nested, direction, depth + 1);
+      if (nested && typeof nested === "object") visitProtocolMessages(nested, direction, depth + 1, traversal);
       else if (typeof nested === "string" && (nested.includes("turn/") || nested.includes("thread/"))) {
         try {
-          visitProtocolMessages(JSON.parse(nested), direction, depth + 1);
+          visitProtocolMessages(JSON.parse(nested), direction, depth + 1, traversal);
         } catch {}
       }
     }
   }
 
   function handleAppHostData(data, direction = "server") {
+    // 后台页不渲染摘要；恢复可见时会从 gateway 权威状态重新 hydrate，无需持续解析 App Server 帧。
+    if (document.visibilityState === "hidden") return;
     if (typeof data !== "string" || !data.trim()) return;
     if (!data.includes("turn/") && !data.includes("thread/")) return;
     try {
@@ -890,9 +968,12 @@
   function install() {
     if (installed) return;
     installed = true;
-    const observer = new MutationObserver(handleMutations);
-    // React 可能复用侧栏行并只修改活动属性，属性变化也必须触发当前任务同步。
-    observer.observe(document.documentElement, {
+    const observer = new MutationObserver((records) => {
+      // 后台错过的侧栏/摘要挂载会在 visibilitychange 中全量校正，无需持续处理 DOM 流。
+      if (document.visibilityState === "hidden") return;
+      handleMutations(records);
+    });
+    const observerOptions = {
       attributes: true,
       attributeFilter: [
         "data-app-action-sidebar-thread-active",
@@ -901,10 +982,33 @@
       ],
       childList: true,
       subtree: true,
+    };
+    let observerActive = false;
+    const startObservation = () => {
+      if (observerActive || document.visibilityState === "hidden") return;
+      observer.observe(document.documentElement, observerOptions);
+      observerActive = true;
+    };
+    const stopObservation = () => {
+      if (observerActive) observer.disconnect();
+      observerActive = false;
+    };
+    // React 可能复用侧栏行并只修改活动属性，属性变化也必须触发当前任务同步。
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        // 后台期间同时停止全页 observer 与协议解析；可见后通过当前路由和 HTTP 权威状态补齐。
+        stopObservation();
+        return;
+      }
+      startObservation();
+      syncCurrentThread();
+      void hydrateActiveRoute(currentThreadId());
+      scheduleRender();
     });
     w.addEventListener("popstate", syncCurrentThread);
     w.addEventListener("opencodex:plugin-event", handlePluginEvent);
     w.addEventListener("opencodex:smart-scheduling-config-changed", (event) => applyConfiguration(event.detail));
+    startObservation();
     syncCurrentThread();
     void loadConfiguration();
     // 协议观察和 DOM 观察均已安装后再回执，避免把单纯脚本下载当成摘要适配器注入成功。
@@ -926,10 +1030,13 @@
       // 只暴露布尔值和计数，便于联调；不记录任务 ID、prompt 或分类依据。
       return {
         activeRouteCount: activeRoutes.size,
+        hydrationSequenceCount: hydrateSequences.size,
+        manualSelectionCount: manuallySelectedThreads.size,
         autoSelected: w.__OpenCodexSmartModelRouterComposer?.autoSelected === true,
         displayEnabled,
         pendingModelSelectionCount: pendingModelSelections.size,
         pendingTurnCount: pendingTurnStarts.size,
+        threadAliasCount: threadAliases.size,
         pluginEnabled,
         visibleThreadKnown,
       };

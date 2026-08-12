@@ -28,6 +28,18 @@ const { createTurnRouteStatus } = require("./turn-route-status.cjs");
 const { enabledTierDefinitions } = require("./tiers.cjs");
 const { createVirtualModelController, isAuto, requestKey } = require("./virtual-model.cjs");
 
+const MAX_HISTORY_THREADS = 128;
+const MAX_HISTORY_REVISIONS = 512;
+const MAX_EXTERNAL_REQUESTS = 4096;
+
+function setBoundedMapEntry(map, key, value, maxEntries) {
+  map.delete(key);
+  map.set(key, value);
+  const effectiveMaxEntries = Math.max(1, Number(maxEntries) || 1);
+  while (map.size > effectiveMaxEntries) map.delete(map.keys().next().value);
+  return value;
+}
+
 function createSmartModelRouterService({ configStore, stateFilePath, classifierOptions = {}, injectionHealth = null }) {
   const stateStore = createAutoStateStore({ filePath: stateFilePath });
   const catalog = createModelCatalog();
@@ -40,6 +52,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
   const routeStatusListeners = new Set();
   let catalogRefreshPromise = null;
   let historyCacheGeneration = 0;
+  let nextHistoryRevision = 0;
 
   function emitRouteStatus(event) {
     for (const listener of Array.from(routeStatusListeners)) {
@@ -64,17 +77,24 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
 
   function markHistoryChanged(threadId) {
     if (!threadId) return;
-    historyRevisionByThread.set(threadId, historyRevision(threadId) + 1);
+    // 全局单调修订号配合有界 LRU，key 被淘汰后也不会接受淘汰前的迟到历史响应。
+    setBoundedMapEntry(historyRevisionByThread, threadId, ++nextHistoryRevision, MAX_HISTORY_REVISIONS);
   }
 
   function beginHistoryTurn(threadId) {
-    openHistoryTurnsByThread.set(threadId, (openHistoryTurnsByThread.get(threadId) || 0) + 1);
+    setBoundedMapEntry(
+      openHistoryTurnsByThread,
+      threadId,
+      (openHistoryTurnsByThread.get(threadId) || 0) + 1,
+      MAX_HISTORY_REVISIONS
+    );
   }
 
   function endHistoryTurn(threadId) {
     const remaining = (openHistoryTurnsByThread.get(threadId) || 0) - 1;
-    if (remaining > 0) openHistoryTurnsByThread.set(threadId, remaining);
-    else openHistoryTurnsByThread.delete(threadId);
+    if (remaining > 0) {
+      setBoundedMapEntry(openHistoryTurnsByThread, threadId, remaining, MAX_HISTORY_REVISIONS);
+    } else openHistoryTurnsByThread.delete(threadId);
   }
 
   function hasOpenHistoryTurn(threadId) {
@@ -135,6 +155,8 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       historyByThread.clear();
       historyRevisionByThread.clear();
       openHistoryTurnsByThread.clear();
+      externalRequests.clear();
+      virtualModel?.clearPending?.();
       // App Server 连接断开即表示没有仍可确认的真实执行，防止任务摘要显示过期状态。
       turnRouteStatus.clearAll();
     },
@@ -211,6 +233,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       cached.limit === historyLimit &&
       Array.isArray(cached.turns)
     ) {
+      setBoundedMapEntry(historyByThread, threadId, cached, MAX_HISTORY_THREADS);
       return cached.turns;
     }
     if (cached) historyByThread.delete(threadId);
@@ -234,7 +257,12 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
         !hasOpenHistoryTurn(threadId) &&
         classificationHistoryLimit() === historyLimit
       ) {
-        historyByThread.set(threadId, { generation: requestGeneration, limit: historyLimit, turns: history });
+        setBoundedMapEntry(
+          historyByThread,
+          threadId,
+          { generation: requestGeneration, limit: historyLimit, turns: history },
+          MAX_HISTORY_THREADS
+        );
       }
       return history;
     } catch {
@@ -475,14 +503,14 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
               sortDirection: String(original.params?.sortDirection || ""),
             }
           : null;
-      externalRequests.set(requestKey(original.id), {
+      setBoundedMapEntry(externalRequests, requestKey(original.id), {
         method: original.method,
         requestKey: requestKey(original.id),
         threadId: String(original.params?.threadId || ""),
         historyCacheGeneration,
         historyRevision: historyRevision(String(original.params?.threadId || "")),
         historyRequest,
-      });
+      }, MAX_EXTERNAL_REQUESTS);
     }
     const prepared = virtualModel.prepareClientMessage(original);
     const message = prepared.message;
@@ -555,11 +583,16 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       if (canHydrateCurrentCache) {
         // 仅用完整的最新页填充缓存，分页或旧配置响应不能让后续分类误判缓存已经完备。
         const history = recentTurnsFromTurns([...filtered.result.data].reverse(), historyLimit);
-        historyByThread.set(meta.threadId, {
-          generation: historyCacheGeneration,
-          limit: historyLimit,
-          turns: history,
-        });
+        setBoundedMapEntry(
+          historyByThread,
+          meta.threadId,
+          {
+            generation: historyCacheGeneration,
+            limit: historyLimit,
+            turns: history,
+          },
+          MAX_HISTORY_THREADS
+        );
       }
     }
     if (meta?.method === "turn/start" && meta.threadId) {
@@ -612,6 +645,11 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       routeStatusListeners.clear();
       turnRouteStatus.clearAll();
       transport.rejectPending(error);
+      virtualModel.clearPending();
+      externalRequests.clear();
+      historyByThread.clear();
+      historyRevisionByThread.clear();
+      openHistoryTurnsByThread.clear();
     },
     isEnabled,
     onRouteStatus(listener) {
@@ -641,4 +679,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
   };
 }
 
-module.exports = { createSmartModelRouterService };
+module.exports = {
+  createSmartModelRouterService,
+  __test: { setBoundedMapEntry },
+};

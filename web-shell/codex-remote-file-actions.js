@@ -6,6 +6,9 @@
   const DOWNLOAD_PATH_API = "/api/local-file/download-path";
   const FILE_TREE_MENU_SESSION_TTL_MS = 2500;
   const FILE_TREE_MENU_ANCHOR_MARGIN_PX = 80;
+  const MAX_WORKSPACE_PATH_ROOTS = 2048;
+  const MAX_WORKSPACE_ROOT_SCAN_NODES = 1024;
+  const MAX_WORKSPACE_ROOT_SCAN_JSON_CHARS = 1024 * 1024;
   const state = {
     installed: true,
     injectedPathDownloadItems: 0,
@@ -25,6 +28,8 @@
     workspaceRootCaptures: 0,
   };
   let pendingPathMenuSession = null;
+  let pendingMenuObserver = null;
+  let pendingMenuObserverExpiryTimer = 0;
   let nextPathMenuSessionId = 1;
   const workspaceRootByRelativePath = new Map();
   w.__codexRemoteFileActionsStatus = state;
@@ -202,7 +207,12 @@
     const relativePath = safeRelativeFileTreePath(filePath);
     const root = rememberWorkspaceRoot(workspaceRoot, source);
     if (!relativePath || !root) return false;
+    workspaceRootByRelativePath.delete(relativePath);
     workspaceRootByRelativePath.set(relativePath, root);
+    // 虚拟文件树可能长期访问大量路径；只保留最近映射，避免按文件数永久增长。
+    while (workspaceRootByRelativePath.size > MAX_WORKSPACE_PATH_ROOTS) {
+      workspaceRootByRelativePath.delete(workspaceRootByRelativePath.keys().next().value);
+    }
     return true;
   }
 
@@ -214,7 +224,12 @@
     const relativePath = safeRelativeFileTreePath(filePath);
     if (!relativePath) return "";
     const configuredRoots = configWorkspaceRoots();
-    return workspaceRootByRelativePath.get(relativePath) || state.lastWorkspaceRoot || (configuredRoots.length === 1 ? configuredRoots[0] : "");
+    const mappedRoot = workspaceRootByRelativePath.get(relativePath);
+    if (mappedRoot) {
+      workspaceRootByRelativePath.delete(relativePath);
+      workspaceRootByRelativePath.set(relativePath, mappedRoot);
+    }
+    return mappedRoot || state.lastWorkspaceRoot || (configuredRoots.length === 1 ? configuredRoots[0] : "");
   }
 
   function paramsLike(value) {
@@ -222,25 +237,42 @@
     return value.params && typeof value.params === "object" && !Array.isArray(value.params) ? value.params : value;
   }
 
-  function rememberWorkspaceRootFromCandidate(value, depth = 0) {
-    if (depth > 5 || value == null) return false;
+  function rememberWorkspaceRootFromCandidate(
+    value,
+    depth = 0,
+    traversal = { remaining: MAX_WORKSPACE_ROOT_SCAN_NODES, seen: new WeakSet() }
+  ) {
+    if (depth > 5 || value == null || traversal.remaining <= 0) return false;
+    if (typeof value === "object") {
+      if (traversal.seen.has(value)) return false;
+      traversal.seen.add(value);
+    }
+    traversal.remaining -= 1;
     if (typeof value === "string") {
       const text = value.trim();
-      if (!text || !((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]")))) {
+      if (
+        !text ||
+        text.length > MAX_WORKSPACE_ROOT_SCAN_JSON_CHARS ||
+        !((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]")))
+      ) {
         return false;
       }
       try {
-        return rememberWorkspaceRootFromCandidate(JSON.parse(text), depth + 1);
+        return rememberWorkspaceRootFromCandidate(JSON.parse(text), depth + 1, traversal);
       } catch {
         return false;
       }
     }
+    if (typeof value !== "object") return false;
+    // IPC 参数可由插件扩展；同时限制遍历宽度并去重循环引用，避免异常载荷长期占用主线程。
     if (Array.isArray(value)) {
       let remembered = false;
-      for (const item of value) remembered = rememberWorkspaceRootFromCandidate(item, depth + 1) || remembered;
+      for (const item of value) {
+        if (traversal.remaining <= 0) break;
+        remembered = rememberWorkspaceRootFromCandidate(item, depth + 1, traversal) || remembered;
+      }
       return remembered;
     }
-    if (typeof value !== "object") return false;
 
     const params = paramsLike(value);
     const filePath =
@@ -263,21 +295,11 @@
       remembered = true;
     }
     remembered = rememberWorkspaceRootForPath(filePath, workspaceRoot, "ipc-path") || remembered;
-    for (const nestedValue of Object.values(value)) {
-      remembered = rememberWorkspaceRootFromCandidate(nestedValue, depth + 1) || remembered;
+    for (const key of Object.keys(value)) {
+      if (traversal.remaining <= 0) break;
+      remembered = rememberWorkspaceRootFromCandidate(value[key], depth + 1, traversal) || remembered;
     }
     return remembered;
-  }
-
-  function rememberWorkspaceRootFromIpcBody(body) {
-    if (typeof body !== "string" || !body.trim()) return false;
-    try {
-      const parsed = JSON.parse(body);
-      if (!parsed || typeof parsed !== "object") return false;
-      return rememberWorkspaceRootFromCandidate(parsed);
-    } catch {
-      return false;
-    }
   }
 
   function installWorkspaceRootCapture() {
@@ -289,17 +311,6 @@
       });
       w.__codexRemoteFileActionsPluginEventListener = true;
     }
-    if (w.__codexRemoteFileActionsFetchPatched || typeof w.fetch !== "function") return;
-    const originalFetch = w.fetch.bind(w);
-    w.fetch = function codexRemoteFileActionsFetch(input, init) {
-      try {
-        const url = typeof input === "string" ? input : input && typeof input.url === "string" ? input.url : "";
-        const pathname = new URL(url, w.location.href).pathname;
-        if (pathname === "/api/ipc/invoke") rememberWorkspaceRootFromIpcBody(init && init.body);
-      } catch {}
-      return originalFetch(input, init);
-    };
-    w.__codexRemoteFileActionsFetchPatched = true;
   }
 
   function pathContextFromFileTreeElement(element, source) {
@@ -418,6 +429,9 @@
     pendingPathMenuSession = null;
     state.pendingPathMenuSession = false;
     state.lastMenuSessionClearReason = reason || "";
+    pendingMenuObserver?.disconnect();
+    if (pendingMenuObserverExpiryTimer) w.clearTimeout(pendingMenuObserverExpiryTimer);
+    pendingMenuObserverExpiryTimer = 0;
   }
 
   function createPendingPathMenuSession(event) {
@@ -712,13 +726,47 @@
     w.setTimeout(scanDocument, 150);
   }
 
+  function handlePendingMenuMutations(mutations) {
+    if (!freshPendingPathMenuSession()) return;
+    for (const mutation of mutations) {
+      if (mutation.type === "characterData") {
+        const parent = mutation.target && mutation.target.parentElement;
+        if (parent) scanMenuItems(parent);
+        continue;
+      }
+      for (const node of mutation.addedNodes || []) {
+        if (node && node.nodeType === 1) scanMenuItems(node);
+      }
+    }
+  }
+
+  function observePendingPathMenu(session) {
+    if (!session || typeof MutationObserver !== "function") return;
+    pendingMenuObserver ||= new MutationObserver(handlePendingMenuMutations);
+    pendingMenuObserver.disconnect();
+    pendingMenuObserver.observe(document.documentElement, {
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    if (pendingMenuObserverExpiryTimer) w.clearTimeout(pendingMenuObserverExpiryTimer);
+    // 右键菜单只会紧随 contextmenu 挂载；超时后主动停观察，不能让一次未命中的菜单留下永久监听。
+    pendingMenuObserverExpiryTimer = w.setTimeout(() => {
+      if (pendingPathMenuSession?.id === session.id) clearPendingPathMenuSession("expired");
+    }, FILE_TREE_MENU_SESSION_TTL_MS);
+  }
+
   function installMenuObserver() {
     if (!document || !shouldEnableRemoteFileActions()) return;
     const start = () => {
       document.addEventListener(
         "contextmenu",
         (event) => {
-          if (createPendingPathMenuSession(event)) schedulePendingMenuScans();
+          const session = createPendingPathMenuSession(event);
+          if (session) {
+            observePendingPathMenu(session);
+            schedulePendingMenuScans();
+          }
         },
         true
       );
@@ -739,20 +787,6 @@
         },
         true
       );
-      const observer = new MutationObserver((mutations) => {
-        if (!freshPendingPathMenuSession()) return;
-        for (const mutation of mutations) {
-          if (mutation.type === "characterData") {
-            const parent = mutation.target && mutation.target.parentElement;
-            if (parent) scanMenuItems(parent);
-            continue;
-          }
-          for (const node of mutation.addedNodes || []) {
-            if (node && node.nodeType === 1) scanMenuItems(node);
-          }
-        }
-      });
-      observer.observe(document.documentElement, { characterData: true, childList: true, subtree: true });
     };
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", start, { once: true });

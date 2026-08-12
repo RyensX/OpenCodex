@@ -6,6 +6,7 @@ const DEFAULT_HOST_ID = "local";
 const DEFAULT_CLIENT_TYPE = "opencodex-readonly-observer";
 const DEFAULT_RECONNECT_DELAY_MS = 5_000;
 const DEFAULT_MAX_RECONNECT_DELAY_MS = 60_000;
+const DEFAULT_MAX_KNOWN_THREADS = 512;
 
 function threadKey(conversationId, hostId) {
   return `${hostId}\u0000${conversationId}`;
@@ -110,6 +111,11 @@ function createOfficialLiveObserver(options = {}) {
       ? options.maxReconnectDelayMs
       : DEFAULT_MAX_RECONNECT_DELAY_MS
   );
+  const configuredMaxKnownThreads = Number(options.maxKnownThreads);
+  const maxKnownThreads =
+    Number.isInteger(configuredMaxKnownThreads) && configuredMaxKnownThreads > 0
+      ? configuredMaxKnownThreads
+      : DEFAULT_MAX_KNOWN_THREADS;
 
   const knownThreads = new Map();
   const activeOwners = new Map();
@@ -192,6 +198,30 @@ function createOfficialLiveObserver(options = {}) {
     }
   }
 
+  function forgetKnownThread(key, notifyOfficial = true) {
+    const thread = knownThreads.get(key);
+    if (!thread) return false;
+    knownThreads.delete(key);
+    activeOwners.delete(key);
+    activeRevisions.delete(key);
+    if (notifyOfficial && clientId) sendFollowing(thread.conversationId, thread.hostId, false);
+    return true;
+  }
+
+  function rememberKnownThread(conversationId, hostId) {
+    const key = threadKey(conversationId, hostId);
+    // 重新观察视为最近使用；异常 owner 连续制造线程时只保留最近订阅，避免长会话状态无界增长。
+    knownThreads.delete(key);
+    knownThreads.set(key, { conversationId, hostId });
+    while (knownThreads.size > maxKnownThreads) {
+      const oldestKey = knownThreads.keys().next().value;
+      if (!oldestKey || oldestKey === key) break;
+      // 淘汰时同步取消官方订阅，不能只清本地 Map 后继续接收无用 stream。
+      forgetKnownThread(oldestKey);
+    }
+    return key;
+  }
+
   function handleMessage(message) {
     if (!message || typeof message !== "object") return;
     if (message.type === "response" && message.method === "initialize") {
@@ -235,7 +265,8 @@ function createOfficialLiveObserver(options = {}) {
       // 首个 snapshot 可能早于 Web 首屏 catalog；patch 没有可用 baseRevision，不能跨 renderer 重放。
       if (!knownThreads.has(key) && change?.type !== "snapshot") return;
       if (change?.type === "snapshot") {
-        if (!knownThreads.has(key)) knownThreads.set(key, { conversationId, hostId });
+        // snapshot 代表线程正在活跃，刷新 LRU，避免异常压力下优先淘汰当前 stream。
+        rememberKnownThread(conversationId, hostId);
         if (ownerClientId) activeOwners.set(key, ownerClientId);
         else activeOwners.delete(key);
         if (change.revision !== undefined && change.revision !== null) {
@@ -347,8 +378,7 @@ function createOfficialLiveObserver(options = {}) {
   function observeThread(conversationId, hostId = DEFAULT_HOST_ID) {
     if (typeof conversationId !== "string" || conversationId.length === 0) return false;
     const normalizedHostId = typeof hostId === "string" && hostId ? hostId : DEFAULT_HOST_ID;
-    const key = threadKey(conversationId, normalizedHostId);
-    knownThreads.set(key, { conversationId, hostId: normalizedHostId });
+    rememberKnownThread(conversationId, normalizedHostId);
     if (clientId) sendFollowing(conversationId, normalizedHostId, true);
     return true;
   }
@@ -367,12 +397,9 @@ function createOfficialLiveObserver(options = {}) {
       }
     }
     // sidebar bootstrap 是可见任务真源；移除不再可见的订阅，避免 knownThreads 只增不减。
-    for (const [key, thread] of knownThreads.entries()) {
+    for (const key of knownThreads.keys()) {
       if (visibleThreads.has(key)) continue;
-      knownThreads.delete(key);
-      activeOwners.delete(key);
-      activeRevisions.delete(key);
-      if (clientId) sendFollowing(thread.conversationId, thread.hostId, false);
+      forgetKnownThread(key);
     }
     return observed;
   }
@@ -420,6 +447,7 @@ module.exports = {
   __test: {
     DEFAULT_CLIENT_TYPE,
     DEFAULT_HOST_ID,
+    DEFAULT_MAX_KNOWN_THREADS,
     DEFAULT_MAX_RECONNECT_DELAY_MS,
     IPC_MAX_FRAME_BYTES,
     IPC_FRAME_HEADER_BYTES,

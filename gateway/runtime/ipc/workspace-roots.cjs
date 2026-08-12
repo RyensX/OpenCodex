@@ -81,14 +81,18 @@ function resolveWorkspaceRoot(input) {
   }
 }
 
-function createWorkspaceRootsService() {
+function createWorkspaceRootsService(options = {}) {
   // 动态 roots 只保存在本轮 gateway 内存里；官方 IPC 成功后仍由官方逻辑负责持久化项目。
   const dynamicRoots = new Set();
+  const maxRoots = Math.max(1, Number(options.maxRoots) || 1024);
 
   function registerWorkspaceRoot(root) {
     // 注册前强制复用同一套校验，避免 allowlist 接受未经确认的任意路径。
     const resolved = resolveWorkspaceRoot(root);
+    dynamicRoots.delete(resolved);
     dynamicRoots.add(resolved);
+    // 极端长会话只保留最近项目 allowlist；普通项目数远低于上限，旧项目重新打开会再次注册。
+    while (dynamicRoots.size > maxRoots) dynamicRoots.delete(dynamicRoots.values().next().value);
     return resolved;
   }
 

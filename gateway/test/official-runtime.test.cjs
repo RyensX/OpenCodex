@@ -10,7 +10,11 @@ const {
   encodeIpcFrame,
   __test: observerTest,
 } = require("../runtime/ipc/official-live-observer.cjs");
-const { __test } = require("../runtime/ipc/official-runtime.cjs");
+const {
+  __test,
+  requestContext,
+  setWsHub,
+} = require("../runtime/ipc/official-runtime.cjs");
 const { __test: portableRunnerTest } = require("../runner/platform/portable.cjs");
 
 function threadStreamStateMessage(conversationId, sourceClientId, change) {
@@ -34,6 +38,206 @@ test("bridges only the primary official renderer to the Web client", () => {
     __test.shouldBridgeOfficialWebContents(auxiliary, { id: 1, isDestroyed: () => true }),
     true
   );
+});
+
+test("raises only a bounded listener budget for the hidden official renderer", () => {
+  let maxListeners = 10;
+  const webContents = {
+    getMaxListeners: () => maxListeners,
+    setMaxListeners: (value) => {
+      maxListeners = value;
+    },
+  };
+
+  assert.equal(__test.configureOfficialWebContentsListenerBudget(webContents), true);
+  assert.equal(maxListeners, 64);
+  assert.equal(__test.configureOfficialWebContentsListenerBudget(webContents), false);
+  assert.equal(__test.configureOfficialWebContentsListenerBudget({}), false);
+});
+
+test("bounds stalled official IPC routes and refreshes their LRU order", () => {
+  const routes = new Map();
+  const summaries = new Map();
+  __test.storeBoundedRequestRoute(routes, summaries, "request-1", "client-1", { url: "/one" }, 2);
+  __test.storeBoundedRequestRoute(routes, summaries, "request-2", "client-2", { url: "/two" }, 2);
+  __test.storeBoundedRequestRoute(routes, summaries, "request-1", "client-1b", { url: "/one-new" }, 2);
+  __test.storeBoundedRequestRoute(routes, summaries, "request-3", "client-3", { url: "/three" }, 2);
+
+  assert.deepEqual(Array.from(routes.entries()), [
+    ["request-1", "client-1b"],
+    ["request-3", "client-3"],
+  ]);
+  assert.equal(summaries.has("request-2"), false);
+  assert.equal(summaries.get("request-1").url, "/one-new");
+});
+
+test("bounds route id extraction across wide and cyclic IPC arguments", () => {
+  assert.equal(__test.routeIdFromValue([{ payload: { requestId: "request-nested" } }]), "request-nested");
+  let reads = 0;
+  const wide = new Proxy(Array.from({ length: 50_000 }, () => ({})), {
+    get(target, key, receiver) {
+      if (/^\d+$/.test(String(key))) reads += 1;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  assert.equal(__test.routeIdFromValue(wide), "");
+  assert.ok(reads > 0 && reads <= 256, `route scan read ${reads} array items`);
+  const cyclic = {};
+  cyclic.payload = cyclic;
+  assert.equal(__test.routeIdFromValue(cyclic), "");
+});
+
+test("omits only a recoverable duplicate args copy from outgoing WebSocket envelopes", () => {
+  const payload = { type: "mcp-notification", params: { apps: [1, 2, 3] } };
+
+  assert.deepEqual(__test.outgoingWsEnvelope("message", [payload]), {
+    channel: "message",
+    payload,
+  });
+  assert.deepEqual(__test.outgoingWsEnvelope("message", []), {
+    channel: "message",
+    payload: null,
+    args: [],
+  });
+  assert.deepEqual(__test.outgoingWsEnvelope("message", [undefined]), {
+    channel: "message",
+    payload: null,
+    args: [undefined],
+  });
+  assert.deepEqual(__test.outgoingWsEnvelope("message", ["first", "second"]), {
+    channel: "message",
+    payload: ["first", "second"],
+    args: ["first", "second"],
+  });
+});
+
+test("compacts only renderer-unused app catalog subfields without mutating official payloads", () => {
+  const entry = {
+    id: "app-1",
+    name: "App One",
+    description: "kept",
+    iconAssets: {
+      "256_square": "square-light",
+      "256_circle": "circle-light",
+      original: "original-light",
+    },
+    iconDarkAssets: {
+      "256_square": "square-dark",
+      "256_circle": "circle-dark",
+    },
+    appMetadata: {
+      categories: ["productivity"],
+      firstPartyType: "first-party",
+      review: { status: "approved" },
+      screenshots: null,
+    },
+  };
+  const payload = {
+    type: "mcp-response",
+    message: { id: "request-1", result: { data: [entry], nextCursor: null } },
+  };
+
+  const compacted = __test.compactOfficialAppCatalogPayload(
+    "codex_desktop:message-for-view",
+    payload,
+    { requestMethod: "app/list" }
+  );
+
+  assert.notEqual(compacted, payload);
+  assert.notEqual(compacted.message.result.data[0], entry);
+  assert.deepEqual(compacted.message.result.data[0], {
+    id: "app-1",
+    name: "App One",
+    description: "kept",
+    iconAssets: { "256_square": "square-light" },
+    iconDarkAssets: { "256_square": "square-dark" },
+    appMetadata: {
+      categories: ["productivity"],
+      firstPartyType: "first-party",
+    },
+  });
+  assert.equal(entry.iconAssets["256_circle"], "circle-light");
+  assert.equal(entry.appMetadata.review.status, "approved");
+  assert.equal(
+    __test.compactOfficialAppCatalogPayload(
+      "codex_desktop:message-for-view",
+      payload,
+      { requestMethod: "thread/list" }
+    ),
+    payload
+  );
+});
+
+test("compacts full app catalog update notifications with the same renderer shape", () => {
+  const payload = {
+    type: "mcp-notification",
+    method: "app/list/updated",
+    params: {
+      data: [
+        {
+          id: "app-2",
+          iconAssets: { "256_square": "square", "256_circle": "circle" },
+          iconDarkAssets: null,
+          appMetadata: { categories: ["tools"], review: null },
+        },
+      ],
+    },
+  };
+
+  const compacted = __test.compactOfficialAppCatalogPayload(
+    "codex_desktop:message-for-view",
+    payload
+  );
+
+  assert.deepEqual(compacted.params.data[0], {
+    id: "app-2",
+    iconAssets: { "256_square": "square" },
+    iconDarkAssets: null,
+    appMetadata: { categories: ["tools"] },
+  });
+  assert.equal(payload.params.data[0].iconAssets["256_circle"], "circle");
+});
+
+test("never broadcasts a targeted official response when its browser is offline", (t) => {
+  const sends = [];
+  const broadcasts = [];
+  setWsHub({
+    broadcast(payload) {
+      broadcasts.push(payload);
+      return 1;
+    },
+    sendTo(clientId, payload) {
+      sends.push({ clientId, payload });
+      return false;
+    },
+  });
+  t.after(() => setWsHub(null));
+
+  const delivered = requestContext.run({ clientId: "offline-client" }, () =>
+    __test.routeOfficialWebContentsSend("fetch-response", [
+      { type: "fetch-response", requestId: "offline-request", responseType: "success" },
+    ])
+  );
+
+  assert.equal(delivered, false);
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].clientId, "offline-client");
+  assert.equal(broadcasts.length, 0);
+
+  const hiddenRuntimeResponseDelivered = __test.routeOfficialWebContentsSend(
+    "codex_desktop:message-for-view",
+    [
+      {
+        type: "mcp-response",
+        message: { id: "hidden-runtime-thread-list", result: { data: [] } },
+      },
+    ]
+  );
+  assert.equal(hiddenRuntimeResponseDelivered, false);
+  assert.equal(broadcasts.length, 0);
+
+  __test.routeOfficialWebContentsSend("account-updated", [{ type: "account-updated" }]);
+  assert.equal(broadcasts.length, 1);
 });
 
 test("remote file manager interception condition is target and host based", () => {
@@ -275,6 +479,62 @@ test("sidebar bootstrap reconciles threads that are no longer visible", () => {
   });
 
   assert.deepEqual([...observer.__test.getKnownThreads().keys()], ["local\u0000thread-kept", "local\u0000thread-new"]);
+  observer.stop();
+});
+
+test("official observer bounds known threads and unsubscribes the least recently used stream", () => {
+  const { EventEmitter } = require("node:events");
+  const writes = [];
+  const socket = new EventEmitter();
+  socket.writable = true;
+  socket.destroyed = false;
+  socket.write = (frame) => writes.push(JSON.parse(frame.subarray(4).toString("utf8")));
+  socket.destroy = () => {
+    socket.destroyed = true;
+  };
+  const observer = createOfficialLiveObserver({
+    socketPaths: ["/tmp/original-codex.sock"],
+    socketFactory: () => socket,
+    reconnectDelayMs: -1,
+    maxKnownThreads: 2,
+  });
+
+  observer.start();
+  socket.emit("connect");
+  socket.emit(
+    "data",
+    encodeIpcFrame({
+      type: "response",
+      method: "initialize",
+      resultType: "success",
+      handledByClientId: "observer-client",
+    })
+  );
+  observer.observeThread("thread-one");
+  observer.observeThread("thread-two");
+  observer.__test.handleMessage({
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-owner",
+    params: {
+      conversationId: "thread-two",
+      hostId: "local",
+      change: { type: "snapshot", revision: 1 },
+    },
+  });
+  // 再次观察 thread-one 会刷新 LRU，因此第三条线程应淘汰 thread-two。
+  observer.observeThread("thread-one");
+  observer.observeThread("thread-three");
+
+  assert.deepEqual([...observer.__test.getKnownThreads().keys()], ["local\u0000thread-one", "local\u0000thread-three"]);
+  assert.equal(observer.__test.getActiveOwners().has("local\u0000thread-two"), false);
+  assert.deepEqual(
+    writes
+      .filter((message) => message.method === "thread-stream-following-changed")
+      .slice(-2)
+      .map((message) => [message.params.conversationId, message.params.following]),
+    [["thread-two", false], ["thread-three", true]]
+  );
   observer.stop();
 });
 
@@ -558,7 +818,6 @@ test("uses the renderer-specific invalidation shape for Web and hidden native re
   assert.deepEqual(__test.threadListInvalidationEnvelope(), {
     channel: "codex_desktop:message-for-view",
     payload,
-    args: [payload],
   });
   assert.deepEqual(__test.threadListInvalidationRequest(), {
     type: "query-cache-invalidate",

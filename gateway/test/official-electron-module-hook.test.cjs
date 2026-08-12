@@ -49,11 +49,12 @@ test("shared Electron wrapper shadows immutable Tray and Notification exports", 
   };
   const electronHook = createOfficialElectronModuleHook({ moduleLoader });
   const published = [];
+  let delivered = 1;
 
   installOfficialNotificationHook(electronModule, {
     publishNotification(payload) {
       published.push(payload);
-      return 1;
+      return delivered;
     },
     registerElectronOverride: electronHook.registerOverride,
   });
@@ -97,6 +98,17 @@ test("shared Electron wrapper shadows immutable Tray and Notification exports", 
   assert.equal(published.length, 1);
   assert.equal(officialNotificationHookStatus().installed, true);
   assert.equal(officialNotificationHookStatus().requireHookInstalled, true);
+  assert.equal(officialNotificationHookStatus().activeCount, 1);
+  notification.close();
+  assert.equal(officialNotificationHookStatus().activeCount, 0);
+
+  delivered = 0;
+  const droppedNotification = new officialElectron.Notification({ title: "Offline" });
+  droppedNotification.show();
+  // 没有任何浏览器接收时仍保留 Electron 对象语义，但不能让全局事件路由表无限增长。
+  assert.equal(droppedNotification.destroyed, false);
+  assert.equal(officialNotificationHookStatus().activeCount, 0);
+  droppedNotification.close();
   assert.equal(hiddenTrayHookStatus().installed, true);
   assert.equal(hiddenTrayHookStatus().createdCount, 1);
 });

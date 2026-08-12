@@ -8,6 +8,9 @@ const {
 const { assistantFinalFromItems, assistantFinalFromTurn, buildClassifierPrompt } = require("./context.cjs");
 const { defaultTierDefinitions, enabledTierDefinitions } = require("./tiers.cjs");
 
+const CLASSIFIER_OBSERVED_AGENT_ITEMS_MAX = 16;
+const CLASSIFIER_SEMAPHORE_MAX_QUEUED = 256;
+
 function classifierOutputSchema(automaticEffortTiers, tiers = defaultTierDefinitions()) {
   const activeTiers = enabledTierDefinitions(tiers);
   const tierIds = activeTiers.map((tier) => tier.id);
@@ -60,9 +63,10 @@ class ClassificationError extends Error {
   }
 }
 
-function createSemaphore(limit) {
+function createSemaphore(limit, options = {}) {
   let active = 0;
   const queue = [];
+  const maxQueued = Math.max(1, Number(options.maxQueued) || CLASSIFIER_SEMAPHORE_MAX_QUEUED);
 
   function dispatch() {
     while (active < limit && queue.length > 0) {
@@ -81,10 +85,17 @@ function createSemaphore(limit) {
   }
 
   function acquire(timeoutMs) {
+    if (queue.length >= maxQueued) {
+      // 分类已持续阻塞时立即拒绝额外排队，调用方会走既有 fallback，不能继续保留请求上下文。
+      return Promise.reject(new ClassificationError("Classifier concurrency queue is full", "capacity"));
+    }
     return new Promise((resolve, reject) => {
       const entry = { resolve, reject, expired: false, timer: null };
       entry.timer = setTimeout(() => {
         entry.expired = true;
+        // 活跃分类长期未释放时也要立即移除超时等待项，不能把已拒绝 Promise 留在队列里。
+        const queuedIndex = queue.indexOf(entry);
+        if (queuedIndex >= 0) queue.splice(queuedIndex, 1);
         reject(new ClassificationError("Classifier concurrency queue timed out", "timeout"));
       }, Math.max(1, timeoutMs));
       queue.push(entry);
@@ -228,6 +239,8 @@ function createClassifier({ transport, timeoutMs = CLASSIFICATION_TIMEOUT_MS, co
     try {
       await transport.request("thread/delete", { threadId }, { timeoutMs: 1_500 });
     } catch {}
+    // interrupt/delete 失败时终态通知可能永远不到；分类器已结束后必须显式释放内部 turn 路由。
+    transport.unregisterInternalTurn?.(turnId);
     transport.unregisterInternalThread(threadId);
   }
 
@@ -274,7 +287,11 @@ function createClassifier({ transport, timeoutMs = CLASSIFICATION_TIMEOUT_MS, co
       stopObserving = transport.observeNotifications((message) => {
         if (message?.method !== "item/completed" || message?.params?.threadId !== threadId) return;
         const item = message.params.item;
-        if (item?.type === "agentMessage" && typeof item.text === "string") observedAgentItems.push(item);
+        if (item?.type === "agentMessage" && typeof item.text === "string") {
+          observedAgentItems.push(item);
+          // 分类输出正常只有一个最终消息；异常流式风暴只保留最近候选，避免线程超时前无限占用内存。
+          if (observedAgentItems.length > CLASSIFIER_OBSERVED_AGENT_ITEMS_MAX) observedAgentItems.shift();
+        }
       });
 
       const completionPromise = transport.waitForNotification(

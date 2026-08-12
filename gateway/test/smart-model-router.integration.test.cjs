@@ -7,6 +7,7 @@ const { PassThrough } = require("node:stream");
 const test = require("node:test");
 const { listPluginManifests } = require("../runtime/core/plugin-assets.cjs");
 const { createSmartModelRouterService } = require("../runtime/model-router/service.cjs");
+const { createAppServerTransport } = require("../runtime/model-router/transport.cjs");
 const { createPluginConfigStore } = require("../runtime/plugins/config-store.cjs");
 
 function fakeChild() {
@@ -119,6 +120,50 @@ function createDelayedClassifierTransport() {
     },
   };
 }
+
+test("internal router terminal failures release turn ids and bound thread tombstones", async (t) => {
+  const transport = createAppServerTransport();
+  const fake = fakeChild();
+  const internalRequests = [];
+  observeLines(fake.serverInput, (message) => internalRequests.push(message));
+  transport.decorateChild(fake.child);
+  t.after(() => fake.child.emit("close"));
+
+  const request = transport.request("turn/start", { threadId: "classifier-thread" });
+  const sent = await waitFor(() => internalRequests.find((message) => message.method === "turn/start"));
+  fake.serverOutput.write(
+    `${JSON.stringify({ id: sent.id, result: { turn: { id: "classifier-turn-failed" } } })}\n`
+  );
+  await request;
+  assert.deepEqual(Array.from(transport.internalTurnIds()), ["classifier-turn-failed"]);
+
+  transport.unregisterInternalTurn("classifier-turn-failed");
+  assert.equal(transport.internalTurnIds().size, 0);
+
+  const secondRequest = transport.request("turn/start", { threadId: "classifier-thread" });
+  const secondSent = await waitFor(
+    () => internalRequests.filter((message) => message.method === "turn/start")[1]
+  );
+  fake.serverOutput.write(
+    `${JSON.stringify({ id: secondSent.id, result: { turn: { id: "classifier-turn-terminal" } } })}\n`
+  );
+  await secondRequest;
+
+  fake.serverOutput.write(
+    `${JSON.stringify({
+      method: "turn/failed",
+      params: { threadId: "classifier-thread", turn: { id: "classifier-turn-terminal" } },
+    })}\n`
+  );
+  await waitFor(() => transport.internalTurnIds().size === 0);
+
+  for (let index = 0; index < 513; index += 1) {
+    transport.registerInternalThread(`classifier-${index}`);
+    transport.unregisterInternalThread(`classifier-${index}`);
+  }
+  assert.equal(transport.isInternalThreadId("classifier-0"), false);
+  assert.equal(transport.isInternalThreadId("classifier-512"), true);
+});
 
 test("Auto turn is classified on the same App Server, rewritten, hidden and safely falls back", async (t) => {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-router-integration-"));

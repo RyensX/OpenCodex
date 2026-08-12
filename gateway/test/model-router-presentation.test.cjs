@@ -1,6 +1,10 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { createSmartSchedulingPresentation } = require("../runtime/model-router/presentation.cjs");
+const {
+  MAX_PROTOCOL_SCAN_NODES,
+  createSmartSchedulingPresentation,
+  visitProtocolMessages,
+} = require("../runtime/model-router/presentation.cjs");
 
 function fakeRouter() {
   let listener = null;
@@ -23,8 +27,15 @@ function fakeRouter() {
 test("presentation correlates turns and model selections and sends safe route state only to their client", () => {
   const router = fakeRouter();
   const sent = [];
+  let removedListener = null;
   const presentation = createSmartSchedulingPresentation({
     modelRouter: router,
+    onClientRemoved(listener) {
+      removedListener = listener;
+      return () => {
+        removedListener = null;
+      };
+    },
     sendTo: (clientId, payload) => sent.push({ clientId, payload }),
   });
 
@@ -86,5 +97,36 @@ test("presentation correlates turns and model selections and sends safe route st
   assert.equal(sent[3].payload.event.status, "idle");
   assert.equal(sent[3].payload.event.route.displayName, "GPT-5.6-Luna");
   assert.equal(JSON.stringify(sent).includes("private"), false);
+  removedListener({ clientId: "client-1" });
+  router.emit({ status: "classifying", threadId: "thread-1" });
+  assert.equal(sent.length, 4);
+  assert.deepEqual(presentation.snapshot(), { trackedThreadCount: 2 });
   presentation.dispose();
+  assert.equal(removedListener, null);
+});
+
+test("presentation protocol traversal bounds wide and cyclic batches", () => {
+  let reads = 0;
+  let visits = 0;
+  const wide = new Proxy(Array.from({ length: 50_000 }, () => ({ method: "thread/read" })), {
+    get(target, key, receiver) {
+      if (/^\d+$/.test(String(key))) reads += 1;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  visitProtocolMessages(wide, () => {
+    visits += 1;
+  });
+  assert.ok(reads > 0);
+  assert.ok(reads <= MAX_PROTOCOL_SCAN_NODES);
+  assert.ok(visits <= MAX_PROTOCOL_SCAN_NODES);
+
+  const cyclic = { method: "turn/start" };
+  cyclic.payload = cyclic;
+  let cyclicVisits = 0;
+  visitProtocolMessages(cyclic, () => {
+    cyclicVisits += 1;
+  });
+  // envelope 环只能访问一次，不能在深度上限前重复处理同一个请求。
+  assert.equal(cyclicVisits, 1);
 });

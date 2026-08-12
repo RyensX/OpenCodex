@@ -5,16 +5,39 @@
 
   const TOOLTIP_SELECTOR = '[role="tooltip"]';
   const TOOLTIP_DISMISS_EVENT = "codex:dismiss-tooltips";
+  const TOOLTIP_TRIGGER_SELECTOR = [
+    "button",
+    "a",
+    "input",
+    "select",
+    "textarea",
+    "[role]",
+    "[tabindex]",
+    "[title]",
+    "[aria-label]",
+    "[aria-describedby]",
+    '[data-slot*="tooltip"]',
+  ].join(",");
 
   let lastPointer = null;
   let pendingFrame = 0;
+  let tooltipPresent = !!document.querySelector(TOOLTIP_SELECTOR);
+  let tooltipObserver = null;
+  let tooltipObserverExpiryTimer = 0;
+  const TOOLTIP_OBSERVER_SESSION_MS = 2_500;
 
   function visibleTooltips() {
-    return Array.from(document.querySelectorAll(TOOLTIP_SELECTOR));
+    const tooltips = Array.from(document.querySelectorAll(TOOLTIP_SELECTOR));
+    tooltipPresent = tooltips.length > 0;
+    return tooltips;
   }
 
   function dispatchOfficialTooltipDismiss() {
-    if (!document.querySelector(TOOLTIP_SELECTOR)) return;
+    if (!tooltipPresent) return;
+    if (!document.querySelector(TOOLTIP_SELECTOR)) {
+      tooltipPresent = false;
+      return;
+    }
 
     if (typeof w.Event === "function") {
       w.dispatchEvent(new w.Event(TOOLTIP_DISMISS_EVENT));
@@ -30,12 +53,14 @@
     return !!(parent && child && (parent === child || parent.contains(child)));
   }
 
-  function tooltipTriggerElements(tooltipId) {
-    if (!tooltipId) return [];
-    return Array.from(document.querySelectorAll("[aria-describedby]")).filter((element) => {
-      const describedBy = String(element.getAttribute("aria-describedby") || "");
-      return describedBy.split(/\s+/).includes(tooltipId);
-    });
+  function targetReferencesTooltip(target, tooltipId) {
+    if (!target || !tooltipId) return false;
+    // 指针/焦点目标只可能属于其祖先 trigger；沿局部祖先链检查，避免每帧扫描全页 aria-describedby。
+    for (let node = target; node && node.nodeType === 1; node = node.parentElement) {
+      const describedBy = String(node.getAttribute?.("aria-describedby") || "");
+      if (describedBy.split(/\s+/).includes(tooltipId)) return true;
+    }
+    return false;
   }
 
   function targetBelongsToOpenTooltip(target, tooltips) {
@@ -44,9 +69,7 @@
     for (const tooltip of tooltips) {
       if (containsElement(tooltip, target)) return true;
 
-      for (const trigger of tooltipTriggerElements(tooltip.id)) {
-        if (containsElement(trigger, target)) return true;
-      }
+      if (targetReferencesTooltip(target, tooltip.id)) return true;
     }
 
     return false;
@@ -80,12 +103,14 @@
   }
 
   function rememberPointer(event) {
+    // 没有 tooltip、也没有等待挂载的短会话时不记录高频 pointermove，尤其避免触摸滚动持续分配对象。
+    if (!tooltipPresent && !tooltipObserverExpiryTimer) return;
     lastPointer = {
       x: event.clientX,
       y: event.clientY,
       target: event.target && event.target.nodeType === 1 ? event.target : null,
     };
-    scheduleDismissCheck();
+    if (tooltipPresent) scheduleDismissCheck();
   }
 
   function dismissOnDocumentExit(event) {
@@ -95,32 +120,74 @@
   function nodeHasTooltip(node) {
     if (!node || node.nodeType !== 1) return false;
     if (typeof node.matches === "function" && node.matches(TOOLTIP_SELECTOR)) return true;
+    if (!node.firstElementChild) return false;
     return typeof node.querySelector === "function" && !!node.querySelector(TOOLTIP_SELECTOR);
+  }
+
+  function stopTooltipObservation() {
+    tooltipObserver?.disconnect();
+    if (tooltipObserverExpiryTimer) w.clearTimeout(tooltipObserverExpiryTimer);
+    tooltipObserverExpiryTimer = 0;
+    if (!tooltipPresent) lastPointer = null;
   }
 
   function handleTooltipMutations(mutations) {
     for (const mutation of mutations) {
-      for (const node of mutation.addedNodes) {
+      for (const node of mutation.addedNodes || []) {
         if (nodeHasTooltip(node)) {
-          scheduleDismissCheck();
+          tooltipPresent = !!document.querySelector(TOOLTIP_SELECTOR);
+          if (tooltipPresent) {
+            stopTooltipObservation();
+            scheduleDismissCheck();
+          }
           return;
         }
       }
     }
   }
 
-  document.addEventListener("pointermove", rememberPointer, true);
-  document.addEventListener("mousemove", rememberPointer, true);
-  document.addEventListener("pointerout", dismissOnDocumentExit, true);
-  document.addEventListener("mouseout", dismissOnDocumentExit, true);
-  document.addEventListener("scroll", dispatchOfficialTooltipDismiss, true);
+  function mayOpenTooltip(event) {
+    // focusin 本身只来自可聚焦节点；pointerover 则过滤正文流式渲染产生的大量普通节点切换。
+    if (event?.type === "focusin") return true;
+    const target = event?.target;
+    if (!target || target.nodeType !== 1) return false;
+    if (typeof target.closest !== "function") return true;
+    return !!target.closest(TOOLTIP_TRIGGER_SELECTOR);
+  }
+
+  function observeForTooltipMount(event) {
+    if (!mayOpenTooltip(event)) return;
+    if (tooltipPresent && document.querySelector(TOOLTIP_SELECTOR)) return;
+    tooltipPresent = false;
+    if (typeof w.MutationObserver !== "function") return;
+    // 同一交互会话不反复断开、重连或续期，避免鼠标经过嵌套按钮节点时持续扫描全页。
+    if (tooltipObserverExpiryTimer) {
+      rememberPointer(event);
+      return;
+    }
+    tooltipObserver ||= new w.MutationObserver(handleTooltipMutations);
+    tooltipObserver.disconnect();
+    tooltipObserver.observe(document.documentElement, { childList: true, subtree: true });
+    // Tooltip 只会紧随 hover/focus 挂载；有限会话避免正文流式更新永久进入观察队列。
+    tooltipObserverExpiryTimer = w.setTimeout(stopTooltipObservation, TOOLTIP_OBSERVER_SESSION_MS);
+    if (event?.type !== "focusin") rememberPointer(event);
+  }
+
+  if (typeof w.PointerEvent === "function") {
+    document.addEventListener("pointermove", rememberPointer, { capture: true, passive: true });
+    document.addEventListener("pointerover", observeForTooltipMount, { capture: true, passive: true });
+    document.addEventListener("pointerout", dismissOnDocumentExit, { capture: true, passive: true });
+  } else {
+    // 老浏览器没有 PointerEvent 时才使用鼠标事件，避免现代浏览器为同一次移动执行两遍逻辑。
+    document.addEventListener("mousemove", rememberPointer, { capture: true, passive: true });
+    document.addEventListener("mouseover", observeForTooltipMount, { capture: true, passive: true });
+    document.addEventListener("mouseout", dismissOnDocumentExit, { capture: true, passive: true });
+  }
+  document.addEventListener("focusin", observeForTooltipMount, true);
+  document.addEventListener("scroll", dispatchOfficialTooltipDismiss, { capture: true, passive: true });
   w.addEventListener("blur", dispatchOfficialTooltipDismiss);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") dispatchOfficialTooltipDismiss();
   });
 
-  if (typeof w.MutationObserver === "function") {
-    const observer = new w.MutationObserver(handleTooltipMutations);
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-  }
 })();

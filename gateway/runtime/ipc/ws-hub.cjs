@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 let WebSocketServer = null;
 try {
   ({ WebSocketServer } = require("ws"));
@@ -18,20 +19,36 @@ const WS_DEFLATE_THRESHOLD = Number(process.env.OPENCODEX_WS_DEFLATE_THRESHOLD |
 const WS_DEFLATE_CONCURRENCY = Number(process.env.OPENCODEX_WS_DEFLATE_CONCURRENCY || 4);
 const WS_DEFLATE_LEVEL = Number(process.env.OPENCODEX_WS_DEFLATE_LEVEL || 3);
 const WS_DEBUG_ENABLED = process.env.OPENCODEX_DEBUG_WS === "1";
+const WS_MAX_CLIENTS = Math.max(1, Number(process.env.OPENCODEX_WS_MAX_CLIENTS) || 128);
+const WS_MAX_PAYLOAD_BYTES = Math.max(
+  1024 * 1024,
+  Number(process.env.OPENCODEX_WS_MAX_PAYLOAD_BYTES) || 64 * 1024 * 1024
+);
+const WS_MAX_BUFFERED_BYTES = Math.max(
+  1024,
+  Number(process.env.OPENCODEX_WS_MAX_BUFFERED_BYTES) || 64 * 1024 * 1024
+);
+const APP_HOST_RELAY_MAX_ENTRIES = Math.max(1, Number(process.env.OPENCODEX_APP_HOST_MAX_RELAYS) || 64);
+const ROUTE_ID_SCAN_MAX_NODES = 128;
+const BROADCAST_DEDUPE_MAX_ENTRIES_PER_SOCKET = 16;
+const BROADCAST_DEDUPE_MAX_WINDOW_MS = 60_000;
 
 function byteLength(value) {
   // WebSocket bufferedAmount 用字节衡量；日志里也统一按 UTF-8 字节估算，方便对齐网络层现象。
   return Buffer.byteLength(String(value || ""), "utf-8");
 }
 
-function routeIdFromPayload(value, depth = 0, seen = new WeakSet()) {
+function routeIdFromPayload(value, depth = 0, state = null) {
   // 官方 IPC 版本变化时 requestId 可能藏在 payload/request/response/body 里，递归提取比写死类型更稳。
-  if (!value || typeof value !== "object" || depth > 4) return "";
-  if (seen.has(value)) return "";
-  seen.add(value);
+  const traversal = state || { remaining: ROUTE_ID_SCAN_MAX_NODES, seen: new WeakSet() };
+  if (!value || typeof value !== "object" || depth > 4 || traversal.remaining <= 0) return "";
+  if (traversal.seen.has(value)) return "";
+  traversal.seen.add(value);
+  traversal.remaining -= 1;
   if (Array.isArray(value)) {
-    for (const item of value) {
-      const nested = routeIdFromPayload(item, depth + 1, seen);
+    const childCount = Math.min(value.length, traversal.remaining);
+    for (let index = 0; index < childCount && traversal.remaining > 0; index += 1) {
+      const nested = routeIdFromPayload(value[index], depth + 1, traversal);
       if (nested) return nested;
     }
     return "";
@@ -40,7 +57,7 @@ function routeIdFromPayload(value, depth = 0, seen = new WeakSet()) {
   if (value.request && typeof value.request === "object" && value.request.id != null) return String(value.request.id);
   if (value.id != null && (depth > 0 || value.method || value.jsonrpc || value.type)) return String(value.id);
   for (const key of ["payload", "message", "response", "body"]) {
-    const nested = routeIdFromPayload(value[key], depth + 1, seen);
+    const nested = routeIdFromPayload(value[key], depth + 1, traversal);
     if (nested) return nested;
   }
   return "";
@@ -59,7 +76,12 @@ function wsPayloadSummary(payload) {
     if (payload.type && typeof payload.type === "string") summary.type = payload.type;
     const requestId = routeIdFromPayload(payload);
     if (requestId) summary.requestId = requestId;
-    summary.payloadType = nestedPayload && typeof nestedPayload === "object" ? `object(${Object.keys(nestedPayload).length})` : typeof nestedPayload;
+    // 诊断形状不枚举完整对象键集，避免大快照在发送失败时又被额外全量扫描。
+    summary.payloadType = Array.isArray(nestedPayload)
+      ? `array(${nestedPayload.length})`
+      : nestedPayload && typeof nestedPayload === "object"
+        ? "object"
+        : typeof nestedPayload;
   }
   return summary;
 }
@@ -81,13 +103,30 @@ function wsCompressionOptions() {
 
 // ws-hub 不理解官方 IPC 协议，只负责维护连接和按 clientId 投递 JSON 消息。
 /** 创建 WebSocket hub，负责浏览器连接管理和 gateway 事件分发。 */
-function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAuthed, observeAppHostFrame }) {
+function createWsHub(
+  server,
+  {
+    createAppHostRelay,
+    handleNotificationEvent,
+    isAuthed,
+    maxAppHostRelays = APP_HOST_RELAY_MAX_ENTRIES,
+    maxBufferedBytes = WS_MAX_BUFFERED_BYTES,
+    maxClients = WS_MAX_CLIENTS,
+    maxPayloadBytes = WS_MAX_PAYLOAD_BYTES,
+    observeAppHostFrame,
+  }
+) {
   if (!WebSocketServer) {
     throw new Error("The ws package is required for gateway websocket support.");
   }
 
   const perMessageDeflate = wsCompressionOptions();
-  const wss = new WebSocketServer({ noServer: true, perMessageDeflate });
+  const effectiveMaxBufferedBytes = Math.max(1024, Number(maxBufferedBytes) || WS_MAX_BUFFERED_BYTES);
+  const wss = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate,
+    maxPayload: Math.max(1024 * 1024, Number(maxPayloadBytes) || WS_MAX_PAYLOAD_BYTES),
+  });
   if (WS_DEBUG_ENABLED) {
     // 压缩配置只在排障模式打印；压缩本身始终按上面的配置生效。
     diagnosticLog("ws-hub", "compression_configured", {
@@ -102,6 +141,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   // clientsById 是定向回包索引；clients 是广播索引，二者都需要维护。
   const clientsById = new Map();
   const clientReadyListeners = new Set();
+  const clientRemovedListeners = new Set();
   let lastAuthRejectLogAtMs = 0;
   let suppressedAuthRejectCount = 0;
   const appHostTraffic = new Map();
@@ -217,6 +257,27 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     );
   }
 
+  function terminateBackpressuredSocket(socket, route) {
+    const bufferedAmount = Math.max(0, Number(socket?.bufferedAmount || 0));
+    if (bufferedAmount <= effectiveMaxBufferedBytes) return false;
+    if (!socket.__opencodexBackpressureTerminated) {
+      socket.__opencodexBackpressureTerminated = true;
+      // 慢连接已严重积压时立即释放 ws 内部发送队列；浏览器现有重连会重新同步权威状态。
+      diagnosticWarn("ws-hub", "client_backpressure_terminated", {
+        bufferedAmount,
+        clientId: shortId(socketClientId(socket)),
+        maxBufferedBytes: effectiveMaxBufferedBytes,
+        remoteAddress: socketRemoteAddress(socket),
+        route,
+      });
+      try {
+        if (typeof socket.terminate === "function") socket.terminate();
+        else socket.close?.(1013, "backpressure");
+      } catch {}
+    }
+    return true;
+  }
+
   function sendPrepared(socket, payload, message, options = {}) {
     /**
      * 所有下行 WS 消息最终走这里：
@@ -224,6 +285,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
      * - OPENCODEX_DEBUG_WS=1 时才读取 bufferedAmount、统计字节数、挂 send callback。
      */
     const route = options.route || "send";
+    if (terminateBackpressuredSocket(socket, route)) return false;
     const stringifyMs = options.stringifyMs || 0;
     const messageBytes = WS_DEBUG_ENABLED ? byteLength(message) : 0;
     const appHostInfo = WS_DEBUG_ENABLED ? appHostPayloadInfo(payload) : null;
@@ -290,9 +352,45 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return { message, stringifyMs: Date.now() - startedAtMs };
   }
 
+  function broadcastDedupeCandidate(message, options) {
+    const key = typeof options.dedupeKey === "string" ? options.dedupeKey.slice(0, 160) : "";
+    if (!key) return null;
+    const windowMs = Math.min(
+      BROADCAST_DEDUPE_MAX_WINDOW_MS,
+      Math.max(1, Number(options.dedupeWindowMs) || 1)
+    );
+    // 基于最终序列化帧做强摘要；只有字节完全相同的广播才允许跳过，业务字段变化会立即得到不同摘要。
+    const fingerprint = crypto.createHash("sha256").update(message).digest("base64url");
+    return { fingerprint, key, nowMs: Date.now(), windowMs };
+  }
+
+  function socketHasRecentDuplicate(socket, candidate) {
+    if (!candidate) return false;
+    const recent = socket.__opencodexRecentBroadcastFingerprints;
+    const previous = recent?.get(candidate.key);
+    return !!(
+      previous &&
+      previous.fingerprint === candidate.fingerprint &&
+      candidate.nowMs - previous.atMs <= candidate.windowMs
+    );
+  }
+
+  function rememberSocketBroadcast(socket, candidate) {
+    if (!candidate) return;
+    const recent =
+      socket.__opencodexRecentBroadcastFingerprints ||
+      (socket.__opencodexRecentBroadcastFingerprints = new Map());
+    recent.delete(candidate.key);
+    recent.set(candidate.key, { atMs: candidate.nowMs, fingerprint: candidate.fingerprint });
+    while (recent.size > BROADCAST_DEDUPE_MAX_ENTRIES_PER_SOCKET) {
+      recent.delete(recent.keys().next().value);
+    }
+  }
+
   function safeSend(socket, payload, options = {}) {
     // 所有 WebSocket 下行都走这个出口，便于统一压日志和记录投递失败。
     if (!socket || socket.readyState !== socket.OPEN) return false;
+    if (terminateBackpressuredSocket(socket, options.route || "send")) return false;
     try {
       const { message, stringifyMs } = stringifyForWs(payload);
       const sent = sendPrepared(socket, payload, message, { ...options, route: options.route || "send", stringifyMs });
@@ -333,7 +431,19 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     closeAppHostRelays(ws, "client_disconnected");
     clients.delete(ws);
     if (ws.__codexWebClientId && clientsById.get(ws.__codexWebClientId) === ws) {
-      clientsById.delete(ws.__codexWebClientId);
+      const clientId = ws.__codexWebClientId;
+      clientsById.delete(clientId);
+      for (const listener of clientRemovedListeners) {
+        try {
+          // 只在当前有效映射真正移除时通知；旧 socket 关闭不能清理已重连的新页面。
+          listener({ clientId, socket: ws });
+        } catch (error) {
+          diagnosticWarn("ws-hub", "client_removed_listener_failed", {
+            clientId: shortId(clientId),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
     }
   }
 
@@ -354,11 +464,24 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
 
   /** 向所有在线浏览器广播 gateway 消息。 */
   function broadcast(payload, options = {}) {
-    const { message, stringifyMs } = stringifyForWs(payload);
-    let sent = 0;
+    const readySockets = [];
     for (const socket of clients) {
       if (socket.readyState !== socket.OPEN) continue;
-      if (sendPrepared(socket, payload, message, { ...options, route: "broadcast", stringifyMs })) sent += 1;
+      if (terminateBackpressuredSocket(socket, "broadcast")) continue;
+      readySockets.push(socket);
+    }
+    // 无在线浏览器时官方后台广播无需 JSON.stringify，大 snapshot 尤其不能白占主线程和堆。
+    if (readySockets.length === 0) return 0;
+    const { message, stringifyMs } = stringifyForWs(payload);
+    const dedupeCandidate = broadcastDedupeCandidate(message, options);
+    let sent = 0;
+    for (const socket of readySockets) {
+      // 新连接没有历史摘要，仍会收到当前通知；只跳过该 socket 在短窗口内已经成功收到的完全相同帧。
+      if (socketHasRecentDuplicate(socket, dedupeCandidate)) continue;
+      if (sendPrepared(socket, payload, message, { ...options, route: "broadcast", stringifyMs })) {
+        rememberSocketBroadcast(socket, dedupeCandidate);
+        sent += 1;
+      }
     }
     if (DEBUG_LOGS && !options.suppressDiagnostic) {
       // 广播类消息在会话同步时非常高频，默认只转发不打印；需要排查 WS 路由时再打开 CODEX_WEB_DEBUG。
@@ -375,13 +498,17 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
   function sendTo(clientId, payload, options = {}) {
     const socket = clientsById.get(clientId);
     if (!socket || socket.readyState !== socket.OPEN) {
-      diagnosticWarn("ws-hub", "send_to_missing_client", {
-        ...wsPayloadSummary(payload),
-        clientId: shortId(clientId),
-        readyState: socket ? socket.readyState : "missing",
-      });
+      if (!options.suppressDiagnostic) {
+        // 例行回包可能与页面刷新交错；调用方已标记 suppress 时不把预期离线放大成磁盘日志风暴。
+        diagnosticWarn("ws-hub", "send_to_missing_client", {
+          ...wsPayloadSummary(payload),
+          clientId: shortId(clientId),
+          readyState: socket ? socket.readyState : "missing",
+        });
+      }
       return false;
     }
+    if (terminateBackpressuredSocket(socket, "send_to")) return false;
     try {
       const { message, stringifyMs } = stringifyForWs(payload);
       const sent = sendPrepared(socket, payload, message, { ...options, route: "send_to", stringifyMs });
@@ -412,6 +539,12 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     if (typeof listener !== "function") return () => {};
     clientReadyListeners.add(listener);
     return () => clientReadyListeners.delete(listener);
+  }
+
+  function onClientRemoved(listener) {
+    if (typeof listener !== "function") return () => {};
+    clientRemovedListeners.add(listener);
+    return () => clientRemovedListeners.delete(listener);
   }
 
   function normalizedWsClientId(ws, message) {
@@ -455,6 +588,15 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
         existing.close("replaced");
       } catch {}
       relays.delete(portId);
+    }
+    while (!existing && relays.size >= Math.max(1, Number(maxAppHostRelays) || 1)) {
+      const [oldestPortId, oldestRelay] = relays.entries().next().value || [];
+      if (!oldestPortId) break;
+      relays.delete(oldestPortId);
+      try {
+        // 异常页面创建过多 MessagePort 时淘汰最旧端口，正常官方端口数量远低于此上限。
+        oldestRelay?.close("relay_limit");
+      } catch {}
     }
 
     try {
@@ -587,6 +729,13 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       logAuthRejected(url.pathname);
       return socket.destroy();
     }
+    if (clients.size >= Math.max(1, Number(maxClients) || 1)) {
+      diagnosticWarn("ws-hub", "upgrade_rejected_client_limit", {
+        clientCount: clients.size,
+        remoteAddress: req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "",
+      });
+      return socket.destroy();
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.__codexRemoteAddress = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "";
       clients.add(ws);
@@ -606,10 +755,26 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
             const previousClientId = ws.__codexWebClientId;
             if (previousClientId && previousClientId !== clientId && clientsById.get(previousClientId) === ws) {
               clientsById.delete(previousClientId);
+              for (const listener of clientRemovedListeners) {
+                try {
+                  listener({ clientId: previousClientId, socket: ws });
+                } catch (error) {
+                  diagnosticWarn("ws-hub", "client_removed_listener_failed", {
+                    clientId: shortId(previousClientId),
+                    error: error instanceof Error ? error.message : String(error),
+                  });
+                }
+              }
             }
-            // 后来重复 hello 时直接覆盖映射，保证同一 clientId 指向最新连接。
+            // 后来重复 hello 时切到最新连接，并让旧 socket 进入 CLOSING，避免重连窗口内重复接收大广播。
+            const replacedSocket = clientsById.get(clientId);
             ws.__codexWebClientId = clientId;
             clientsById.set(clientId, ws);
+            if (replacedSocket && replacedSocket !== ws) {
+              try {
+                replacedSocket.close(1000, "replaced");
+              } catch {}
+            }
             if (DEBUG_LOGS) {
               diagnosticLog("ws-hub", "hello", {
                 clientId: shortId(clientId),
@@ -674,7 +839,10 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     });
   });
 
-  return { broadcast, clients, sendTo, hasClient, onClientReady };
+  return { broadcast, clients, sendTo, hasClient, onClientReady, onClientRemoved };
 }
 
-module.exports = { createWsHub };
+module.exports = {
+  createWsHub,
+  __test: { routeIdFromPayload },
+};

@@ -44,7 +44,16 @@ test("notifies runtime listeners after a browser client completes hello", async 
     isAuthed: () => true,
   });
   const readyClients = [];
+  const removedClients = [];
+  let resolveRemoved;
+  const clientRemoved = new Promise((resolve) => {
+    resolveRemoved = resolve;
+  });
   hub.onClientReady(({ clientId }) => readyClients.push(clientId));
+  hub.onClientRemoved(({ clientId }) => {
+    removedClients.push(clientId);
+    resolveRemoved();
+  });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
@@ -60,6 +69,10 @@ test("notifies runtime listeners after a browser client completes hello", async 
   await waitForMessage(socket, (message) => message.type === "hello-ack");
 
   assert.deepEqual(readyClients, ["ready-client"]);
+  socket.close();
+  await waitForClose(socket);
+  await clientRemoved;
+  assert.deepEqual(removedClients, ["ready-client"]);
 });
 
 test("restores app-host downlink before the first post-reconnect data frame", async (t) => {
@@ -120,4 +133,39 @@ test("restores app-host downlink before the first post-reconnect data frame", as
   relays[1].emitMessage("thread/updated");
   await officialMessage;
   assert.equal(relays.length, 2);
+});
+
+test("replaces an overlapping socket for the same browser client before broadcasts", async (t) => {
+  const server = http.createServer();
+  const hub = createWsHub(server, {
+    createAppHostRelay() {},
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const sockets = [];
+  t.after(async () => {
+    for (const socket of sockets) socket.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const url = `ws://127.0.0.1:${server.address().port}/ws`;
+  const first = new WebSocket(url);
+  sockets.push(first);
+  await waitForOpen(first);
+  first.send(JSON.stringify({ type: "hello", clientId: "same-client" }));
+  await waitForMessage(first, (message) => message.type === "hello-ack");
+
+  const firstClosed = waitForClose(first);
+  const second = new WebSocket(url);
+  sockets.push(second);
+  await waitForOpen(second);
+  second.send(JSON.stringify({ type: "hello", clientId: "same-client" }));
+  await waitForMessage(second, (message) => message.type === "hello-ack");
+  await firstClosed;
+
+  const broadcast = waitForMessage(second, (message) => message.type === "state-update");
+  assert.equal(hub.broadcast({ type: "state-update" }), 1);
+  await broadcast;
+  assert.equal(hub.clients.size, 1);
 });

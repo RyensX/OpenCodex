@@ -4,6 +4,7 @@ const {
   AUTH_CONFIG_PATH,
   AUTH_TOKEN_TTL_MS,
   COOKIE_NAME,
+  GATEWAY_INSTANCE_ID,
   LAUNCHER_TOKEN,
   PASSWORD_HASH_PREFIX,
   exists,
@@ -14,6 +15,7 @@ const { headerValue, isRequestBodyTooLargeError, readBody, sendJson } = require(
 
 // auth.cjs 负责 gateway 自身访问控制；密码只在配置文件里短暂出现，启动后会改写为 sha256-v1 hash。
 const LOGIN_BODY_MAX_BYTES = 8 * 1024;
+const MAX_AUTH_TOKENS = 256;
 
 function sha256Hex(value) {
   return crypto.createHash("sha256").update(String(value), "utf-8").digest("hex");
@@ -169,26 +171,29 @@ function loadAuthPasswordHashFromConfig() {
 const AUTH_PASSWORD_HASH = loadAuthPasswordHashFromConfig();
 
 /** 只保存 token hash；重启 gateway 后 token 自然失效。 */
-function makeAuthStore() {
+function makeAuthStore({ maxTokens = MAX_AUTH_TOKENS, now = () => Date.now() } = {}) {
   /**
    * token 存储只放内存：
    * - 泄露面小，不写磁盘。
    * - gateway 重启后全部失效，符合本地 Web 入口的安全预期。
    */
   const tokens = new Map();
+  const effectiveMaxTokens = Math.max(1, Number(maxTokens) || MAX_AUTH_TOKENS);
   const hashToken = (token) => crypto.createHash("sha256").update(String(token)).digest("base64url");
   const prune = () => {
-    const now = Date.now();
+    const currentTime = now();
     for (const [hash, entry] of tokens) {
-      if (!entry || entry.expiresAtMs <= now) tokens.delete(hash);
+      if (!entry || entry.expiresAtMs <= currentTime) tokens.delete(hash);
     }
   };
   return {
     issue() {
       prune();
       const token = crypto.randomBytes(32).toString("base64url");
-      const expiresAtMs = Date.now() + AUTH_TOKEN_TTL_MS;
+      const expiresAtMs = now() + AUTH_TOKEN_TTL_MS;
       tokens.set(hashToken(token), { expiresAtMs });
+      // 多设备反复登录时按签发/最近使用顺序淘汰，避免长 TTL token 无限常驻。
+      while (tokens.size > effectiveMaxTokens) tokens.delete(tokens.keys().next().value);
       return { token, expiresAtMs };
     },
     validate(token) {
@@ -197,15 +202,21 @@ function makeAuthStore() {
       const hash = hashToken(token);
       const entry = tokens.get(hash);
       if (!entry) return null;
-      if (entry.expiresAtMs <= Date.now()) {
+      if (entry.expiresAtMs <= now()) {
         tokens.delete(hash);
         return null;
       }
-      entry.expiresAtMs = Date.now() + AUTH_TOKEN_TTL_MS;
+      entry.expiresAtMs = now() + AUTH_TOKEN_TTL_MS;
+      tokens.delete(hash);
+      tokens.set(hash, entry);
       return entry;
     },
     revoke(token) {
       if (token) tokens.delete(hashToken(token));
+    },
+    size() {
+      prune();
+      return tokens.size;
     },
   };
 }
@@ -345,6 +356,64 @@ function sendTooManyLoginAttempts(res, decision) {
   );
 }
 
+async function verifyAccessPasswordRequest(req, res) {
+  if (!AUTH_PASSWORD_HASH) {
+    sendJson(
+      res,
+      403,
+      { ok: false, authRequired: false, authenticated: false, error: "Access password is not configured" },
+      { "cache-control": "no-store" }
+    );
+    return false;
+  }
+  const limitBeforeBody = authRateLimiter.check(req);
+  if (!limitBeforeBody.allowed) {
+    sendTooManyLoginAttempts(res, limitBeforeBody);
+    return false;
+  }
+
+  let rawBody = "";
+  try {
+    rawBody = await readBody(req, { maxBytes: LOGIN_BODY_MAX_BYTES });
+  } catch (error) {
+    if (isRequestBodyTooLargeError(error)) {
+      sendJson(
+        res,
+        413,
+        { ok: false, authRequired: true, authenticated: false, error: "Request body too large" },
+        { "cache-control": "no-store" }
+      );
+      return false;
+    }
+    throw error;
+  }
+  // 读 body 期间如果同一来源被其它并发认证失败推入退避/锁定，这里再次拦截。
+  const limitAfterBody = authRateLimiter.check(req);
+  if (!limitAfterBody.allowed) {
+    sendTooManyLoginAttempts(res, limitAfterBody);
+    return false;
+  }
+
+  // 登录和敏感操作共用同一套密码校验，避免重启接口成为绕过限流的第二入口。
+  const passwordHash = readPasswordHashFromBody(rawBody, headerValue(req.headers, "content-type")).trim().toLowerCase();
+  if (!isValidPasswordHash(passwordHash) || !timingSafeEqualString(passwordHash, AUTH_PASSWORD_HASH)) {
+    const failure = authRateLimiter.recordFailure(req);
+    if (failure.limited) {
+      sendTooManyLoginAttempts(res, failure);
+      return false;
+    }
+    sendJson(
+      res,
+      401,
+      { ok: false, authRequired: true, authenticated: false, error: "Invalid password" },
+      { "cache-control": "no-store" }
+    );
+    return false;
+  }
+  authRateLimiter.recordSuccess(req);
+  return true;
+}
+
 async function handleAuthLogin(req, res) {
   if (req.method !== "POST") {
     return sendJson(res, 405, { ok: false, error: "Method Not Allowed" }, { "cache-control": "no-store" });
@@ -365,40 +434,8 @@ async function handleAuthLogin(req, res) {
       { "cache-control": "no-store" }
     );
   }
-  const limitBeforeBody = authRateLimiter.check(req);
-  if (!limitBeforeBody.allowed) return sendTooManyLoginAttempts(res, limitBeforeBody);
+  if (!(await verifyAccessPasswordRequest(req, res))) return;
 
-  let rawBody = "";
-  try {
-    rawBody = await readBody(req, { maxBytes: LOGIN_BODY_MAX_BYTES });
-  } catch (error) {
-    if (isRequestBodyTooLargeError(error)) {
-      return sendJson(
-        res,
-        413,
-        { ok: false, authRequired: true, authenticated: false, error: "Request body too large" },
-        { "cache-control": "no-store" }
-      );
-    }
-    throw error;
-  }
-  // 读 body 期间如果同一来源被其它并发登录失败推入退避/锁定，这里再次拦截。
-  const limitAfterBody = authRateLimiter.check(req);
-  if (!limitAfterBody.allowed) return sendTooManyLoginAttempts(res, limitAfterBody);
-
-  // 前端提交 passwordHash 而不是明文，避免明文密码在 gateway 日志/代理层出现。
-  const passwordHash = readPasswordHashFromBody(rawBody, headerValue(req.headers, "content-type")).trim().toLowerCase();
-  if (!isValidPasswordHash(passwordHash) || !timingSafeEqualString(passwordHash, AUTH_PASSWORD_HASH)) {
-    const failure = authRateLimiter.recordFailure(req);
-    if (failure.limited) return sendTooManyLoginAttempts(res, failure);
-    return sendJson(
-      res,
-      401,
-      { ok: false, authRequired: true, authenticated: false, error: "Invalid password" },
-      { "cache-control": "no-store" }
-    );
-  }
-  authRateLimiter.recordSuccess(req);
   const issued = authStore.issue();
   return sendJson(
     res,
@@ -426,6 +463,7 @@ function handleAuthStatus(req, res, url) {
     200,
     {
       ok: true,
+      instanceId: GATEWAY_INSTANCE_ID,
       authRequired: !!AUTH_PASSWORD_HASH,
       authenticated: auth.authenticated,
       expiresAtMs: auth.expiresAtMs,
@@ -469,4 +507,8 @@ module.exports = {
   isAuthed,
   isLauncherRequest,
   sendUnauthorized,
+  verifyAccessPasswordRequest,
+  __test: {
+    makeAuthStore,
+  },
 };

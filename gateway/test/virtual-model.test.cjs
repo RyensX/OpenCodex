@@ -20,9 +20,24 @@ function setup(t, options = {}) {
     isEnabled: () => enabled,
     fallbackRoute: () => ({ model: "spark", effort: "low", tier: "economy" }),
     onAutoModelInjected: options.onAutoModelInjected,
+    maxPendingRequests: options.maxPendingRequests,
   });
   return { catalog, controller, filePath, setEnabled: (value) => (enabled = value), stateStore };
 }
+
+test("virtual model request metadata is bounded and clearable after disconnect", (t) => {
+  const value = setup(t, { maxPendingRequests: 2 });
+  value.controller.prepareClientMessage({ id: "one", method: "account/read", params: {} });
+  value.controller.prepareClientMessage({ id: "two", method: "account/read", params: {} });
+  value.controller.prepareClientMessage({ id: "three", method: "account/read", params: {} });
+  assert.equal(value.controller.pendingCount(), 2);
+
+  // 最旧响应已无本地虚拟化元数据，但仍必须原样透传，不能阻断官方协议。
+  const late = { id: "one", result: { ok: true } };
+  assert.equal(value.controller.processServerMessage(late), late);
+  value.controller.clearPending();
+  assert.equal(value.controller.pendingCount(), 0);
+});
 
 function realModel(id = "spark") {
   return { id, model: id, displayName: id, supportedReasoningEfforts: [], defaultReasoningEffort: "low", hidden: false };

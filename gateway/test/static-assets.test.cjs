@@ -163,10 +163,18 @@ function serveOfficialAsset(service, reqPath, host) {
   return res.body.toString("utf-8");
 }
 
-function serveOfficialAssetResponse(service, reqPath, host = "localhost:3737") {
+function serveOfficialAssetResponse(service, reqPath, host = "localhost:3737", headers = {}) {
   const file = service.staticFile(reqPath);
   const res = makeResponseRecorder();
-  service.serveFile({ headers: { host } }, res, file, 200, reqPath);
+  service.serveFile({ headers: { host, ...headers } }, res, file, 200, reqPath);
+  return res;
+}
+
+async function serveOfficialAssetResponseAsync(service, reqPath, host = "localhost:3737", headers = {}) {
+  const file = service.staticFile(reqPath);
+  const res = makeResponseRecorder();
+  // 压缩表示会异步完成；identity 表示仍可同步返回，await 对两种路径保持同一测试接口。
+  await service.serveFile({ headers: { host, ...headers } }, res, file, 200, reqPath);
   return res;
 }
 
@@ -174,6 +182,47 @@ test("web shell manifest requests credentials for protected origins", () => {
   const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
 
   assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest" crossorigin="use-credentials" \/>/);
+});
+
+test("web shell scripts revalidate unchanged content instead of retransferring it", (t) => {
+  const service = createService(makeOfficialWebviewDir(t));
+  const first = serveOfficialAssetResponse(
+    service,
+    "/codex-bridge-polyfill.js",
+    "192.168.1.20:3737",
+    { "accept-encoding": "gzip" }
+  );
+  const validated = serveOfficialAssetResponse(
+    service,
+    "/codex-bridge-polyfill.js",
+    "192.168.1.20:3737",
+    { "accept-encoding": "gzip", "if-none-match": first.headers.etag }
+  );
+
+  assert.equal(first.status, 200);
+  assert.equal(first.headers["cache-control"], "private, no-cache, must-revalidate");
+  assert.equal(first.headers["content-encoding"], "gzip");
+  assert.match(first.headers.etag, /^W\//);
+  assert.equal(validated.status, 304);
+  assert.equal(validated.headers.etag, first.headers.etag);
+  assert.equal(validated.body.length, 0);
+});
+
+test("web shell keeps restart controls at the settings edge and waits for a new gateway instance", () => {
+  const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
+
+  assert.match(html, /id="settings-restart" class="settings-restart"/);
+  assert.match(html, /id="restart-dialog" class="restart-dialog"/);
+  assert.match(html, /id="restart-password" type="password"/);
+  assert.match(html, /restartButton\.disabled = true/);
+  assert.match(html, /restartButtonSpinner\.hidden = false/);
+  assert.match(html, /state\.instanceId !== previousInstanceId/);
+  assert.match(html, /RESTART_WAIT_TIMEOUT_MS = 120_000/);
+  assert.match(html, /RESTART_STATUS_TIMEOUT_MS = 5_000/);
+  assert.match(html, /new AbortController\(\)/);
+  assert.match(html, /document\.visibilityState === "hidden"/);
+  assert.match(html, /finishRestartWaitWithError\(t\("web\.settings\.restartTimedOut"\)\)/);
+  assert.match(html, /window\.location\.reload\(\)/);
 });
 
 test("bridge keeps synchronous official preload methods out of the adaptive IPC fallback", () => {
@@ -205,7 +254,9 @@ test("patched official renderer hides the app-host application menu capability",
     [
       'const labels={file:{id:"windowsMenuBar.file"}};',
       "function isMenuEnabled(){return isWindows()&&services.applicationMenu!=null}",
+      "function isSecondaryMenuEnabled(){return isLinux() && host?.applicationMenu !== void 0}",
       "function getMenu(){return services.applicationMenu.getSnapshot()}",
+      "const capabilitySnapshot=services.applicationMenu!=null;",
     ].join("")
   );
   const service = createService(webviewDir);
@@ -214,8 +265,49 @@ test("patched official renderer hides the app-host application menu capability",
 
   // 只关闭新版 renderer 的菜单展示判定，app-host 的其它服务和调用链保持原样。
   assert.match(source, /function isMenuEnabled\(\)\{return false\}/);
+  assert.match(source, /function isSecondaryMenuEnabled\(\)\{return false\}/);
   assert.match(source, /services\.applicationMenu\.getSnapshot\(\)/);
+  assert.match(source, /capabilitySnapshot=services\.applicationMenu!=null/);
   assert.doesNotMatch(source, /isWindows\(\)&&services\.applicationMenu!=null/);
+});
+
+test("large official renderer patches complete off the gateway event loop", async (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assetName = "app-initial-large-menu-test.js";
+  fs.writeFileSync(
+    path.join(assetsDir, assetName),
+    `${"/* padding */".repeat(48 * 1024)}function isMenuEnabled(){return isWindows()&&services.applicationMenu!=null}`
+  );
+  const service = createService(webviewDir);
+  const reqPath = `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`;
+  const response = makeResponseRecorder();
+
+  const completion = service.serveFile(
+    { headers: { host: "localhost:3737" } },
+    response,
+    service.staticFile(reqPath),
+    200,
+    reqPath
+  );
+  // 大资源在当前调用栈内既不做文本解码，也不提前写响应。
+  assert.equal(response.status, 0);
+  assert.equal(typeof completion?.then, "function");
+  await completion;
+
+  assert.equal(response.status, 200);
+  assert.match(response.body.toString("utf8"), /function isMenuEnabled\(\)\{return false\}/);
+  assert.deepEqual(service.assetCacheDiagnostics(), {
+    bytes: service.assetCacheDiagnostics().bytes,
+    compressionRuns: 0,
+    entries: 1,
+    hits: 0,
+    maxBytes: service.assetCacheDiagnostics().maxBytes,
+    misses: 1,
+    notModified: 0,
+    patchRuns: 1,
+  });
 });
 
 test("patched official renderer prioritizes first-screen reads without delaying capability initialization", async (t) => {
@@ -277,10 +369,100 @@ test("patched official renderer prioritizes first-screen reads without delaying 
   assert.equal(backgroundMethods.has("app/list"), true);
 });
 
+test("patched request scheduler supports the current expanded official background method set", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assetName = "app-initial-current-request-scheduler-test.js";
+  fs.writeFileSync(
+    path.join(assetsDir, assetName),
+    [
+      "const backgroundMethods=new Set([`app/installed`,`app/list`,`app/read`,`collaborationMode/list`,`config/read`,`configRequirements/read`,`experimentalFeature/list`,`hooks/list`,`mcpServerStatus/list`,`model/list`,`permissionProfile/list`,`plugin/list`,`skills/list`]);",
+      "class RequestClient{",
+      "dispatchMessage=()=>{};pendingConfigReadRequests=new Map;queuedRequests=[];",
+      "sendConfigReadRequest(params,options){return this.enqueueRequest(`config/read`,params,options)}",
+      "enqueueRequest(method,params,options){return Promise.resolve({method,params,options})}",
+      "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,n)}",
+      "}",
+    ].join("")
+  );
+  const patched = serveOfficialAsset(
+    createService(webviewDir),
+    `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`,
+    "localhost:3737"
+  );
+
+  // 当前官方版本增加了 app/installed 与 app/read，仍应完整命中而不是静默跳过整段优化。
+  assert.match(patched, /opencodexInFlightCapabilityReads=new Map/);
+  assert.match(patched, /trace:n\?\.trace===void 0\?`auto`:n\.trace/);
+  assert.match(patched, /widget:n\?\.widget\?\?null/);
+  assert.match(
+    patched,
+    /backgroundMethods=new Set\(\[`app\/list`,`hooks\/list`,`mcpServerStatus\/list`,`plugin\/list`,`skills\/list`\]\)/
+  );
+  assert.doesNotMatch(patched, /backgroundMethods=new Set\(\[`app\/installed`/);
+});
+
+test("remote renderer defers plugin summary image bytes until an image mounts", async (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assetName = "plugin-summary-image-test.js";
+  fs.writeFileSync(
+    path.join(assetsDir, assetName),
+    [
+      "const protocol=`read-file-binary`;",
+      "async function loadPluginImages(o,e,n){",
+      "return Promise.all([BI(o.composerIconPath,e,n),BI(o.logoPath,e,n),BI(o.logoDarkPath,e,n)])",
+      "}",
+    ].join("")
+  );
+  const service = createService(webviewDir);
+  const reqPath = `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`;
+  const remote = serveOfficialAsset(service, reqPath, "192.168.1.25:3737");
+  const loopback = serveOfficialAsset(service, reqPath, "localhost:3737");
+
+  assert.match(remote, /window\.__opencodexPluginImageUrl\?\.\(o\.composerIconPath,e\)\?\?BI/);
+  assert.match(remote, /window\.__opencodexPluginImageUrl\?\.\(o\.logoPath,e\)\?\?BI/);
+  assert.match(remote, /window\.__opencodexPluginImageUrl\?\.\(o\.logoDarkPath,e\)\?\?BI/);
+  assert.doesNotMatch(loopback, /__opencodexPluginImageUrl/);
+
+  let inlineReadCount = 0;
+  const loadPluginImages = new Function(
+    "window",
+    "BI",
+    `${remote};return loadPluginImages;`
+  )(
+    {
+      __opencodexPluginImageUrl(value, hostId) {
+        return hostId === "local" && value.startsWith("/") ? `/api/plugin-image?path=${value}` : null;
+      },
+    },
+    async (value) => {
+      inlineReadCount += 1;
+      return `data:image/png;base64,${value}`;
+    }
+  );
+  assert.deepEqual(
+    await loadPluginImages(
+      { composerIconPath: "/icons/composer.png", logoPath: "/icons/light.png", logoDarkPath: "/icons/dark.png" },
+      "local",
+      {}
+    ),
+    [
+      "/api/plugin-image?path=/icons/composer.png",
+      "/api/plugin-image?path=/icons/light.png",
+      "/api/plugin-image?path=/icons/dark.png",
+    ]
+  );
+  assert.equal(inlineReadCount, 0);
+});
+
 test("bridge reconnects active app-host ports after websocket hello", () => {
   const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
 
-  assert.match(bridge, /state\.pending\.unshift\(appHostWsPayload\(state, \{ type: "app-host-connect" \}\)\)/);
+  assert.match(bridge, /state\.pending\.unshift\(connectPayload\)/);
+  assert.match(bridge, /state\.pendingChars \+= appHostPendingPayloadChars\(connectPayload\)/);
   assert.match(bridge, /for \(const state of appHostPortRelays\.values\(\)\) state\.connected = false/);
 });
 
@@ -347,6 +529,38 @@ test("patched official renderer CSP allows the injected PWA manifest", (t) => {
   assert.match(html, /&#39;wasm-unsafe-eval&#39; &#39;unsafe-eval&#39;/);
 });
 
+test("patched official renderer removes eager font preloads but preserves other preloads", (t) => {
+  const webviewDir = makeTempDir(t);
+  fs.writeFileSync(
+    path.join(webviewDir, "index.html"),
+    [
+      "<!doctype html>",
+      '<html><head><link rel="preload" href="./assets/font.woff2" as="font" type="font/woff2">',
+      '<link rel="preload" href="./assets/app.js" as="script">',
+      '<link rel="preload" href="./assets/other.woff2" as="font" crossorigin="use-credentials">',
+      "<title>Codex</title></head><body></body></html>",
+    ].join("")
+  );
+
+  const html = createService(webviewDir).createRendererResponse();
+
+  assert.doesNotMatch(html, /<link[^>]+as="font"/);
+  assert.ok(
+    html.includes(`<link rel="preload" href="${PATCHED_OFFICIAL_PREFIX}assets/app.js" as="script">`)
+  );
+});
+
+test("patched official renderer does not invent an eager medium-font request", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  fs.writeFileSync(path.join(assetsDir, "OpenAISans-Medium-test.woff2"), "font");
+
+  const html = createService(webviewDir).createRendererResponse();
+
+  assert.doesNotMatch(html, /OpenAISans-Medium-test\.woff2/);
+});
+
 test("patched official renderer CSP does not duplicate an existing manifest-src", (t) => {
   const webviewDir = makeTempDir(t);
   fs.writeFileSync(
@@ -362,6 +576,18 @@ test("patched official renderer CSP does not duplicate an existing manifest-src"
   const manifestDirectiveCount = html.match(/\bmanifest-src\b/g).length;
 
   assert.equal(manifestDirectiveCount, 1);
+});
+
+test("patched official renderer stops the loading shimmer after initial feedback", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const html = createService(webviewDir).createRendererResponse();
+
+  // 官方 Logo 的背景位置动画保留三轮视觉反馈，但不能在启动受阻时永久以刷新率驱动样式重算。
+  assert.match(html, /id="codex-web-loading-shimmer-power-guard"/);
+  assert.match(
+    html,
+    /#root > \.relative\.size-full \[aria-hidden="true"\]\.size-14 > \[class\*="_Overlay_"\]\[style\*="mask-image"\] \{ animation-iteration-count: 3 !important; \}/
+  );
 });
 
 test("injects remote file actions after the bridge polyfill", (t) => {
@@ -688,6 +914,7 @@ test("only caches content-hashed patched assets as immutable", (t) => {
   const assetsDir = path.join(webviewDir, "assets");
   fs.mkdirSync(assetsDir, { recursive: true });
   fs.writeFileSync(path.join(assetsDir, "app-Dk3EPlSk.js"), "export const ready = true;");
+  fs.writeFileSync(path.join(assetsDir, "OpenAISans-Medium-B7nJY_kG.woff2"), "font");
   fs.writeFileSync(
     path.join(assetsDir, "locale-Ab1_cdEF.js"),
     'export default {"artifactTab.preview.openInFolder":"Open in folder"};'
@@ -709,11 +936,151 @@ test("only caches content-hashed patched assets as immutable", (t) => {
     "192.168.60.218:3737"
   );
   const fixedName = serveOfficialAssetResponse(service, `${PATCHED_OFFICIAL_PREFIX}assets/dotnet.js`);
+  const font = serveOfficialAssetResponse(
+    service,
+    `${PATCHED_OFFICIAL_PREFIX}assets/OpenAISans-Medium-B7nJY_kG.woff2`
+  );
   const legacy = serveOfficialAssetResponse(service, "/official-patched/assets/app-Dk3EPlSk.js");
 
   assert.equal(current.headers["cache-control"], "public, max-age=31536000, immutable");
-  assert.equal(dynamic.headers["cache-control"], "no-store");
+  assert.equal(font.headers["cache-control"], "public, max-age=31536000, immutable");
+  assert.equal(dynamic.headers["cache-control"], "private, no-cache, must-revalidate");
   assert.match(dynamic.body.toString("utf-8"), /下载文件/);
   assert.equal(fixedName.headers["cache-control"], "no-store");
   assert.equal(legacy.headers["cache-control"], "no-store");
+});
+
+test("patched asset cache coalesces asynchronous compression and reuses it for ETag validation", async (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assetName = "locale-Cache001.js";
+  fs.writeFileSync(
+    path.join(assetsDir, assetName),
+    `export default {"artifactTab.preview.openInFolder":"Open in folder","padding":"${"x".repeat(4096)}"};`
+  );
+  const service = createStaticAssetService({
+    getI18nSnapshot: () => ({
+      locale: "zh-CN",
+      messages: { "web.remoteFile.downloadFile": "下载文件" },
+    }),
+    getOfficialBundle: () => ({ webviewDir }),
+  });
+  const reqPath = `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`;
+
+  const file = service.staticFile(reqPath);
+  const first = makeResponseRecorder();
+  const firstCompletion = service.serveFile(
+    { headers: { host: "192.168.1.20:3737", "accept-encoding": "gzip;q=0.5, br;q=1" } },
+    first,
+    file,
+    200,
+    reqPath
+  );
+  // 冷压缩不能在 serveFile 调用栈内阻塞并直接写回响应。
+  assert.equal(first.status, 0);
+  assert.equal(typeof firstCompletion?.then, "function");
+  const secondCompletion = serveOfficialAssetResponseAsync(service, reqPath, "192.168.1.20:3737", {
+    "accept-encoding": "gzip;q=0.5, br;q=1",
+  });
+  const [, second] = await Promise.all([firstCompletion, secondCompletion]);
+  const validated = await serveOfficialAssetResponseAsync(service, reqPath, "192.168.1.20:3737", {
+    "accept-encoding": "br",
+    "if-none-match": first.headers.etag,
+  });
+
+  assert.equal(first.status, 200);
+  assert.equal(first.headers["content-encoding"], "br");
+  assert.equal(first.headers.vary, "Accept-Encoding");
+  assert.match(require("node:zlib").brotliDecompressSync(first.body).toString("utf8"), /下载文件/);
+  assert.deepEqual(second.body, first.body);
+  assert.equal(second.headers.etag, first.headers.etag);
+  assert.equal(validated.status, 304);
+  assert.equal(validated.body.length, 0);
+  assert.deepEqual(service.assetCacheDiagnostics(), {
+    bytes: service.assetCacheDiagnostics().bytes,
+    compressionRuns: 1,
+    entries: 1,
+    hits: 2,
+    maxBytes: service.assetCacheDiagnostics().maxBytes,
+    misses: 1,
+    notModified: 1,
+    patchRuns: 1,
+  });
+});
+
+test("patched asset cache isolates host and locale variants and invalidates changed files", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assetName = "locale-Variant1.js";
+  const assetPath = path.join(assetsDir, assetName);
+  fs.writeFileSync(
+    assetPath,
+    'export default {"artifactTab.preview.openInFolder":"Open in folder","revision":1};'
+  );
+  let locale = "zh-CN";
+  let message = "下载文件";
+  const service = createStaticAssetService({
+    getI18nSnapshot: () => ({
+      locale,
+      messages: { "web.remoteFile.downloadFile": message },
+    }),
+    getOfficialBundle: () => ({ webviewDir }),
+  });
+  const reqPath = `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`;
+
+  const local = serveOfficialAssetResponse(service, reqPath);
+  const remote = serveOfficialAssetResponse(service, reqPath, "10.0.0.8:3737");
+  const sameRemoteDifferentHost = serveOfficialAssetResponse(service, reqPath, "192.168.60.218:3737");
+  locale = "en-US";
+  const sameMessageDifferentLocale = serveOfficialAssetResponse(service, reqPath, "10.0.0.8:3737");
+  message = "保存到设备";
+  const relocalized = serveOfficialAssetResponse(service, reqPath, "10.0.0.8:3737");
+  fs.writeFileSync(
+    assetPath,
+    'export default {"artifactTab.preview.openInFolder":"Open in folder","revision":22};'
+  );
+  const changed = serveOfficialAssetResponse(service, reqPath, "10.0.0.8:3737");
+
+  assert.match(local.body.toString("utf8"), /Open in folder/);
+  assert.match(remote.body.toString("utf8"), /下载文件/);
+  assert.deepEqual(sameRemoteDifferentHost.body, remote.body);
+  assert.deepEqual(sameMessageDifferentLocale.body, remote.body);
+  assert.match(relocalized.body.toString("utf8"), /保存到设备/);
+  assert.match(changed.body.toString("utf8"), /"revision":22/);
+  assert.equal(service.assetCacheDiagnostics().patchRuns, 4);
+  assert.equal(service.assetCacheDiagnostics().entries, 4);
+  assert.equal(service.assetCacheDiagnostics().hits, 2);
+});
+
+test("patched asset cache honors explicit encoding exclusions and evicts old variants", async (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  for (const name of ["chunk-Evict001.js", "chunk-Evict002.js"]) {
+    fs.writeFileSync(path.join(assetsDir, name), `export const value = "${name}-${"x".repeat(1600)}";`);
+  }
+  const service = createStaticAssetService({
+    getI18nSnapshot: () => ({ locale: "en-US", messages: {} }),
+    getOfficialBundle: () => ({ webviewDir }),
+    patchedAssetCacheMaxBytes: 2200,
+  });
+
+  const first = await serveOfficialAssetResponseAsync(
+    service,
+    `${PATCHED_OFFICIAL_PREFIX}assets/chunk-Evict001.js`,
+    "localhost:3737",
+    { "accept-encoding": "br;q=0, gzip;q=1" }
+  );
+  serveOfficialAssetResponse(
+    service,
+    `${PATCHED_OFFICIAL_PREFIX}assets/chunk-Evict002.js`,
+    "localhost:3737",
+    { "accept-encoding": "identity" }
+  );
+
+  assert.equal(first.headers["content-encoding"], "gzip");
+  assert.equal(service.assetCacheDiagnostics().entries, 1);
+  assert.equal(service.assetCacheDiagnostics().bytes <= service.assetCacheDiagnostics().maxBytes, true);
 });

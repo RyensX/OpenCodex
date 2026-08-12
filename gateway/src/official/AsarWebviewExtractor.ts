@@ -34,7 +34,8 @@ const RUNTIME_FILE_ENTRIES = new Set(["package.json"]);
 /**
  * 只允许解压 official gateway 运行官方 main/renderer 必需的白名单资源。
  *
- * 这是运行时工作副本生成逻辑，不是对官方 bundle 做补丁，也不会进入 OpenCodex dist。
+ * 这是运行时工作副本生成逻辑，不会修改官方安装源，也不会进入 OpenCodex dist；
+ * provider 可在抽取完成后对该私有副本应用网关专用适配。
  */
 class AsarWebviewExtractor {
   constructor({

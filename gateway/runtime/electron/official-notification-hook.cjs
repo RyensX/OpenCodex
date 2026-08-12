@@ -8,6 +8,7 @@ const {
 const NOTIFICATION_EVENT_TYPE = "opencodex:notification-event";
 const NOTIFICATION_SHOW_TYPE = "opencodex:notification";
 const NOTIFICATION_CLOSE_TYPE = "opencodex:notification-close";
+const MAX_ACTIVE_NOTIFICATIONS = 128;
 
 const state = {
   installed: false,
@@ -29,6 +30,17 @@ const state = {
 
 const notifications = new Map();
 let publishNotification = null;
+
+function trackNotification(notification) {
+  notifications.delete(notification.notificationId);
+  notifications.set(notification.notificationId, notification);
+  while (notifications.size > MAX_ACTIVE_NOTIFICATIONS) {
+    const oldest = notifications.values().next().value;
+    if (!oldest || oldest === notification) break;
+    // 极端通知风暴只淘汰最旧路由；对象自身仍按 Electron close 语义发出关闭事件。
+    oldest.close({ notifyBrowser: oldest.visible === true });
+  }
+}
 
 function nextNotificationId() {
   return `notification-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -133,7 +145,7 @@ function installOfficialNotificationHook(electronModule, options = {}) {
       this.actions = Array.isArray(normalizedOptions.actions) ? normalizedOptions.actions.slice() : [];
       this.visible = false;
       this.destroyed = false;
-      notifications.set(this.notificationId, this);
+      trackNotification(this);
       state.createdCount += 1;
       state.lastCreatedAt = new Date().toISOString();
     }
@@ -141,6 +153,8 @@ function installOfficialNotificationHook(electronModule, options = {}) {
     show() {
       if (this.destroyed) return;
       this.visible = true;
+      // Electron 允许同一实例再次 show；若上次无人接收已释放路由，这里重新登记。
+      trackNotification(this);
       state.shownCount += 1;
       state.lastShownAt = new Date().toISOString();
       const sent = publish(browserNotificationPayload(this));
@@ -151,6 +165,7 @@ function installOfficialNotificationHook(electronModule, options = {}) {
         // 通知是时效消息；没有在线浏览器或 WS 尚未 ready 时直接丢弃，不做持久化队列。
         state.droppedCount += 1;
         state.lastDroppedAt = new Date().toISOString();
+        notifications.delete(this.notificationId);
       }
       if (DEBUG_LOGS) {
         diagnosticLog("official-notification", "notification_show_intercepted", {

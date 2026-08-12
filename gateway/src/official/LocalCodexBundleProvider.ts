@@ -11,6 +11,7 @@ const { AsarArchiveReader } = require("./AsarArchiveReader");
 const { CodexBundleSourceInfoReader } = require("./CodexBundleSourceInfoReader");
 const { OfficialBundleCache, OfficialBundleManifestFactory } = require("./OfficialBundleCache");
 const { AsarWebviewExtractor } = require("./AsarWebviewExtractor");
+const { OfficialRuntimeOptimizer } = require("./OfficialRuntimeOptimizer");
 
 const OFFICIAL_AUTO_SCAN_UPGRADE_ENV = "CODEX_WEB_OFFICIAL_AUTO_SCAN_UPGRADE";
 
@@ -76,6 +77,7 @@ class LocalCodexBundleProvider {
     });
     this.sourceInfoReader = new CodexBundleSourceInfoReader({ logger: this.logger, archive, fileSystem });
     this.extractor = new AsarWebviewExtractor({ archive, fileSystem });
+    this.runtimeOptimizer = new OfficialRuntimeOptimizer({ fileSystem });
     this.manifestFactory = new OfficialBundleManifestFactory();
     this.byteFormatter = new BundleByteFormatter();
   }
@@ -191,7 +193,18 @@ class LocalCodexBundleProvider {
       // 这里解压的是完整运行时白名单；目标是 OpenCodex runtime cache，不会回写官方安装目录。
       const result = this.extractor.extract(sourceInfo.asarPath, tmpDir);
       const unpackedResult = this.copyUnpackedRuntime({ sourceInfo, tmpDir });
-      const manifest = this.manifestFactory.create(sourceInfo);
+      // 隐藏网关不展示原生宠物窗口，标记专用 fallback 可避免永久能力错误触发无限恢复。
+      const runtimeOptimizations = this.runtimeOptimizer.optimize(tmpDir);
+      if (
+        runtimeOptimizations.nativePetComposition === "unsupported-layout" ||
+        runtimeOptimizations.nativePetPrewarm === "unsupported-layout" ||
+        runtimeOptimizations.macPushRegistration === "unsupported-layout"
+      ) {
+        this.logger.warn(
+          `官方隐藏运行时结构已变化，本次仅应用可安全识别的适配：${runtimeOptimizations.unsupportedFiles.join(", ")}`
+        );
+      }
+      const manifest = this.manifestFactory.create(sourceInfo, runtimeOptimizations);
       this.fileSystem.writeJson(path.join(tmpDir, "manifest.json"), manifest);
       cache.replaceWith(tmpDir);
       this.logger.info(

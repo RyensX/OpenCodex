@@ -44,6 +44,11 @@ class FakeElement {
     return this === this.ownerDocument.documentElement || this.ownerDocument.documentElement.contains(this);
   }
 
+  get firstElementChild() {
+    // 对齐真实 DOM；摘要观察器用它快速跳过只含流式文本的新增节点。
+    return this.children[0] || null;
+  }
+
   append(...nodes) {
     for (const node of nodes) this.appendChild(node);
   }
@@ -89,6 +94,7 @@ class FakeElement {
   matches(selector) {
     const source = String(selector || "").trim();
     if (!source) return false;
+    if (source.includes(",")) return source.split(",").some((part) => this.matches(part));
     if (source.startsWith(".")) {
       const className = source.slice(1);
       return this.className.split(/\s+/).filter(Boolean).includes(className);
@@ -114,6 +120,18 @@ class FakeElement {
 
   querySelector(selector) {
     return this.querySelectorAll(selector)[0] || null;
+  }
+
+  getElementsByClassName(className) {
+    const results = [];
+    const visit = (node) => {
+      for (const child of node.children) {
+        if (child.className.split(/\s+/).filter(Boolean).includes(className)) results.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return results;
   }
 
   querySelectorAll(selector) {
@@ -312,6 +330,9 @@ function createHarness() {
   return {
     activeRoute() {
       return summary.activeRoute;
+    },
+    diagnostics() {
+      return { ...summary.diagnostics };
     },
     async ready() {
       await flushAsyncWork();
@@ -746,6 +767,28 @@ test("manual selection wins over delayed selected and turn metadata", async () =
   });
   await resolveRoute(harness, "thread-a", null);
   assert.equal(harness.activeRoute(), null);
+});
+
+test("smart scheduling summary bounds long-session thread and request state", async () => {
+  const harness = createHarness();
+  await harness.ready();
+
+  for (let index = 0; index < 300; index += 1) {
+    harness.handleRouteEvent({ threadId: `route-${index}`, status: "classifying" });
+  }
+  assert.equal(harness.diagnostics().activeRouteCount, 256);
+  assert.equal(harness.diagnostics().hydrationSequenceCount, 256);
+
+  for (let index = 0; index < 600; index += 1) {
+    harness.sendClientMessage({
+      id: `settings-${index}`,
+      method: "thread/settings/update",
+      params: { threadId: `manual-${index}`, model: "gpt-5.6-terra", effort: "high" },
+    });
+  }
+  assert.equal(harness.diagnostics().manualSelectionCount, 256);
+  assert.equal(harness.diagnostics().pendingModelSelectionCount, 512);
+  assert.equal(harness.diagnostics().hydrationSequenceCount, 256);
 });
 
 test("raw local sidebar ids and background hydration remain isolated", async () => {

@@ -68,16 +68,12 @@
         width: min(420px, 100%);
         border: 1px solid var(--color-token-border-default, rgba(26, 28, 31, 0.12));
         border-radius: var(--radius-lg, 12.5px);
-        background: color-mix(
-          in srgb,
-          var(--color-token-main-surface-primary, #ffffff) 92%,
-          transparent
-        );
+        /* 登录背景本身是纯色，使用不透明面板即可避免移动端为静态区域保留模糊合成层。 */
+        background: var(--color-token-main-surface-primary, #ffffff);
         box-shadow:
           var(--shadow-xl, rgba(26, 28, 31, 0.08) 0 18px 48px),
           var(--shadow-md, rgba(26, 28, 31, 0.06) 0 2px 8px);
         padding: 22px;
-        backdrop-filter: blur(18px);
       }
       h1 {
         margin: 0;
@@ -175,14 +171,10 @@
         padding: 0 12px;
         margin: 0;
         border-color: var(--color-token-border-default, rgba(26, 28, 31, 0.12));
-        background: color-mix(
-          in srgb,
-          var(--color-token-main-surface-primary, #ffffff) 88%,
-          transparent
-        );
+        /* 设置入口位于纯色壳层上，不需要常驻 backdrop-filter。 */
+        background: var(--color-token-main-surface-primary, #ffffff);
         color: var(--color-token-editor-foreground, #1a1c1f);
         box-shadow: var(--shadow-md, rgba(0, 0, 0, 0.08) 0 2px 4px -1px);
-        backdrop-filter: blur(18px);
       }
       .settings-button:hover:not(:disabled) {
         background: var(--color-token-list-hover-background, rgba(26, 28, 31, 0.05));
@@ -212,7 +204,7 @@
         padding: 16px;
         transform: translateX(100%);
         transition: transform var(--transition-duration-relaxed, 0.3s) var(--cubic-enter, ease);
-        will-change: transform;
+        /* 浏览器会在短暂的 transform 过渡期间自动提升图层，关闭后不再常驻合成层。 */
       }
       .settings-open .settings-backdrop {
         opacity: 1;
@@ -251,6 +243,8 @@
         display: grid;
         gap: 4px;
         margin-top: 16px;
+        /* 底部预留按钮高度，保持原列表布局不变，同时避免最后一项被固定按钮遮挡。 */
+        padding-bottom: 56px;
       }
       .plugin-settings-list {
         display: contents;
@@ -346,6 +340,105 @@
       .switch:focus-visible {
         outline: 2px solid var(--color-token-focus-border, #0a84ff);
         outline-offset: 2px;
+      }
+      .settings-restart {
+        position: absolute;
+        z-index: 1;
+        right: 16px;
+        bottom: max(16px, calc(env(safe-area-inset-bottom, 0px) + 16px));
+        left: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        width: auto;
+        margin: 0;
+        border-color: #b42318;
+        background: #d92d20;
+        color: #ffffff;
+      }
+      .settings-restart:hover:not(:disabled) {
+        background: #b42318;
+      }
+      .settings-restart:disabled {
+        background: #b42318;
+        color: #ffffff;
+        opacity: 1;
+      }
+      .settings-restart-spinner {
+        box-sizing: border-box;
+        width: 14px;
+        height: 14px;
+        border: 2px solid rgba(255, 255, 255, 0.42);
+        border-top-color: #ffffff;
+        border-radius: 50%;
+        animation: settings-restart-spin 0.8s linear infinite;
+      }
+      .settings-restart-spinner[hidden] {
+        display: none;
+      }
+      @keyframes settings-restart-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .restart-dialog {
+        box-sizing: border-box;
+        width: min(380px, calc(100vw - 32px));
+        padding: 0;
+        border: 1px solid var(--color-token-border-default, rgba(26, 28, 31, 0.12));
+        border-radius: var(--radius-lg, 12.5px);
+        background: var(--color-token-main-surface-primary, #ffffff);
+        color: var(--color-token-editor-foreground, #1a1c1f);
+        box-shadow: var(--shadow-xl, rgba(26, 28, 31, 0.2) 0 18px 48px);
+      }
+      .restart-dialog::backdrop {
+        background: rgba(15, 23, 42, 0.28);
+        backdrop-filter: blur(2px);
+      }
+      .restart-dialog-form {
+        margin: 0;
+        padding: 20px;
+      }
+      .restart-dialog-title {
+        margin: 0;
+        font-size: var(--text-heading-sm, 18px);
+        font-weight: var(--font-weight-semibold, 600);
+        line-height: 24px;
+      }
+      .restart-dialog-description {
+        margin: 8px 0 18px;
+        color: var(--color-token-text-secondary, #6b7280);
+        font-size: var(--text-sm, 13px);
+        line-height: 18px;
+      }
+      .restart-dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 18px;
+      }
+      .restart-dialog-actions button {
+        width: auto;
+        min-width: 76px;
+        margin: 0;
+        padding: 0 14px;
+      }
+      .restart-dialog-cancel {
+        border-color: var(--color-token-border-default, rgba(26, 28, 31, 0.12));
+        background: var(--color-token-main-surface-primary, #ffffff);
+        color: var(--color-token-editor-foreground, #1a1c1f);
+      }
+      .restart-dialog-cancel:hover:not(:disabled) {
+        background: var(--color-token-list-hover-background, rgba(26, 28, 31, 0.05));
+      }
+      .restart-dialog-confirm {
+        border-color: #b42318;
+        background: #d92d20;
+        color: #ffffff;
+      }
+      .restart-dialog-confirm:hover:not(:disabled) {
+        background: #b42318;
       }
       .entry-version {
         position: fixed;
@@ -461,7 +554,24 @@
           <div id="plugin-settings-title" class="settings-section-title" data-i18n="web.settings.plugins" hidden>插件</div>
           <div id="plugin-settings-list" class="plugin-settings-list" hidden></div>
         </div>
+        <button id="settings-restart" class="settings-restart" type="button">
+          <span id="settings-restart-label" data-i18n="web.settings.restart">重启服务</span>
+          <span id="settings-restart-spinner" class="settings-restart-spinner" aria-hidden="true" hidden></span>
+        </button>
       </aside>
+      <dialog id="restart-dialog" class="restart-dialog" aria-labelledby="restart-dialog-title" aria-describedby="restart-dialog-description">
+        <form id="restart-form" class="restart-dialog-form">
+          <h2 id="restart-dialog-title" class="restart-dialog-title" data-i18n="web.settings.restartDialogTitle">重启服务</h2>
+          <p id="restart-dialog-description" class="restart-dialog-description" data-i18n="web.settings.restartDialogDescription">重启会暂时断开当前连接，请输入访问密码确认。</p>
+          <label for="restart-password" data-i18n="web.auth.passwordLabel">访问密码</label>
+          <input id="restart-password" type="password" autocomplete="current-password" placeholder="请输入密码" data-i18n-placeholder="web.auth.passwordPlaceholder" />
+          <div id="restart-error" class="error"></div>
+          <div class="restart-dialog-actions">
+            <button id="restart-cancel" class="restart-dialog-cancel" type="button" data-i18n="common.cancel">取消</button>
+            <button id="restart-confirm" class="restart-dialog-confirm" type="submit" data-i18n="web.settings.restartConfirm">确认重启</button>
+          </div>
+        </form>
+      </dialog>
     </div>
     <script>
       (() => {
@@ -488,8 +598,24 @@
         const pluginSettingsList = document.getElementById("plugin-settings-list");
         const notificationPermissionButton = document.getElementById("setting-notification-permission");
         const notificationStatus = document.getElementById("setting-notification-status");
+        const restartButton = document.getElementById("settings-restart");
+        const restartButtonLabel = document.getElementById("settings-restart-label");
+        const restartButtonSpinner = document.getElementById("settings-restart-spinner");
+        const restartDialog = document.getElementById("restart-dialog");
+        const restartForm = document.getElementById("restart-form");
+        const restartPasswordInput = document.getElementById("restart-password");
+        const restartErrorBox = document.getElementById("restart-error");
+        const restartCancel = document.getElementById("restart-cancel");
+        const restartConfirm = document.getElementById("restart-confirm");
         const pluginSwitchInputs = new Map();
         let settingsCloseTimer = 0;
+        let gatewayInstanceId = "";
+        let restartSubmitting = false;
+        let restartInProgress = false;
+        let legacyAuthStatusRequest = null;
+        const RESTART_POLL_INTERVAL_MS = 800;
+        const RESTART_STATUS_TIMEOUT_MS = 5_000;
+        const RESTART_WAIT_TIMEOUT_MS = 120_000;
         const gatewayPluginSwitches = window.OpenCodexGatewayPluginSwitches?.create({
           pluginSystem,
           plugins: pluginDefinitions,
@@ -729,7 +855,17 @@
             const seconds = Math.max(1, Math.ceil((Number(error && error.retryAfterMs) || 1000) / 1000));
             return t("web.auth.tooManyAttempts", { seconds });
           }
+          if (message === "Access password is not configured") return t("web.settings.restartPasswordNotConfigured");
+          if (message === "Service restart is unavailable") return t("web.settings.restartUnavailable");
+          if (message === "Service restart is already pending") return t("web.settings.restartAlreadyPending");
           return message;
+        }
+
+        function localizedRestartError(error) {
+          const message = error && error.message ? error.message : String(error || "");
+          const localized = localizedError(error);
+          if (localized !== message) return localized;
+          return t("web.settings.restartFailed", { error: localized });
         }
 
         function escapeHtml(value) {
@@ -755,14 +891,125 @@
           hint.classList.remove("hidden");
         }
 
-        async function authStatus() {
+        async function authStatus(options = {}) {
           const res = await fetch("/api/auth/status", {
             cache: "no-store",
             credentials: "same-origin",
             headers: authHeaders({ accept: "application/json" }),
+            ...(options.signal ? { signal: options.signal } : {}),
           });
           if (!res.ok) return { authRequired: true, authenticated: false };
           return res.json();
+        }
+
+        async function authStatusWithin(timeoutMs) {
+          const delayMs = Math.max(1, timeoutMs);
+          if (typeof AbortController !== "function") {
+            // 老浏览器无法中止 fetch；同一时刻只保留一条底层请求，避免超时轮询累积悬挂连接。
+            legacyAuthStatusRequest ||= authStatus().finally(() => {
+              legacyAuthStatusRequest = null;
+            });
+            let timeout = 0;
+            try {
+              return await Promise.race([
+                legacyAuthStatusRequest,
+                new Promise((_, reject) => {
+                  timeout = setTimeout(() => reject(new Error("Gateway status request timed out")), delayMs);
+                }),
+              ]);
+            } finally {
+              clearTimeout(timeout);
+            }
+          }
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), delayMs);
+          try {
+            return await authStatus({ signal: controller.signal });
+          } finally {
+            clearTimeout(timeout);
+          }
+        }
+
+        async function requestServiceRestart(password) {
+          const passwordHash = await sha256Hex(password);
+          const res = await fetch("/api/service/restart", {
+            method: "POST",
+            cache: "no-store",
+            credentials: "same-origin",
+            headers: { "content-type": "application/json", accept: "application/json" },
+            body: JSON.stringify({ passwordHash }),
+          });
+          const body = await res.json().catch(() => null);
+          if (!res.ok || !body || body.ok === false) {
+            const restartError = new Error((body && body.error) || `HTTP ${res.status}`);
+            restartError.status = res.status;
+            restartError.retryAfterMs = body && Number.isFinite(Number(body.retryAfterMs)) ? Number(body.retryAfterMs) : 0;
+            throw restartError;
+          }
+          return body;
+        }
+
+        function setRestartInProgress() {
+          restartInProgress = true;
+          restartButton.disabled = true;
+          restartButtonLabel.textContent = t("web.settings.restarting");
+          restartButtonSpinner.hidden = false;
+        }
+
+        function finishRestartWaitWithError(message) {
+          restartInProgress = false;
+          restartButton.disabled = false;
+          restartButtonLabel.textContent = t("web.settings.restart");
+          restartButtonSpinner.hidden = true;
+          restartErrorBox.textContent = message;
+          // 服务未恢复时重新打开确认框，让用户看到明确结果并可在修复后重试。
+          if (!restartDialog.open) restartDialog.showModal();
+          restartPasswordInput.focus();
+        }
+
+        function waitForRestartPollingWindow(deadlineMs) {
+          if (document.visibilityState !== "hidden") return Promise.resolve();
+          return new Promise((resolve) => {
+            let completed = false;
+            const finish = () => {
+              if (completed) return;
+              completed = true;
+              clearTimeout(timeout);
+              document.removeEventListener("visibilitychange", handleVisibility);
+              resolve();
+            };
+            const handleVisibility = () => {
+              if (document.visibilityState !== "hidden") finish();
+            };
+            // 后台页面不做网络轮询，仅保留一个总期限计时器，返回前台时再立即检查。
+            const timeout = setTimeout(finish, Math.max(1, deadlineMs - Date.now()));
+            document.addEventListener("visibilitychange", handleVisibility);
+          });
+        }
+
+        async function waitForGatewayRestart(previousInstanceId) {
+          // 只有轮询到不同实例标识才刷新，旧进程在退出前偶尔还能响应时不会产生误判。
+          const deadlineMs = Date.now() + RESTART_WAIT_TIMEOUT_MS;
+          while (restartInProgress && Date.now() < deadlineMs) {
+            if (document.visibilityState === "hidden") {
+              await waitForRestartPollingWindow(deadlineMs);
+              continue;
+            }
+            await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_INTERVAL_MS));
+            if (document.visibilityState === "hidden") continue;
+            try {
+              const state = await authStatusWithin(
+                Math.min(RESTART_STATUS_TIMEOUT_MS, Math.max(1, deadlineMs - Date.now()))
+              );
+              if (state.instanceId && state.instanceId !== previousInstanceId) {
+                window.location.reload();
+                return;
+              }
+            } catch {
+              // 重启窗口内连接失败是预期状态，继续等待新实例恢复监听。
+            }
+          }
+          if (restartInProgress) finishRestartWaitWithError(t("web.settings.restartTimedOut"));
         }
 
         async function bootRenderer() {
@@ -934,8 +1181,53 @@
         settingsOpen.addEventListener("click", () => setSettingsOpen(true));
         settingsClose.addEventListener("click", () => setSettingsOpen(false));
         settingsBackdrop.addEventListener("click", () => setSettingsOpen(false));
+        restartButton.addEventListener("click", () => {
+          if (restartInProgress || restartSubmitting || restartDialog.open) return;
+          restartPasswordInput.value = "";
+          restartErrorBox.textContent = "";
+          restartDialog.showModal();
+          restartPasswordInput.focus();
+        });
+        restartCancel.addEventListener("click", () => {
+          if (!restartSubmitting) restartDialog.close();
+        });
+        restartDialog.addEventListener("cancel", (event) => {
+          // 请求已经发出时禁止 Escape 关闭，避免用户误以为操作被取消。
+          if (restartSubmitting) event.preventDefault();
+        });
+        restartForm.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          if (restartSubmitting || restartInProgress) return;
+          if (!restartPasswordInput.value) {
+            restartErrorBox.textContent = t("web.settings.restartPasswordRequired");
+            restartPasswordInput.focus();
+            return;
+          }
+          restartSubmitting = true;
+          restartErrorBox.textContent = "";
+          restartCancel.disabled = true;
+          restartConfirm.disabled = true;
+          restartConfirm.textContent = t("web.settings.restartVerifying");
+          try {
+            const result = await requestServiceRestart(restartPasswordInput.value);
+            const previousInstanceId = result.instanceId || gatewayInstanceId;
+            restartPasswordInput.value = "";
+            restartDialog.close();
+            setRestartInProgress();
+            void waitForGatewayRestart(previousInstanceId);
+          } catch (error) {
+            restartPasswordInput.value = "";
+            restartErrorBox.textContent = localizedRestartError(error);
+            restartPasswordInput.focus();
+          } finally {
+            restartSubmitting = false;
+            restartCancel.disabled = false;
+            restartConfirm.disabled = false;
+            restartConfirm.textContent = t("web.settings.restartConfirm");
+          }
+        });
         document.addEventListener("keydown", (event) => {
-          if (event.key === "Escape" && root.classList.contains("settings-open")) {
+          if (event.key === "Escape" && !restartDialog.open && root.classList.contains("settings-open")) {
             setSettingsOpen(false);
           }
         });
@@ -977,6 +1269,7 @@
         (async () => {
           try {
             const state = await authStatus();
+            gatewayInstanceId = state.instanceId || "";
             if (state.authRequired !== false && shouldForceLogin()) {
               clearToken();
               showLogin("");

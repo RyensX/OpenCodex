@@ -17,10 +17,28 @@ const {
 const { createZipArchiveFromDirectory, safeArchiveBaseName } = require("./local-archive.cjs");
 const { send } = require("./http-utils.cjs");
 
+// Node 单次 setTimeout 超过 32 位有符号整数会退化成约 1ms，必须分段等待以免形成热循环。
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+const DEFAULT_LOCAL_FILE_TOKEN_MAX_ENTRIES = 512;
+const DEFAULT_PLUGIN_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const PLUGIN_IMAGE_PATH_MAX_CHARS = 8192;
+const PLUGIN_IMAGE_EXTENSIONS = new Set([".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"]);
+
 // 本模块只处理“浏览器临时预览本机文件”，所有入口都必须有 allowlist 或短期 token。
 /** Content-Disposition 文件名兜底，避免特殊字符破坏 inline 预览 header。 */
 function safeInlineFilename(filePath) {
   return path.basename(filePath).replace(/["\r\n]/g, "_") || "file";
+}
+
+/** 插件图标入口只接受绝对图片路径；认证 gate 之外不暴露该解析函数。 */
+function pluginImagePathFromUrl(url) {
+  const value = String(url?.searchParams?.get("path") || "").trim();
+  if (!value || value.length > PLUGIN_IMAGE_PATH_MAX_CHARS || value.includes("\0")) return "";
+  const normalized = path.normalize(value);
+  if (!path.isAbsolute(normalized) || !PLUGIN_IMAGE_EXTENSIONS.has(path.extname(normalized).toLowerCase())) {
+    return "";
+  }
+  return normalized;
 }
 
 /** 解析官方 renderer 里的 app://fs/@fs/... 图片 URL 到本机绝对路径。 */
@@ -102,8 +120,19 @@ async function sendFileStream(res, status, headers, filePath) {
 
 function createLocalFileService(options = {}) {
   const getWorkspaceRoots = typeof options.getWorkspaceRoots === "function" ? options.getWorkspaceRoots : () => [];
+  const configuredMaxTokens = Number(options.maxTokens);
+  const maxTokens =
+    Number.isInteger(configuredMaxTokens) && configuredMaxTokens > 0
+      ? configuredMaxTokens
+      : DEFAULT_LOCAL_FILE_TOKEN_MAX_ENTRIES;
+  const configuredPluginImageMaxBytes = Number(options.pluginImageMaxBytes);
+  const pluginImageMaxBytes =
+    Number.isInteger(configuredPluginImageMaxBytes) && configuredPluginImageMaxBytes > 0
+      ? configuredPluginImageMaxBytes
+      : DEFAULT_PLUGIN_IMAGE_MAX_BYTES;
   // token 仅保存在内存中，重启 gateway 后自动失效，不把本机绝对路径持久化到前端。
   const localFileTokens = new Map();
+  let localFileTokenTimer = null;
 
   function currentWorkspaceRoots() {
     // 相对路径只允许按 workspace root 解析，不复用生成图片或临时上传目录。
@@ -145,6 +174,13 @@ function createLocalFileService(options = {}) {
       expiresAtMs,
       temporaryPath: typeof options.temporaryPath === "string" ? options.temporaryPath : "",
     });
+    while (localFileTokens.size > maxTokens) {
+      const oldestToken = localFileTokens.keys().next().value;
+      const oldestEntry = localFileTokens.get(oldestToken);
+      // 预览风暴只保留最近 token；目录下载的临时压缩包必须和被淘汰 token 一起释放。
+      deleteLocalFileToken(oldestToken, oldestEntry);
+    }
+    scheduleLocalFileTokenPrune();
     const name = encodeURIComponent(path.basename(filePath));
     const url = `/api/local-file/${token}/${name}`;
     return {
@@ -215,9 +251,13 @@ function createLocalFileService(options = {}) {
     localFileTokens.delete(token);
     // 目录下载会生成临时 zip；token 生命周期结束时同步清掉对应临时目录。
     removeTemporaryPath(entry && entry.temporaryPath);
+    if (localFileTokens.size === 0 && localFileTokenTimer) {
+      clearTimeout(localFileTokenTimer);
+      localFileTokenTimer = null;
+    }
   }
 
-  /** 定期清理本地文件预览 token，避免 token 长期有效。 */
+  /** 按最早到期时间清理本地文件预览 token，空闲时不保留周期定时器。 */
   function pruneLocalFileTokens() {
     const now = Date.now();
     for (const [token, entry] of localFileTokens) {
@@ -225,8 +265,19 @@ function createLocalFileService(options = {}) {
     }
   }
 
-  const localFileTokenTimer = setInterval(pruneLocalFileTokens, Math.min(60 * 1000, LOCAL_FILE_TOKEN_TTL_MS));
-  if (localFileTokenTimer && typeof localFileTokenTimer.unref === "function") localFileTokenTimer.unref();
+  function scheduleLocalFileTokenPrune() {
+    if (localFileTokenTimer || localFileTokens.size === 0) return;
+    let nextExpiryAtMs = Infinity;
+    for (const entry of localFileTokens.values()) {
+      nextExpiryAtMs = Math.min(nextExpiryAtMs, Number(entry?.expiresAtMs) || Date.now());
+    }
+    localFileTokenTimer = setTimeout(() => {
+      localFileTokenTimer = null;
+      pruneLocalFileTokens();
+      scheduleLocalFileTokenPrune();
+    }, Math.min(MAX_TIMER_DELAY_MS, Math.max(1, nextExpiryAtMs - Date.now())));
+    if (typeof localFileTokenTimer.unref === "function") localFileTokenTimer.unref();
+  }
 
   /** 发送 app://fs 映射后的本机图片/文件；所有路径都必须先过 allowlist。 */
   async function serveAppFsFile(pathname, res) {
@@ -256,6 +307,62 @@ function createLocalFileService(options = {}) {
     } catch {
       if (!res.headersSent) {
         return send(res, 404, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }, "File not found.");
+      }
+      try {
+        res.destroy();
+      } catch {}
+    }
+  }
+
+  /** 插件摘要图片走原始二进制 HTTP 流，避免先经 IPC/base64 把全部图标压进移动端 JS 堆。 */
+  async function servePluginImage(url, req, res) {
+    const filePath = pluginImagePathFromUrl(url);
+    if (!filePath) {
+      return send(
+        res,
+        404,
+        { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+        "Plugin image not found."
+      );
+    }
+    try {
+      const stats = fs.statSync(filePath);
+      if (!stats.isFile() || stats.size > pluginImageMaxBytes) {
+        return send(
+          res,
+          404,
+          { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+          "Plugin image not found."
+        );
+      }
+      const etag = `W/"${stats.size.toString(16)}-${Math.trunc(stats.mtimeMs).toString(16)}"`;
+      const headers = {
+        "content-type": mimeType(filePath),
+        "cache-control": "private, no-cache",
+        "content-length": String(stats.size),
+        "content-disposition": `inline; filename="${safeInlineFilename(filePath)}"`,
+        "content-security-policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+        "cross-origin-resource-policy": "same-origin",
+        "x-content-type-options": "nosniff",
+        etag,
+      };
+      const requestEtags = String(req?.headers?.["if-none-match"] || "")
+        .split(",")
+        .map((value) => value.trim());
+      if (requestEtags.includes(etag) || requestEtags.includes("*")) {
+        // 304 不能携带实体长度，否则部分代理会等待一个不存在的响应体。
+        const { "content-length": _contentLength, ...notModifiedHeaders } = headers;
+        return send(res, 304, notModifiedHeaders, "");
+      }
+      return await sendFileStream(res, 200, headers, filePath);
+    } catch {
+      if (!res.headersSent) {
+        return send(
+          res,
+          404,
+          { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+          "Plugin image not found."
+        );
       }
       try {
         res.destroy();
@@ -304,7 +411,8 @@ function createLocalFileService(options = {}) {
 
   function dispose() {
     // server shutdown 时清空 token，避免测试或重启时旧链接继续可用。
-    clearInterval(localFileTokenTimer);
+    if (localFileTokenTimer) clearTimeout(localFileTokenTimer);
+    localFileTokenTimer = null;
     for (const entry of localFileTokens.values()) removeTemporaryPath(entry && entry.temporaryPath);
     localFileTokens.clear();
   }
@@ -318,7 +426,18 @@ function createLocalFileService(options = {}) {
     resolveLocalDownloadPath,
     serveAppFsFile,
     serveLocalFile,
+    servePluginImage,
+    __test: {
+      timerActive: () => !!localFileTokenTimer,
+      tokenCount: () => localFileTokens.size,
+    },
   };
 }
 
-module.exports = { createLocalFileService, isAllowedAppFsFile, isAllowedLocalDownloadPath, safeInlineFilename };
+module.exports = {
+  createLocalFileService,
+  isAllowedAppFsFile,
+  isAllowedLocalDownloadPath,
+  pluginImagePathFromUrl,
+  safeInlineFilename,
+};

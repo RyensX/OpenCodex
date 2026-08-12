@@ -42,6 +42,187 @@
     return isAppleTouchDevice && /WebKit/i.test(ua) && !/Android/i.test(ua);
   }
 
+  function createViewportCoordinator() {
+    const subscribers = new Set();
+    const settleTimers = new Map();
+    let animationFrame = 0;
+    let listening = false;
+    let pendingReason = "viewport";
+    let lastSnapshot = null;
+    let settleGeneration = 0;
+    const diagnostics = { dispatches: 0, frameRequests: 0, metricReads: 0 };
+
+    function readSnapshot() {
+      diagnostics.metricReads += 1;
+      const root = document.documentElement;
+      const viewport = w.visualViewport;
+      const visualHeight = Math.max(0, Number(viewport?.height || w.innerHeight || root.clientHeight || 0));
+      const offsetTop = Math.max(0, Number(viewport?.offsetTop || 0));
+      const layoutHeight = Math.max(0, Number(root.clientHeight || w.innerHeight || visualHeight));
+      const innerHeight = Math.max(0, Number(w.innerHeight || layoutHeight || visualHeight));
+      return Object.freeze({
+        bodyHeight: Math.max(0, Number(document.body?.clientHeight || 0)),
+        innerHeight,
+        layoutHeight,
+        offsetTop,
+        visualBottom: visualHeight + offsetTop,
+        visualHeight,
+      });
+    }
+
+    function dispatch(reason) {
+      if (document.visibilityState === "hidden") return;
+      lastSnapshot = readSnapshot();
+      diagnostics.dispatches += 1;
+      for (const subscriber of Array.from(subscribers)) {
+        try {
+          subscriber(lastSnapshot, reason);
+        } catch (error) {
+          console.warn("[opencodex-viewport] subscriber failed", error);
+        }
+      }
+    }
+
+    function cancelAnimationFrame() {
+      if (!animationFrame) return;
+      if (typeof w.cancelAnimationFrame === "function") w.cancelAnimationFrame(animationFrame);
+      else w.clearTimeout(animationFrame);
+      animationFrame = 0;
+    }
+
+    function clearSettleTimers() {
+      settleGeneration += 1;
+      for (const timer of settleTimers.values()) w.clearTimeout(timer);
+      settleTimers.clear();
+    }
+
+    function scheduleSettleDispatches(reason, delays) {
+      clearSettleTimers();
+      if (delays.length === 0) return;
+      const generation = settleGeneration;
+      const [firstDelay, ...remainingDelays] = delays;
+      const firstTimer = w.setTimeout(() => {
+        if (generation !== settleGeneration) return;
+        settleTimers.delete(firstDelay);
+        // 事件风暴安静到首个校准点后再展开余下时点，热路径始终只反复维护一个 timer。
+        for (const delay of remainingDelays) {
+          const timer = w.setTimeout(() => {
+            if (generation !== settleGeneration) return;
+            settleTimers.delete(delay);
+            dispatch(`${reason}:settle`);
+          }, Math.max(0, delay - firstDelay));
+          settleTimers.set(delay, timer);
+        }
+        dispatch(`${reason}:settle`);
+      }, firstDelay);
+      settleTimers.set(firstDelay, firstTimer);
+    }
+
+    function request(reason = "viewport", options = {}) {
+      if (document.visibilityState === "hidden") {
+        cancelAnimationFrame();
+        clearSettleTimers();
+        return;
+      }
+      const immediate = options.immediate === true;
+      const delays = Array.from(new Set(options.settleDelays || []))
+        .map(Number)
+        .filter((delay) => Number.isFinite(delay) && delay >= 0)
+        .sort((left, right) => left - right);
+      // 同一帧内的 resize/scroll 风暴只保留一次前沿测量，帧尾再统一确认最终几何值。
+      if (immediate && !animationFrame) dispatch(reason);
+      pendingReason = reason;
+      if (!animationFrame) {
+        diagnostics.frameRequests += 1;
+        const run = () => {
+          animationFrame = 0;
+          dispatch(pendingReason);
+        };
+        animationFrame =
+          typeof w.requestAnimationFrame === "function" ? w.requestAnimationFrame(run) : w.setTimeout(run, 0);
+      }
+      if (delays.length > 0) {
+        // 连续 visualViewport 事件只保留最后一组稳定期校准，避免每个事件累积多轮定时任务。
+        scheduleSettleDispatches(reason, delays);
+      }
+    }
+
+    const requestViewportTransition = () =>
+      request("viewport", { immediate: true, settleDelays: [80, 240, 260, 600] });
+    const requestOrientationTransition = () =>
+      request("orientationchange", { immediate: true, settleDelays: [80, 240, 260, 600] });
+    const requestFocusIn = () =>
+      request("focusin", { immediate: true, settleDelays: [80, 240, 260, 600] });
+    const requestFocusOut = () =>
+      request("focusout", { immediate: true, settleDelays: [80, 240, 260, 600] });
+    const requestInput = () => request("input");
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        request("visibility", { immediate: true, settleDelays: [80, 260] });
+      } else {
+        cancelAnimationFrame();
+        clearSettleTimers();
+      }
+    };
+
+    function startListening() {
+      if (listening) return;
+      listening = true;
+      w.addEventListener("resize", requestViewportTransition, { passive: true });
+      // 单独保留旋转原因，订阅方可丢弃旧方向的稳定高度，避免把横竖屏差值误判成键盘。
+      w.addEventListener("orientationchange", requestOrientationTransition, { passive: true });
+      w.visualViewport?.addEventListener("resize", requestViewportTransition, { passive: true });
+      w.visualViewport?.addEventListener("scroll", requestViewportTransition, { passive: true });
+      document.addEventListener("focusin", requestFocusIn, true);
+      document.addEventListener("focusout", requestFocusOut, true);
+      document.addEventListener("input", requestInput, true);
+      document.addEventListener("visibilitychange", handleVisibility);
+    }
+
+    function stopListening() {
+      if (!listening) return;
+      listening = false;
+      w.removeEventListener("resize", requestViewportTransition, { passive: true });
+      w.removeEventListener("orientationchange", requestOrientationTransition, { passive: true });
+      w.visualViewport?.removeEventListener("resize", requestViewportTransition, { passive: true });
+      w.visualViewport?.removeEventListener("scroll", requestViewportTransition, { passive: true });
+      document.removeEventListener("focusin", requestFocusIn, true);
+      document.removeEventListener("focusout", requestFocusOut, true);
+      document.removeEventListener("input", requestInput, true);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      cancelAnimationFrame();
+      clearSettleTimers();
+      // 无订阅期间屏幕仍可能旋转或被浏览器工具栏改变；再次启用时必须重新读取真实尺寸。
+      lastSnapshot = null;
+    }
+
+    return Object.freeze({
+      get diagnostics() {
+        return { ...diagnostics, subscribers: subscribers.size };
+      },
+      request,
+      snapshot() {
+        return lastSnapshot || readSnapshot();
+      },
+      subscribe(subscriber) {
+        if (typeof subscriber !== "function") return () => {};
+        subscribers.add(subscriber);
+        startListening();
+        // 第二个移动插件直接复用第一份初始快照，避免激活阶段重复读取布局尺寸。
+        lastSnapshot ||= readSnapshot();
+        subscriber(lastSnapshot, "subscribe");
+        return () => {
+          subscribers.delete(subscriber);
+          if (subscribers.size === 0) stopListening();
+        };
+      },
+    });
+  }
+
+  // 两个移动插件共享同一个事件源和布局快照，避免 iOS 上重复读取 visualViewport 和根节点尺寸。
+  const viewportCoordinator =
+    w.__OpenCodexViewportCoordinator || (w.__OpenCodexViewportCoordinator = createViewportCoordinator());
+
   pluginSystem.registerPlugin({
     id: "opencodex.mobile-keyboard-optimization",
     name: "Mobile keyboard optimization",
@@ -54,7 +235,15 @@
     builtin: true,
     order: 10,
     activate(context) {
-      if (context.scope !== "renderer" || !document || document.__opencodexMobileKeyboardPluginInstalled) return null;
+      if (
+        context.scope !== "renderer" ||
+        !document ||
+        !context.platform.isMobile() ||
+        document.__opencodexMobileKeyboardPluginInstalled
+      ) {
+        // 桌面端没有软键盘，不安装 viewport/input 监听器，也不写入仅移动端消费的 CSS 变量。
+        return null;
+      }
       document.__opencodexMobileKeyboardPluginInstalled = true;
 
       let focusBlockedUntilMs = 0;
@@ -62,6 +251,14 @@
 
       const isEnabled = () => context.plugin.isEnabled();
       const isMobile = () => !!context.platform.isMobile();
+
+      const setDatasetValue = (root, key, value) => {
+        if (root.dataset[key] !== value) root.dataset[key] = value;
+      };
+
+      const setStyleValue = (root, name, value) => {
+        if (root.style.getPropertyValue(name) !== value) root.style.setProperty(name, value);
+      };
 
       const style = document.createElement("style");
       style.id = "opencodex-mobile-keyboard-plugin-styles";
@@ -101,7 +298,6 @@
 
           html[data-opencodex-ios-keyboard-optimization="true"] [data-thread-find-composer="true"] {
             transform: translate3d(0, calc(-1 * var(--codex-ios-bottom-avoidance, 0px)), 0);
-            will-change: transform;
           }
         }
       `;
@@ -110,8 +306,12 @@
       const syncEnabledState = () => {
         const enabled = isEnabled();
         const root = document.documentElement;
-        root.dataset.opencodexMobileKeyboardOptimization = enabled ? "true" : "false";
-        root.dataset.opencodexIosKeyboardOptimization = enabled && isMobile() && isIOSWebKitDevice() ? "true" : "false";
+        setDatasetValue(root, "opencodexMobileKeyboardOptimization", enabled ? "true" : "false");
+        setDatasetValue(
+          root,
+          "opencodexIosKeyboardOptimization",
+          enabled && isMobile() && isIOSWebKitDevice() ? "true" : "false"
+        );
         if (!enabled) {
           root.style.removeProperty("--codex-visual-viewport-height");
           root.style.removeProperty("--codex-visual-viewport-offset-top");
@@ -120,31 +320,29 @@
         return enabled;
       };
 
-      const setViewportVars = () => {
+      const setViewportVars = (snapshot = viewportCoordinator.snapshot()) => {
         if (!syncEnabledState()) return;
-        const viewport = w.visualViewport;
-        const height = Math.max(0, Math.floor(viewport?.height || w.innerHeight || document.documentElement.clientHeight || 0));
-        const offsetTop = Math.max(0, Math.floor(viewport?.offsetTop || 0));
-        const layoutHeight = Math.max(0, Math.floor(document.documentElement.clientHeight || w.innerHeight || height));
-        const innerHeight = Math.max(0, Math.floor(w.innerHeight || layoutHeight || height));
-        const viewportBottom = height + offsetTop;
+        const height = Math.max(0, Math.floor(snapshot.visualHeight));
+        const offsetTop = Math.max(0, Math.floor(snapshot.offsetTop));
+        const layoutHeight = Math.max(0, Math.floor(snapshot.layoutHeight || height));
+        const innerHeight = Math.max(0, Math.floor(snapshot.innerHeight || layoutHeight || height));
+        const viewportBottom = Math.max(0, Math.floor(snapshot.visualBottom));
         // iOS Safari 的地址栏和软键盘不会稳定改写布局视口；用可视视口底部差值推导被遮挡高度。
         const keyboardInset = isIOSWebKitDevice()
           ? Math.max(0, layoutHeight - viewportBottom, innerHeight - viewportBottom)
           : Math.max(0, innerHeight - viewportBottom);
         const root = document.documentElement;
-        if (height > 0) root.style.setProperty("--codex-visual-viewport-height", `${height}px`);
-        root.style.setProperty("--codex-visual-viewport-offset-top", `${offsetTop}px`);
-        root.style.setProperty("--codex-keyboard-inset-bottom", `${keyboardInset}px`);
+        if (height > 0) setStyleValue(root, "--codex-visual-viewport-height", `${height}px`);
+        setStyleValue(root, "--codex-visual-viewport-offset-top", `${offsetTop}px`);
+        setStyleValue(root, "--codex-keyboard-inset-bottom", `${keyboardInset}px`);
       };
 
-      const keepActiveInputVisible = () => {
+      const keepActiveInputVisible = (snapshot = viewportCoordinator.snapshot()) => {
         if (!isEnabled() || !isMobile()) return;
         const active = document.activeElement;
         if (!isComposerEditableElement(active)) return;
-        const viewport = w.visualViewport;
-        const visibleTop = Math.max(0, viewport?.offsetTop || 0);
-        const visibleBottom = visibleTop + Math.max(0, viewport?.height || w.innerHeight || 0);
+        const visibleTop = Math.max(0, snapshot.offsetTop || 0);
+        const visibleBottom = Math.max(visibleTop, snapshot.visualBottom || 0);
         if (visibleBottom <= visibleTop) return;
 
         const rect = active.getBoundingClientRect();
@@ -169,19 +367,13 @@
       };
 
       const scheduleViewportUpdate = () => {
-        setViewportVars();
-        const run = () => {
-          setViewportVars();
-          keepActiveInputVisible();
-        };
-        if (typeof w.requestAnimationFrame === "function") {
-          w.requestAnimationFrame(run);
-        } else {
-          w.setTimeout(run, 0);
-        }
-        w.setTimeout(run, 80);
-        w.setTimeout(run, 240);
+        viewportCoordinator.request("mobile-plugin", { immediate: true, settleDelays: [80, 240] });
       };
+
+      const disposeViewport = viewportCoordinator.subscribe((snapshot) => {
+        setViewportVars(snapshot);
+        keepActiveInputVisible(snapshot);
+      });
 
       const preventZoomGesture = (event) => {
         if (!isEnabled() || !isMobile()) return;
@@ -230,13 +422,6 @@
         }
       });
 
-      setViewportVars();
-      w.addEventListener("resize", scheduleViewportUpdate, { passive: true });
-      w.addEventListener("orientationchange", scheduleViewportUpdate, { passive: true });
-      w.visualViewport?.addEventListener("resize", scheduleViewportUpdate, { passive: true });
-      w.visualViewport?.addEventListener("scroll", scheduleViewportUpdate, { passive: true });
-      document.addEventListener("focusin", scheduleViewportUpdate, true);
-      document.addEventListener("input", scheduleViewportUpdate, true);
       document.addEventListener("touchmove", preventZoomGesture, { passive: false });
       document.addEventListener("gesturestart", preventZoomGesture, { passive: false });
       document.addEventListener("gesturechange", preventZoomGesture, { passive: false });
@@ -246,12 +431,7 @@
       return () => {
         disposePreference();
         disposeIpcInvoke();
-        w.removeEventListener("resize", scheduleViewportUpdate, { passive: true });
-        w.removeEventListener("orientationchange", scheduleViewportUpdate, { passive: true });
-        w.visualViewport?.removeEventListener("resize", scheduleViewportUpdate, { passive: true });
-        w.visualViewport?.removeEventListener("scroll", scheduleViewportUpdate, { passive: true });
-        document.removeEventListener("focusin", scheduleViewportUpdate, true);
-        document.removeEventListener("input", scheduleViewportUpdate, true);
+        disposeViewport();
         document.removeEventListener("touchmove", preventZoomGesture, { passive: false });
         document.removeEventListener("gesturestart", preventZoomGesture, { passive: false });
         document.removeEventListener("gesturechange", preventZoomGesture, { passive: false });

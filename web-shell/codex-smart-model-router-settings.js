@@ -5,6 +5,7 @@
 
   const FEATURE = "smart-model-router";
   const NAV_SLUG = "opencodex-smart-model-router";
+  const HEALTH_VISIBILITY_EVENT = "opencodex:smart-scheduling-settings-visibility-changed";
   const EFFORTS = ["auto", "low", "medium", "high", "xhigh", "max", "ultra"];
   const GROUPS = ["display", "classifier", "fallback"];
   // 官方 React 组件没有向注入脚本导出构造入口，因此复用其实际 trigger/menu DOM 约定和 Tailwind 样式类。
@@ -983,15 +984,19 @@
     suppressOfficialNavigationSelection();
     positionPage();
     void loadConfiguration();
+    // 健康模块按显式页面生命周期启停轮询，不再依赖整页 MutationObserver 猜测挂载状态。
+    w.dispatchEvent(new CustomEvent(HEALTH_VISIBILITY_EVENT));
   }
 
   function deactivateSettings() {
+    const wasActive = active;
     active = false;
     closeChoicePopover();
     if (page) page.dataset.active = "false";
     navigationItem?.setAttribute("data-opencodex-active", "false");
     navigationItem?.removeAttribute("aria-current");
     restoreOfficialNavigationSelection();
+    if (wasActive) w.dispatchEvent(new CustomEvent(HEALTH_VISIBILITY_EVENT));
   }
 
   function syncWithOfficialSettings() {
@@ -1012,14 +1017,47 @@
   }
 
   function scheduleSync() {
-    if (observerScheduled) return;
+    // 设置页后台已断开 observer；其它生命周期事件也不能重新排入 rAF。
+    if (observerScheduled || document.visibilityState === "hidden") return;
     observerScheduled = true;
     requestAnimationFrame(syncWithOfficialSettings);
   }
 
+  function nodeTouchesSettings(node, includeDescendants = false) {
+    if (!node || node.nodeType !== 1) return false;
+    const selector = '[data-settings-panel-slug],.opencodex-router-settings-page';
+    if (node.matches?.(selector) || node.closest?.(selector)) return true;
+    // record.target 只检查自身和祖先；只有新增/删除子树才需要向下找挂载点。
+    return includeDescendants && !!node.firstElementChild && !!node.querySelector?.(selector);
+  }
+
+  function mutationsTouchSettings(records) {
+    return Array.from(records || []).some((record) => {
+      if (record.type !== "childList") return false;
+      if (nodeTouchesSettings(record.target)) return true;
+      if (active && page?.parentElement?.contains?.(record.target)) return true;
+      return [...Array.from(record.addedNodes || []), ...Array.from(record.removedNodes || [])].some(
+        (node) => nodeTouchesSettings(node, true)
+      );
+    });
+  }
+
   function install() {
-    const observer = new MutationObserver(scheduleSync);
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    const observer = new MutationObserver((records) => {
+      // 官方正文和侧栏的高频变更不会影响设置入口，仅设置导航或自定义页面变化才重新同步。
+      if (document.visibilityState === "hidden" || !mutationsTouchSettings(records)) return;
+      scheduleSync();
+    });
+    let observerActive = false;
+    const startObservation = () => {
+      if (observerActive || document.visibilityState === "hidden") return;
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+      observerActive = true;
+    };
+    const stopObservation = () => {
+      if (observerActive) observer.disconnect();
+      observerActive = false;
+    };
     document.addEventListener(
       "click",
       (event) => {
@@ -1028,7 +1066,19 @@
       },
       true
     );
-    window.addEventListener("resize", positionPage);
+    window.addEventListener("resize", () => {
+      if (active) positionPage();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        // 自定义设置页在后台不需要跟随官方 DOM，回前台时一次全量同步即可恢复挂载。
+        stopObservation();
+        return;
+      }
+      startObservation();
+      scheduleSync();
+    });
+    startObservation();
     scheduleSync();
   }
 

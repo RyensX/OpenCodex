@@ -1,3 +1,6 @@
+const MAX_WORKSPACE_ROOT_SCAN_NODES = 1024;
+const PRIORITY_TRAVERSAL_KEYS = ["params", "payload", "body", "request", "message", "response"];
+
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -41,15 +44,28 @@ function hasFileTreePathContext(params) {
   return ["path", "filePath", "openPath", "directoryPath"].some((key) => typeof params[key] === "string");
 }
 
-function collectWorkspaceRoots(value, roots, depth = 0) {
-  if (depth > 6 || value == null) return;
+function collectWorkspaceRoots(
+  value,
+  roots,
+  depth = 0,
+  traversal = { remaining: MAX_WORKSPACE_ROOT_SCAN_NODES, seen: new WeakSet() }
+) {
+  if (depth > 6 || value == null || traversal.remaining <= 0) return;
+  if (typeof value === "object") {
+    if (traversal.seen.has(value)) return;
+    traversal.seen.add(value);
+  }
+  traversal.remaining -= 1;
   const structured = parseStructuredString(value);
   if (structured) {
-    collectWorkspaceRoots(structured, roots, depth + 1);
+    collectWorkspaceRoots(structured, roots, depth + 1, traversal);
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) collectWorkspaceRoots(item, roots, depth + 1);
+    for (const item of value) {
+      if (traversal.remaining <= 0) break;
+      collectWorkspaceRoots(item, roots, depth + 1, traversal);
+    }
     return;
   }
   if (!isPlainObject(value)) return;
@@ -58,8 +74,18 @@ function collectWorkspaceRoots(value, roots, depth = 0) {
   const root = rootFromParams(params);
   if (root && hasFileTreePathContext(params)) roots.add(root);
 
-  for (const nestedValue of Object.values(value)) {
-    collectWorkspaceRoots(nestedValue, roots, depth + 1);
+  // 先走协议 envelope，超宽扩展对象里仍优先识别真实 params/body；其余字段受统一节点预算保护。
+  const keys = Object.keys(value);
+  for (const key of PRIORITY_TRAVERSAL_KEYS) {
+    if (traversal.remaining <= 0) break;
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      collectWorkspaceRoots(value[key], roots, depth + 1, traversal);
+    }
+  }
+  for (const key of keys) {
+    if (traversal.remaining <= 0) break;
+    if (PRIORITY_TRAVERSAL_KEYS.includes(key)) continue;
+    collectWorkspaceRoots(value[key], roots, depth + 1, traversal);
   }
 }
 
@@ -72,6 +98,7 @@ function workspaceRootsFromIpcPayload(channel, payload) {
 
 module.exports = {
   __test: {
+    MAX_WORKSPACE_ROOT_SCAN_NODES,
     isAbsoluteLocalPath,
     parseStructuredString,
   },

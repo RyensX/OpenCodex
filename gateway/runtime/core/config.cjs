@@ -32,6 +32,8 @@ const CODEX_WEB_PICKED_FILES_MAX_TOTAL_BYTES = positiveIntegerFromEnv(
 const CODEX_WEB_PICKED_FILE_TTL_MS = positiveIntegerFromEnv("CODEX_WEB_PICKED_FILE_TTL_MS", 24 * 60 * 60 * 1000);
 const PORT = Number(process.env.PORT || 3737);
 const HOST = process.env.HOST || "0.0.0.0";
+// 每次 gateway 进程启动都会生成新标识，认证页据此确认重启后接入的确实是新实例。
+const GATEWAY_INSTANCE_ID = crypto.randomBytes(16).toString("hex");
 // 配置路径支持 launcher 显式传入，避免 Electron cwd 变化时误读项目根目录的 config.yaml。
 const AUTH_CONFIG_PATH = process.env.CODEX_WEB_CONFIG_PATH
   ? path.resolve(process.env.CODEX_WEB_CONFIG_PATH)
@@ -55,7 +57,7 @@ const LOCAL_DOWNLOAD_ARCHIVE_MAX_BYTES = positiveIntegerFromEnv(
   1024 * 1024 * 1024
 );
 // 路径版本是响应期 patch 的缓存破坏位：官方文件 hash 不变，但 gateway 注入逻辑可能变化。
-const PATCHED_OFFICIAL_PREFIX = "/official-patched-v6/";
+const PATCHED_OFFICIAL_PREFIX = "/official-patched-v7/";
 // 这两个 channel 是官方桌面 renderer/main 的主消息桥，gateway 通过 hook 复用它们。
 const MESSAGE_FROM_VIEW_CHANNEL = "codex_desktop:message-from-view";
 const MESSAGE_FOR_VIEW_CHANNEL = "codex_desktop:message-for-view";
@@ -216,6 +218,7 @@ module.exports = {
   CODEX_WEB_PICKED_FILES_MAX_TOTAL_BYTES,
   COOKIE_NAME,
   DEBUG_LOGS,
+  GATEWAY_INSTANCE_ID,
   HOST,
   IPC_SLOW_LOG_MS,
   LAUNCHER_TOKEN,

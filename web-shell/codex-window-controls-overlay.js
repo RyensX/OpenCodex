@@ -105,28 +105,28 @@
       root.dataset.opencodexWcoVisible = visible ? "true" : "false";
       if (!insets) {
         // JS rect 不可用时，删除 inline 覆盖，让上面的 CSS env(titlebar-area-*) 继续提供 WCO 数据。
-        rootStyle.removeProperty("--opencodex-wco-left");
-        rootStyle.removeProperty("--opencodex-wco-right");
-        rootStyle.removeProperty("--opencodex-wco-top");
-        rootStyle.removeProperty("--opencodex-wco-height");
-        rootStyle.removeProperty("--opencodex-wco-titlebar-x");
-        rootStyle.removeProperty("--opencodex-wco-titlebar-width");
-        rootStyle.removeProperty("--spacing-token-safe-header-left");
-        rootStyle.removeProperty("--spacing-token-safe-header-right");
-        rootStyle.removeProperty("--safe-area-left");
-        rootStyle.removeProperty("--safe-area-right");
+        removeManagedRootStyle("--opencodex-wco-left");
+        removeManagedRootStyle("--opencodex-wco-right");
+        removeManagedRootStyle("--opencodex-wco-top");
+        removeManagedRootStyle("--opencodex-wco-height");
+        removeManagedRootStyle("--opencodex-wco-titlebar-x");
+        removeManagedRootStyle("--opencodex-wco-titlebar-width");
+        removeManagedRootStyle("--spacing-token-safe-header-left");
+        removeManagedRootStyle("--spacing-token-safe-header-right");
+        removeManagedRootStyle("--safe-area-left");
+        removeManagedRootStyle("--safe-area-right");
         return;
       }
-      rootStyle.setProperty("--opencodex-wco-left", `${nextInsets.left}px`);
-      rootStyle.setProperty("--opencodex-wco-right", `${nextInsets.right}px`);
-      rootStyle.setProperty("--opencodex-wco-top", `${nextInsets.top}px`);
-      rootStyle.setProperty("--opencodex-wco-height", `${nextInsets.height}px`);
-      rootStyle.setProperty("--opencodex-wco-titlebar-x", `${nextInsets.titlebarX}px`);
-      rootStyle.setProperty("--opencodex-wco-titlebar-width", `${nextInsets.titlebarWidth}px`);
-      rootStyle.setProperty("--spacing-token-safe-header-left", "0px");
-      rootStyle.setProperty("--spacing-token-safe-header-right", "0px");
-      rootStyle.removeProperty("--safe-area-left");
-      rootStyle.removeProperty("--safe-area-right");
+      setManagedRootStyle("--opencodex-wco-left", `${nextInsets.left}px`);
+      setManagedRootStyle("--opencodex-wco-right", `${nextInsets.right}px`);
+      setManagedRootStyle("--opencodex-wco-top", `${nextInsets.top}px`);
+      setManagedRootStyle("--opencodex-wco-height", `${nextInsets.height}px`);
+      setManagedRootStyle("--opencodex-wco-titlebar-x", `${nextInsets.titlebarX}px`);
+      setManagedRootStyle("--opencodex-wco-titlebar-width", `${nextInsets.titlebarWidth}px`);
+      setManagedRootStyle("--spacing-token-safe-header-left", "0px");
+      setManagedRootStyle("--spacing-token-safe-header-right", "0px");
+      removeManagedRootStyle("--safe-area-left");
+      removeManagedRootStyle("--safe-area-right");
     }
 
     let rightHeaderSlotMetricsQueued = false;
@@ -136,6 +136,32 @@
     let windowControlsThemeColor = "";
     let imagePreviewThemeColor = "";
     let cssColorProbe = null;
+    let mutationObserver = null;
+    let managedRootStyleMutationBudget = 0;
+    let resizeObserver = null;
+    let heavyObserversActive = false;
+    let inactiveMetricsSynced = false;
+    let currentImagePreviewRoot = null;
+    const METRIC_MOUNT_SELECTOR = [
+      "header[data-app-shell-header-edge-scroll]",
+      'aside[data-app-shell-focus-area="right-panel"]',
+      '[data-app-shell-tab-strip-controller="right"]',
+      '[data-testid="image-preview-dismiss-area"]',
+    ].join(",");
+
+    function setManagedRootStyle(name, value) {
+      const nextValue = String(value);
+      if (rootStyle.getPropertyValue(name) === nextValue) return;
+      // 每次实际自写对应一个 style MutationRecord，observer 据此只过滤自身产生的记录。
+      if (mutationObserver) managedRootStyleMutationBudget += 1;
+      rootStyle.setProperty(name, nextValue);
+    }
+
+    function removeManagedRootStyle(name) {
+      if (!rootStyle.getPropertyValue(name)) return;
+      if (mutationObserver) managedRootStyleMutationBudget += 1;
+      rootStyle.removeProperty(name);
+    }
 
     function parseRgbColor(value) {
       const match = String(value || "").match(/rgba?\(([^)]+)\)/i);
@@ -329,9 +355,9 @@
         return;
       }
       const { centerColor, leftColor, rightColor, themeColor } = findWindowControlsTitlebarColors();
-      if (centerColor) rootStyle.setProperty("--opencodex-wco-titlebar-background", centerColor);
-      if (leftColor) rootStyle.setProperty("--opencodex-wco-titlebar-left-background", leftColor);
-      if (rightColor) rootStyle.setProperty("--opencodex-wco-titlebar-right-background", rightColor);
+      if (centerColor) setManagedRootStyle("--opencodex-wco-titlebar-background", centerColor);
+      if (leftColor) setManagedRootStyle("--opencodex-wco-titlebar-left-background", leftColor);
+      if (rightColor) setManagedRootStyle("--opencodex-wco-titlebar-right-background", rightColor);
       root.dataset.opencodexWcoTitlebarScheme = themeColor ? colorSchemeFromCssColor(themeColor) : fallbackColorScheme();
       setWindowControlsThemeColor(themeColor);
     }
@@ -369,13 +395,14 @@
     function syncImagePreviewOverlayState() {
       const dismissArea = document.querySelector('[data-testid="image-preview-dismiss-area"]');
       const previewRoot = dismissArea?.parentElement instanceof HTMLElement ? dismissArea.parentElement : null;
+      currentImagePreviewRoot = previewRoot;
       const scrimColor = previewRoot ? findImagePreviewScrimColor(previewRoot) : "";
       root.dataset.opencodexWcoImagePreviewOpen = previewRoot ? "true" : "false";
       root.dataset.opencodexWcoImagePreviewScheme = scrimColor ? colorSchemeFromCssColor(scrimColor) : "";
       if (scrimColor) {
-        rootStyle.setProperty("--opencodex-wco-image-preview-scrim", scrimColor);
+        setManagedRootStyle("--opencodex-wco-image-preview-scrim", scrimColor);
       } else {
-        rootStyle.removeProperty("--opencodex-wco-image-preview-scrim");
+        removeManagedRootStyle("--opencodex-wco-image-preview-scrim");
       }
       setImagePreviewThemeColor(root.dataset.opencodexWcoVisible === "true" ? scrimColor : "");
 
@@ -450,11 +477,11 @@
       }
       const nextSlotMin = `${fixedWidth}px`;
       if (rootStyle.getPropertyValue("--opencodex-wco-right-slot-min") !== nextSlotMin) {
-        rootStyle.setProperty("--opencodex-wco-right-slot-min", nextSlotMin);
+        setManagedRootStyle("--opencodex-wco-right-slot-min", nextSlotMin);
       }
       const nextLeadingMax = `${leadingWidth}px`;
       if (rootStyle.getPropertyValue("--opencodex-wco-leading-max") !== nextLeadingMax) {
-        rootStyle.setProperty("--opencodex-wco-leading-max", nextLeadingMax);
+        setManagedRootStyle("--opencodex-wco-leading-max", nextLeadingMax);
       }
     }
 
@@ -505,7 +532,7 @@
       }
       const nextExtend = `${extend}px`;
       if (rootStyle.getPropertyValue("--opencodex-wco-right-panel-toolbar-extend") !== nextExtend) {
-        rootStyle.setProperty("--opencodex-wco-right-panel-toolbar-extend", nextExtend);
+        setManagedRootStyle("--opencodex-wco-right-panel-toolbar-extend", nextExtend);
       }
       // 不主动改 scrollLeft、tablist padding 或 sticky 子节点；官方 tab strip 自己维护滚动位置。
     }
@@ -533,21 +560,114 @@
       }
     }
 
+    function cancelQueuedMetrics() {
+      if (metricFrameId != null && typeof w.cancelAnimationFrame === "function") {
+        w.cancelAnimationFrame(metricFrameId);
+      }
+      if (metricTimeoutId != null) w.clearTimeout(metricTimeoutId);
+      metricFrameId = null;
+      metricTimeoutId = null;
+      rightHeaderSlotMetricsQueued = false;
+    }
+
+    function nodeTouchesMetricMount(node, includeDescendants = false) {
+      if (!node || node.nodeType !== 1) return false;
+      if (node.matches?.(METRIC_MOUNT_SELECTOR) || node.closest?.(METRIC_MOUNT_SELECTOR)) return true;
+      if (
+        currentImagePreviewRoot &&
+        (node === currentImagePreviewRoot || currentImagePreviewRoot.contains?.(node))
+      ) {
+        return true;
+      }
+      return includeDescendants && !!node.firstElementChild && !!node.querySelector?.(METRIC_MOUNT_SELECTOR);
+    }
+
+    function mutationTouchesMetrics(record) {
+      if (!record) return false;
+      if (record.type === "attributes") {
+        if (record.target === root || record.target === document.body) return true;
+        return nodeTouchesMetricMount(record.target);
+      }
+      if (record.type !== "childList") return false;
+      if (nodeTouchesMetricMount(record.target)) return true;
+      return [...Array.from(record.addedNodes || []), ...Array.from(record.removedNodes || [])].some(
+        (node) => nodeTouchesMetricMount(node, true)
+      );
+    }
+
+    function startHeavyObservers() {
+      if (heavyObserversActive) return;
+      heavyObserversActive = true;
+      inactiveMetricsSynced = false;
+      if (typeof MutationObserver === "function") {
+        // 只有 WCO 真正可见时才观察官方 renderer；普通网页和移动端无需承担整页 DOM 监听成本。
+        mutationObserver = new MutationObserver((records) => {
+          let hasExternalMutation = false;
+          for (const record of Array.from(records || [])) {
+            // CSS 测量探针会频繁改写自身 style；绝不能让它们反向触发下一轮测量。
+            if (record.target === cssLengthProbe || record.target === cssColorProbe) continue;
+            const isRootStyle =
+              record.type === "attributes" && record.target === root && record.attributeName === "style";
+            if (isRootStyle && managedRootStyleMutationBudget > 0) {
+              managedRootStyleMutationBudget -= 1;
+              continue;
+            }
+            if (mutationTouchesMetrics(record)) hasExternalMutation = true;
+          }
+          // 预算之外的根 style 记录来自官方 renderer，必须像其它外部变化一样重新测量。
+          if (hasExternalMutation) queueRightHeaderSlotMetrics();
+        });
+        mutationObserver.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["class", "style", "data-theme"],
+        });
+      }
+      if (typeof ResizeObserver === "function") {
+        resizeObserver = new ResizeObserver(queueRightHeaderSlotMetrics);
+        resizeObserver.observe(root);
+      }
+    }
+
+    function stopHeavyObservers() {
+      mutationObserver?.disconnect();
+      resizeObserver?.disconnect();
+      mutationObserver = null;
+      managedRootStyleMutationBudget = 0;
+      resizeObserver = null;
+      currentImagePreviewRoot = null;
+      heavyObserversActive = false;
+      cancelQueuedMetrics();
+    }
+
     function syncInsets() {
       const visible = Boolean(overlay?.visible || displayModeQuery?.matches);
+      if (document.visibilityState === "hidden") {
+        // 后台页面保留最后一份 CSS 几何值，但彻底停止 DOM/布局观察；回前台时再统一校准。
+        stopHeavyObservers();
+        return;
+      }
       if (visible && overlay && typeof overlay.getTitlebarAreaRect === "function") {
+        startHeavyObservers();
         const rect = overlay.getTitlebarAreaRect();
         setInsets(true, insetsFromRect(rect));
         queueRightHeaderSlotMetrics();
         return;
       }
       if (visible) {
+        startHeavyObservers();
         setInsets(true, null);
         queueRightHeaderSlotMetrics();
         return;
       }
       setInsets(false, null);
-      queueRightHeaderSlotMetrics();
+      stopHeavyObservers();
+      if (!inactiveMetricsSynced) {
+        // 从 WCO 退出时只做一次完整清理，之后普通页面的 DOM 更新不再触发布局测量。
+        inactiveMetricsSynced = true;
+        syncHeaderAndPanelMetrics();
+      }
     }
 
     ensureOverrideStyles();
@@ -564,34 +684,16 @@
     }
     w.addEventListener("resize", syncInsets);
     addCleanup(() => w.removeEventListener("resize", syncInsets));
-    if (typeof MutationObserver === "function") {
-      // 右侧面板 tab 会动态增删，监听结构变化后重新测量固定按钮组宽度。
-      const observer = new MutationObserver(queueRightHeaderSlotMetrics);
-      observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["class", "style", "data-theme"],
-      });
-      addCleanup(() => observer.disconnect());
-    }
-    if (typeof ResizeObserver === "function") {
-      const resizeObserver = new ResizeObserver(queueRightHeaderSlotMetrics);
-      resizeObserver.observe(root);
-      addCleanup(() => resizeObserver.disconnect());
-    }
+    document.addEventListener?.("visibilitychange", syncInsets);
+    addCleanup(() => document.removeEventListener?.("visibilitychange", syncInsets));
     syncInsets();
-    queueRightHeaderSlotMetrics();
     const initialFrameId =
       typeof w.requestAnimationFrame === "function" ? w.requestAnimationFrame(syncInsets) : null;
     const initialTimeoutId = w.setTimeout(syncInsets, 250);
     return () => {
       setWindowControlsThemeColor("");
       setImagePreviewThemeColor("");
-      if (metricFrameId != null && typeof w.cancelAnimationFrame === "function") {
-        w.cancelAnimationFrame(metricFrameId);
-      }
-      if (metricTimeoutId != null) w.clearTimeout(metricTimeoutId);
+      stopHeavyObservers();
       if (initialFrameId != null && typeof w.cancelAnimationFrame === "function") {
         w.cancelAnimationFrame(initialFrameId);
       }
