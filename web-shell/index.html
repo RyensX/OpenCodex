@@ -240,11 +240,16 @@
         background: var(--color-token-list-hover-background, rgba(26, 28, 31, 0.05));
       }
       .settings-list {
+        box-sizing: border-box;
         display: grid;
         gap: 4px;
+        /* 头部和底部按钮保持原位，仅让动态设置列表在短视口内独立滚动。 */
+        max-height: calc(100vh - 128px - env(safe-area-inset-bottom, 0px));
+        max-height: calc(100dvh - 128px - env(safe-area-inset-bottom, 0px));
         margin-top: 16px;
-        /* 底部预留按钮高度，保持原列表布局不变，同时避免最后一项被固定按钮遮挡。 */
-        padding-bottom: 56px;
+        padding-bottom: 8px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
       }
       .plugin-settings-list {
         display: contents;
@@ -565,7 +570,7 @@
           <p id="restart-dialog-description" class="restart-dialog-description" data-i18n="web.settings.restartDialogDescription">重启会暂时断开当前连接，请输入访问密码确认。</p>
           <label for="restart-password" data-i18n="web.auth.passwordLabel">访问密码</label>
           <input id="restart-password" type="password" autocomplete="current-password" placeholder="请输入密码" data-i18n-placeholder="web.auth.passwordPlaceholder" />
-          <div id="restart-error" class="error"></div>
+          <div id="restart-error" class="error" role="status"></div>
           <div class="restart-dialog-actions">
             <button id="restart-cancel" class="restart-dialog-cancel" type="button" data-i18n="common.cancel">取消</button>
             <button id="restart-confirm" class="restart-dialog-confirm" type="submit" data-i18n="web.settings.restartConfirm">确认重启</button>
@@ -580,6 +585,9 @@
         const runtimeConfig = window.__CODEX_WEB_CONFIG__ || {};
         const locale = runtimeConfig.locale || "zh-CN";
         const messages = runtimeConfig.messages && typeof runtimeConfig.messages === "object" ? runtimeConfig.messages : {};
+        const GATEWAY_RESTART_POLL_INTERVAL_MS = 800;
+        const GATEWAY_RESTART_STATUS_TIMEOUT_MS = 5_000;
+        const GATEWAY_RESTART_TIMEOUT_MS = 120_000;
         let runtimeAuthToken = "";
         // 登录成功后官方 renderer 会替换当前 document，但 window 对象仍会保留；这里把短期 token 暴露给 bridge 使用。
         window.__OPEN_CODEX_RUNTIME_AUTH_TOKEN__ = "";
@@ -613,9 +621,6 @@
         let restartSubmitting = false;
         let restartInProgress = false;
         let legacyAuthStatusRequest = null;
-        const RESTART_POLL_INTERVAL_MS = 800;
-        const RESTART_STATUS_TIMEOUT_MS = 5_000;
-        const RESTART_WAIT_TIMEOUT_MS = 120_000;
         const gatewayPluginSwitches = window.OpenCodexGatewayPluginSwitches?.create({
           pluginSystem,
           plugins: pluginDefinitions,
@@ -929,7 +934,6 @@
             clearTimeout(timeout);
           }
         }
-
         async function requestServiceRestart(password) {
           const passwordHash = await sha256Hex(password);
           const res = await fetch("/api/service/restart", {
@@ -956,11 +960,16 @@
           restartButtonSpinner.hidden = false;
         }
 
-        function finishRestartWaitWithError(message) {
+        function setRestartIdle() {
           restartInProgress = false;
           restartButton.disabled = false;
           restartButtonLabel.textContent = t("web.settings.restart");
           restartButtonSpinner.hidden = true;
+        }
+
+        function showRestartWaitFailure(message) {
+          setRestartIdle();
+          restartPasswordInput.value = "";
           restartErrorBox.textContent = message;
           // 服务未恢复时重新打开确认框，让用户看到明确结果并可在修复后重试。
           if (!restartDialog.open) restartDialog.showModal();
@@ -989,17 +998,17 @@
 
         async function waitForGatewayRestart(previousInstanceId) {
           // 只有轮询到不同实例标识才刷新，旧进程在退出前偶尔还能响应时不会产生误判。
-          const deadlineMs = Date.now() + RESTART_WAIT_TIMEOUT_MS;
+          const deadlineMs = Date.now() + GATEWAY_RESTART_TIMEOUT_MS;
           while (restartInProgress && Date.now() < deadlineMs) {
             if (document.visibilityState === "hidden") {
               await waitForRestartPollingWindow(deadlineMs);
               continue;
             }
-            await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_INTERVAL_MS));
+            await new Promise((resolve) => setTimeout(resolve, GATEWAY_RESTART_POLL_INTERVAL_MS));
             if (document.visibilityState === "hidden") continue;
             try {
               const state = await authStatusWithin(
-                Math.min(RESTART_STATUS_TIMEOUT_MS, Math.max(1, deadlineMs - Date.now()))
+                Math.min(GATEWAY_RESTART_STATUS_TIMEOUT_MS, Math.max(1, deadlineMs - Date.now()))
               );
               if (state.instanceId && state.instanceId !== previousInstanceId) {
                 window.location.reload();
@@ -1009,7 +1018,7 @@
               // 重启窗口内连接失败是预期状态，继续等待新实例恢复监听。
             }
           }
-          if (restartInProgress) finishRestartWaitWithError(t("web.settings.restartTimedOut"));
+          if (restartInProgress) showRestartWaitFailure(t("web.settings.restartTimeout"));
         }
 
         async function bootRenderer() {

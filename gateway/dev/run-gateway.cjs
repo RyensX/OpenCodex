@@ -6,7 +6,7 @@ const { spawn } = require("child_process");
 const { prepareOfficialElectronRuntime } = require("../runner/index.cjs");
 const {
   GATEWAY_RESTART_SUPPORTED_ENV,
-  isGatewayRestartExit,
+  createGatewayExitHandler,
 } = require("../../shared/gateway-lifecycle.cjs");
 
 // dev runner 位于 gateway/dev 下，项目根目录需要回退两级。
@@ -60,23 +60,31 @@ function spawnGateway(officialRuntime, officialRuntimeArgs) {
   });
   activeChild = child;
 
-  child.on("exit", (code, signal) => {
-    if (activeChild === child) activeChild = null;
-    if (!stopping && isGatewayRestartExit(code, signal)) {
-      // 远程重启只重建 gateway 子进程，dev runner 和当前终端会话继续保留。
-      console.log("[launcher] gateway requested restart");
-      spawnGateway(officialRuntime, officialRuntimeArgs);
-      return;
-    }
-    if (signal) {
-      // 子进程异常信号只作为失败结果上报；不要再发给当前 Node 进程，否则会生成误导性的二次崩溃报告。
-      console.error(`[launcher] gateway exited by signal ${signal}`);
-      process.exitCode = stopping ? 0 : 1;
-      return;
-    }
-    process.exitCode = code == null ? 1 : code;
-  });
+  child.on(
+    "exit",
+    createGatewayExitHandler({
+      isStopping: () => stopping || activeChild !== child,
+      onExit({ code, signal, restartRequested }) {
+        if (activeChild === child) activeChild = null;
+        if (restartRequested) return;
+        if (signal) {
+          // 子进程异常信号只作为失败结果上报；不要再发给当前 Node 进程，否则会生成误导性的二次崩溃报告。
+          console.error(`[launcher] gateway exited by signal ${signal}`);
+          process.exitCode = stopping ? 0 : 1;
+          return;
+        }
+        process.exitCode = code == null ? 1 : code;
+      },
+      onRestart() {
+        // 远程重启只重建 gateway 子进程，dev runner 和当前终端会话继续保留。
+        console.log("[launcher] gateway requested restart");
+        spawnGateway(officialRuntime, officialRuntimeArgs);
+      },
+    })
+  );
   child.on("error", (error) => {
+    // spawn 失败没有 exit 事件，主动释放引用，避免信号处理继续操作一个无效 child。
+    if (child.pid == null && activeChild === child) activeChild = null;
     console.error("[launcher] gateway spawn failed", error);
     process.exitCode = 1;
   });

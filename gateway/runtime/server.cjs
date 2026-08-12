@@ -346,7 +346,14 @@ async function listen(server) {
   });
 }
 
-function createRequestHandler({ localFiles, pickedFiles, pluginService, requestRestart, staticAssets, workspaceRoots }) {
+function createRequestHandler({
+  localFiles,
+  pickedFiles,
+  pluginService,
+  requestRestart = () => false,
+  staticAssets,
+  workspaceRoots,
+}) {
   /**
    * 路由顺序很关键：
    * 1. 认证和 launcher 探活先处理。

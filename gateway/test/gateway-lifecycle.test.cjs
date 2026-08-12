@@ -5,6 +5,8 @@ const test = require("node:test");
 const {
   GATEWAY_RESTART_EXIT_CODE,
   GATEWAY_RESTART_SUPPORTED_ENV,
+  createGatewayExitHandler,
+  createSingleFlightGatewayStarter,
   isGatewayRestartExit,
   isGatewayRestartSupported,
 } = require("../../shared/gateway-lifecycle.cjs");
@@ -21,7 +23,67 @@ test("requires the supervisor capability flag before exposing remote restart", (
   assert.equal(isGatewayRestartSupported({}), false);
 });
 
-test("launcher and dev runner both wire the restart supervisor contract", () => {
+test("exit supervisor reports state before restarting and ignores ordinary exits", () => {
+  const events = [];
+  let stopping = false;
+  const handleExit = createGatewayExitHandler({
+    isStopping: () => stopping,
+    onExit(value) {
+      events.push(["exit", value]);
+    },
+    onRestart(value) {
+      events.push(["restart", value]);
+    },
+  });
+
+  assert.equal(handleExit(GATEWAY_RESTART_EXIT_CODE, null), true);
+  assert.deepEqual(events, [
+    ["exit", { code: GATEWAY_RESTART_EXIT_CODE, signal: null, restartRequested: true }],
+    ["restart", { code: GATEWAY_RESTART_EXIT_CODE, signal: null }],
+  ]);
+
+  events.length = 0;
+  assert.equal(handleExit(1, null), false);
+  assert.deepEqual(events, [["exit", { code: 1, signal: null, restartRequested: false }]]);
+
+  events.length = 0;
+  stopping = true;
+  assert.equal(handleExit(GATEWAY_RESTART_EXIT_CODE, null), false);
+  assert.deepEqual(events, [
+    ["exit", { code: GATEWAY_RESTART_EXIT_CODE, signal: null, restartRequested: false }],
+  ]);
+});
+
+test("single-flight starter shares an in-progress launch and permits a later retry", async () => {
+  let startCount = 0;
+  let releaseStart = null;
+  const startGateway = createSingleFlightGatewayStarter(
+    () =>
+      new Promise((resolve) => {
+        startCount += 1;
+        releaseStart = resolve;
+      })
+  );
+
+  const first = startGateway();
+  const second = startGateway();
+  assert.strictEqual(first, second);
+  assert.equal(startCount, 0);
+
+  // Promise.resolve().then(start) 会在微任务中执行，先让启动任务真正进入 pending 状态。
+  await Promise.resolve();
+  assert.equal(startCount, 1);
+  releaseStart("started");
+  assert.deepEqual(await Promise.all([first, second]), ["started", "started"]);
+
+  const third = startGateway();
+  await Promise.resolve();
+  assert.equal(startCount, 2);
+  releaseStart("restarted");
+  assert.equal(await third, "restarted");
+});
+
+test("launcher and dev runner wire restart supervision without background polling regressions", () => {
   const root = path.resolve(__dirname, "..", "..");
   const launcherSource = fs.readFileSync(path.join(root, "launcher", "main.cjs"), "utf8");
   const devRunnerSource = fs.readFileSync(path.join(root, "gateway", "dev", "run-gateway.cjs"), "utf8");
@@ -30,17 +92,18 @@ test("launcher and dev runner both wire the restart supervisor contract", () => 
     "utf8"
   );
 
-  // 两条标准启动路径都必须声明能力并识别退出码，否则 Web 按钮会把服务停在离线状态。
+  // 两条标准启动路径共享已通过行为测试的退出处理器，避免重复实现退出码分支。
   for (const source of [launcherSource, devRunnerSource]) {
     assert.match(source, /GATEWAY_RESTART_SUPPORTED_ENV/);
-    assert.match(source, /isGatewayRestartExit/);
+    assert.match(source, /createGatewayExitHandler/);
   }
-  // Launcher 有多个 UI/托盘入口，异步启动阶段必须使用 single-flight，旧子进程退出也不能清空新实例。
+  // Launcher 的异步启动和完整重启都必须 single-flight，迟到的旧子进程不能覆盖新实例。
+  assert.match(launcherSource, /createSingleFlightGatewayStarter/);
   assert.match(launcherSource, /let gatewayStartPromise = null/);
-  assert.match(launcherSource, /if \(gatewayStartPromise\) return gatewayStartPromise/);
+  assert.match(launcherSource, /gatewayStartPromise = currentStart/);
   assert.match(launcherSource, /let gatewayRestartPromise = null/);
   assert.match(launcherSource, /if \(gatewayRestartPromise\) return gatewayRestartPromise/);
-  assert.match(launcherSource, /if \(gatewayState\.child === child\)/);
+  assert.match(launcherSource, /gatewayState\.child !== child/);
   // 状态探活只服务于可见 Launcher 窗口，并且请求 single-flight，托盘驻留不能永久轮询。
   assert.match(launcherSource, /function launcherWindowNeedsStatusPolling\(\)/);
   assert.match(launcherSource, /mainWindow\.isVisible\(\)/);
@@ -51,6 +114,7 @@ test("launcher and dev runner both wire the restart supervisor contract", () => 
   assert.match(launcherSource, /mainWindow\.on\("minimize", stopStatusPolling\)/);
   // 隐藏 Electron 只承载本地 IPC；Chromium GCM/后台同步必须关闭，避免周期网络唤醒。
   assert.match(officialRunnerSource, /appendSwitch\("disable-background-networking"\)/);
+
   const staticAssetSource = fs.readFileSync(
     path.join(root, "gateway", "runtime", "http", "static-assets.cjs"),
     "utf8"

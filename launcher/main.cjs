@@ -16,7 +16,8 @@ const { OPENCODEX_VERSION_LABEL } = require("../shared/app-version.cjs");
 const { PREFERRED_LANGUAGES_ENV, formatMessage, resolveOpenCodexI18n } = require("../shared/i18n/index.cjs");
 const {
   GATEWAY_RESTART_SUPPORTED_ENV,
-  isGatewayRestartExit,
+  createGatewayExitHandler,
+  createSingleFlightGatewayStarter,
 } = require("../shared/gateway-lifecycle.cjs");
 const packageMetadata = require("../package.json");
 
@@ -729,7 +730,7 @@ async function startGatewayOnce() {
     OPENCODEX_GATEWAY_AGENT_MODE: "1",
     // 第 4 个 stdio fd 是生命周期 pipe；gateway 会监听它判断 launcher 是否已退出。
     OPENCODEX_GATEWAY_LIFECYCLE_FD: "3",
-    // 只有受 launcher 监督的 gateway 才开放 Web 重启入口，退出后由下方 exit 监听重新拉起。
+    // 只有受 launcher 监督的 gateway 才开放 Web 重启入口，退出后由父进程重新拉起。
     [GATEWAY_RESTART_SUPPORTED_ENV]: "1",
     // Chromium profile 必须和官方 Desktop 隔离；核心数据继续通过 CODEX_HOME 共享。
     CODEX_WEB_OFFICIAL_USER_DATA_DIR: officialUserDataDir,
@@ -763,50 +764,63 @@ async function startGatewayOnce() {
   child.stdout.on("data", (chunk) => appendLog(`[gateway] ${chunk.toString()}`));
   child.stderr.on("data", (chunk) => appendLog(`[gateway:err] ${chunk.toString()}`, { urgent: true }));
   child.on("error", (error) => {
+    // spawn 失败不会触发 exit；此时必须释放占位，后续启动或重试才不会被误判为仍在运行。
+    if (child.pid == null && gatewayState.child === child) {
+      gatewayState.child = null;
+      gatewayState.status = null;
+    }
     gatewayState.lastError = error instanceof Error ? error.message : String(error);
     appendLog(`[launcher] gateway spawn error: ${gatewayState.lastError}\n`, { urgent: true });
     broadcastState();
   });
-  child.on("exit", (code, signal) => {
-    const restartRequested = !isQuitting && isGatewayRestartExit(code, signal);
-    appendLog(`[launcher] gateway exited: code=${code} signal=${signal}\n`, { urgent: !restartRequested });
-    // 只允许当前子进程清空状态；并发操作已拉起新实例时，旧 exit 事件不能覆盖它。
-    if (gatewayState.child === child) {
-      gatewayState.child = null;
-      gatewayState.status = null;
-    }
-    if (restartRequested) {
-      // Web 端已完成密码认证；旧进程释放端口后立即按现有配置启动新实例。
-      gatewayState.lastError = "";
-      appendLog("[launcher] gateway requested restart\n");
-      broadcastState();
-      void startGateway().catch((error) => {
-        gatewayState.lastError = error instanceof Error ? error.message : String(error);
-        appendLog(`[launcher] gateway restart failed: ${errorLogText(error)}\n`, { urgent: true });
+  child.on(
+    "exit",
+    createGatewayExitHandler({
+      // 只允许当前受管子进程请求重启；迟到的旧 child 退出事件不能影响新实例。
+      isStopping: () => isQuitting || gatewayState.child !== child,
+      onExit({ code, signal, restartRequested }) {
+        const isActiveChild = gatewayState.child === child;
+        appendLog(`[launcher] gateway exited: code=${code} signal=${signal}\n`, {
+          urgent: isActiveChild && !restartRequested,
+        });
+        if (!isActiveChild) return;
+        gatewayState.child = null;
+        gatewayState.status = null;
+        if (restartRequested) {
+          gatewayState.lastError = "";
+        } else if (!isQuitting) {
+          gatewayState.lastError = `gateway exited: code=${code} signal=${signal}`;
+        }
         broadcastState();
-      });
-      return;
-    }
-    if (!isQuitting) {
-      gatewayState.lastError = `gateway exited: code=${code} signal=${signal}`;
-    }
-    broadcastState();
-  });
+      },
+      onRestart() {
+        appendLog("[launcher] gateway requested restart\n");
+        void startGateway().catch((error) => {
+          gatewayState.lastError = error instanceof Error ? error.message : String(error);
+          appendLog(`[launcher] gateway restart failed: ${errorLogText(error)}\n`, { urgent: true });
+          broadcastState();
+        });
+      },
+    })
+  );
 
   startStatusPolling();
   broadcastState();
   return buildState();
 }
 
+// startGatewayOnce 在准备运行时期间会跨越多个 await，单飞协调器避免并发拉起多个子进程。
+const startGatewaySingleFlight = createSingleFlightGatewayStarter(startGatewayOnce);
+
 async function startGateway() {
   if (gatewayState.child) return buildState();
-  if (gatewayStartPromise) return gatewayStartPromise;
-  // 启动包含异步 runtime 准备和端口探测；所有入口共享同一 Promise，避免瞬间生成两个 gateway。
-  gatewayStartPromise = startGatewayOnce();
+  const currentStart = startGatewaySingleFlight();
+  // 保留当前启动 Promise，让设置重启可先等待 runtime 准备结束，避免 stop/start 交叉。
+  gatewayStartPromise = currentStart;
   try {
-    return await gatewayStartPromise;
+    return await currentStart;
   } finally {
-    gatewayStartPromise = null;
+    if (gatewayStartPromise === currentStart) gatewayStartPromise = null;
   }
 }
 
@@ -814,24 +828,35 @@ function stopGateway() {
   return new Promise((resolve) => {
     const child = gatewayState.child;
     if (!child) {
-      resolve(buildState());
+      resolve(true);
       return;
     }
-    const timeout = setTimeout(() => {
+    let settled = false;
+    let forceStopTimeout = null;
+    const finish = (stopped) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(gracefulStopTimeout);
+      if (forceStopTimeout) clearTimeout(forceStopTimeout);
+      child.off("exit", onExit);
+      resolve(stopped);
+    };
+    const onExit = () => finish(true);
+    const gracefulStopTimeout = setTimeout(() => {
       try {
         child.kill("SIGKILL");
-      } catch {}
-      resolve(buildState());
+      } catch {
+        finish(false);
+        return;
+      }
+      // SIGKILL 发出后仍以真实 exit 事件为准；只在系统迟迟不回收时结束等待并保留错误状态。
+      forceStopTimeout = setTimeout(() => finish(false), 1500);
     }, 3000);
-    child.once("exit", () => {
-      clearTimeout(timeout);
-      resolve(buildState());
-    });
+    child.once("exit", onExit);
     try {
       child.kill("SIGTERM");
     } catch {
-      clearTimeout(timeout);
-      resolve(buildState());
+      finish(false);
     }
   });
 }
@@ -843,8 +868,13 @@ async function restartGatewayOnce() {
       await gatewayStartPromise;
     } catch {}
   }
-  await stopGateway();
-  gatewayState.child = null;
+  const stopped = await stopGateway();
+  if (!stopped) {
+    gatewayState.lastError = "gateway did not stop within timeout";
+    appendLog(`[launcher] ${gatewayState.lastError}\n`, { urgent: true });
+    broadcastState();
+    return buildState();
+  }
   return startGateway();
 }
 

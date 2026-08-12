@@ -208,7 +208,7 @@ test("web shell scripts revalidate unchanged content instead of retransferring i
   assert.equal(validated.body.length, 0);
 });
 
-test("web shell keeps restart controls at the settings edge and waits for a new gateway instance", () => {
+test("web shell keeps restart controls visible, recoverable and bound to a new gateway instance", () => {
   const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
 
   assert.match(html, /id="settings-restart" class="settings-restart"/);
@@ -217,12 +217,14 @@ test("web shell keeps restart controls at the settings edge and waits for a new 
   assert.match(html, /restartButton\.disabled = true/);
   assert.match(html, /restartButtonSpinner\.hidden = false/);
   assert.match(html, /state\.instanceId !== previousInstanceId/);
-  assert.match(html, /RESTART_WAIT_TIMEOUT_MS = 120_000/);
-  assert.match(html, /RESTART_STATUS_TIMEOUT_MS = 5_000/);
+  assert.match(html, /GATEWAY_RESTART_TIMEOUT_MS = 120_000/);
+  assert.match(html, /GATEWAY_RESTART_STATUS_TIMEOUT_MS = 5_000/);
   assert.match(html, /new AbortController\(\)/);
   assert.match(html, /document\.visibilityState === "hidden"/);
-  assert.match(html, /finishRestartWaitWithError\(t\("web\.settings\.restartTimedOut"\)\)/);
   assert.match(html, /window\.location\.reload\(\)/);
+  assert.match(html, /showRestartWaitFailure\(t\("web\.settings\.restartTimeout"\)\)/);
+  assert.match(html, /overflow-y: auto/);
+  assert.match(html, /env\(safe-area-inset-bottom, 0px\)/);
 });
 
 test("bridge keeps synchronous official preload methods out of the adaptive IPC fallback", () => {
