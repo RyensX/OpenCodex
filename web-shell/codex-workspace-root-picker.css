@@ -85,6 +85,14 @@
   border-color: var(--text-primary, #202123);
 }
 
+/* 新版官方多目录选择在 Web 端使用一行一个路径，textarea 保留同一套输入框视觉。 */
+.codex-web-workspace-root-input-multiple {
+  height: 104px;
+  min-height: 72px;
+  padding: 8px 12px;
+  resize: vertical;
+}
+
 /* 底部按钮右对齐，和官方 dialog action row 的视觉位置保持一致。 */
 .codex-web-workspace-root-actions {
   display: flex;
@@ -167,6 +175,11 @@
   .codex-web-workspace-root-input {
     height: 36px;
     font-size: 16px;
+  }
+
+  .codex-web-workspace-root-input-multiple {
+    height: 104px;
+    min-height: 72px;
   }
 
   .codex-web-workspace-root-actions {

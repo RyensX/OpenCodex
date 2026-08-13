@@ -347,8 +347,15 @@ test("gateway plugin switch keeps anonymous intent pending and syncs it after au
       storage.set(key, value);
     },
   };
+  const cookies = [];
+  const document = {};
+  Object.defineProperty(document, "cookie", {
+    set(value) {
+      cookies.push(String(value));
+    },
+  });
   window.window = window;
-  vm.runInNewContext(source, { window, localStorage, console, encodeURIComponent });
+  vm.runInNewContext(source, { window, document, localStorage, console, encodeURIComponent });
   const controller = window.OpenCodexGatewayPluginSwitches.create({
     pluginSystem,
     plugins: () => [plugin],
@@ -363,10 +370,12 @@ test("gateway plugin switch keeps anonymous intent pending and syncs it after au
   // 用户在匿名页关闭后，认证完成才把这次显式意图提交给网关，并清掉 pending 标记。
   localEnabled = false;
   controller.markPending(plugin.id, false);
+  assert.match(cookies.at(-1), /opencodex_gateway_plugin_sync_pending=1/);
   await controller.sync();
   assert.equal(remoteEnabled, false);
   assert.equal(revision, 8);
   assert.deepEqual(JSON.parse(storage.get(window.OpenCodexGatewayPluginSwitches.PENDING_STORAGE_KEY)), {});
+  assert.match(cookies.at(-1), /Max-Age=0/);
 });
 
 function responseRecorder() {

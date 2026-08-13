@@ -142,6 +142,56 @@ test("caps app-host relays per browser socket", async (t) => {
   assert.equal(relays[1].closeReason, "");
 });
 
+test("routes browser IPC over the authenticated websocket and preserves request identity", async (t) => {
+  const server = http.createServer();
+  const invocations = [];
+  createWsHub(server, {
+    createAppHostRelay() {},
+    async handleIpcInvoke(invocation) {
+      invocations.push(invocation);
+      // 即使底层 handler 意外返回同名字段，hub 也必须保留已认证请求自己的回包身份。
+      return {
+        ok: true,
+        requestId: "forged-request-id",
+        type: "forged-result-type",
+        value: { channel: invocation.request.channel },
+      };
+    },
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  t.after(async () => {
+    socket.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  await waitForOpen(socket);
+  socket.send(JSON.stringify({ type: "hello", clientId: "ipc-client" }));
+  await waitForMessage(socket, (message) => message.type === "hello-ack");
+
+  // clientId 必须来自 hello 后的 socket 身份；业务 request 只携带 channel/args。
+  socket.send(
+    JSON.stringify({
+      type: "opencodex:ipc-invoke",
+      clientId: "ipc-client",
+      requestId: "ipc-request-1",
+      request: { channel: "account-info", args: [] },
+    })
+  );
+  const response = await waitForMessage(
+    socket,
+    (message) => message.type === "opencodex:ipc-result" && message.requestId === "ipc-request-1"
+  );
+
+  assert.deepEqual(response.value, { channel: "account-info" });
+  assert.equal(response.ok, true);
+  assert.equal(response.type, "opencodex:ipc-result");
+  assert.equal(response.requestId, "ipc-request-1");
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0].clientId, "ipc-client");
+});
+
 test("skips serialization without clients and terminates a heavily backpressured socket", () => {
   const server = http.createServer();
   const hub = createWsHub(server, {

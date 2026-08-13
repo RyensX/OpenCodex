@@ -26,8 +26,12 @@ const {
   ensureDir,
   exists,
 } = require("./core/config.cjs");
-const { hostnameFromHostHeader, isLoopbackHostHeader } = require("./core/loopback-host.cjs");
-const { isRequestBodyTooLargeError, readBody, send, sendJson } = require("./http/http-utils.cjs");
+const {
+  hostnameFromHostHeader,
+  isLoopbackHostHeader,
+  loopbackHostname,
+} = require("./core/loopback-host.cjs");
+const { gzipIfUseful, isRequestBodyTooLargeError, readBody, send, sendJson } = require("./http/http-utils.cjs");
 const { createLocalFileService } = require("./http/local-files.cjs");
 const { createServiceRestartHandler } = require("./http/service-control.cjs");
 const { handleTokenUsageRequest } = require("./http/token-usage.cjs");
@@ -47,8 +51,9 @@ const {
 } = require("./ipc/official-runtime.cjs");
 const { openFileTargetFromIpc } = require("./ipc/open-file-context.cjs");
 const { createPickedFilesService } = require("./ipc/picked-files.cjs");
-const { createStaticAssetService } = require("./http/static-assets.cjs");
+const { OPENCODEX_RUNTIME_BOOTSTRAP_PATH, createStaticAssetService } = require("./http/static-assets.cjs");
 const { handleOpenCodexPluginApi } = require("./http/plugin-config.cjs");
+const { createHistoryPreviewService } = require("./history-preview.cjs");
 const { createWsHub } = require("./ipc/ws-hub.cjs");
 const { workspaceRootsFromIpcPayload } = require("./ipc/workspace-root-context.cjs");
 const { createWorkspaceRootsService } = require("./ipc/workspace-roots.cjs");
@@ -59,6 +64,9 @@ const {
   GATEWAY_RESTART_EXIT_CODE,
   isGatewayRestartSupported,
 } = require("../../shared/gateway-lifecycle.cjs");
+const {
+  HIDDEN_RUNTIME_GCM_HOLD_PATH,
+} = require("./electron/hidden-runtime-command-line.cjs");
 
 // server.cjs 只负责编排 HTTP/WS 生命周期；官方 Electron hook 细节放在 official-runtime.cjs。
 const LOCAL_DOWNLOAD_PATH_BODY_MAX_BYTES = 32 * 1024;
@@ -66,14 +74,50 @@ const CLIENT_LOG_BODY_MAX_BYTES = 256 * 1024;
 // pick-files 使用 base64，保留现有总附件能力并给 JSON 元数据预留 2MB；其它 IPC 同享这一硬上限。
 const IPC_INVOKE_BODY_MAX_BYTES =
   Math.ceil((CODEX_WEB_PICKED_FILES_MAX_TOTAL_BYTES * 4) / 3) + 2 * 1024 * 1024;
+const GATEWAY_PLUGIN_SYNC_PENDING_COOKIE = "opencodex_gateway_plugin_sync_pending";
 
 function gatewayUrl(req) {
   // Node 原生 req.url 只有 path，需要补 host 才能安全解析 query 参数。
   return new URL(req.url, `http://${req.headers.host || "localhost"}`);
 }
 
+function hasPendingGatewayPluginSync(req) {
+  // Cookie 只是一位提示，不包含插件 id 或配置；严格按分号边界解析，避免同名前缀误命中。
+  return String(req?.headers?.cookie || "")
+    .split(";")
+    .some((part) => part.trim() === `${GATEWAY_PLUGIN_SYNC_PENDING_COOKIE}=1`);
+}
+
 function remoteAddressFromRequest(req) {
   return String(req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "");
+}
+
+function holdHiddenRuntimeGcmRequest(req, hiddenRuntimeGcmSockets) {
+  const socket = req?.socket;
+  if (!socket || typeof socket.once !== "function") return Promise.resolve();
+  hiddenRuntimeGcmSockets.add(socket);
+  // 请求体需要继续消费；响应则刻意保持未完成，让 Chromium 停在首次 check-in 而不进入重试或 MCS 连接阶段。
+  if (typeof req.resume === "function") req.resume();
+  if (typeof socket.setTimeout === "function") socket.setTimeout(0);
+  diagnosticLog("gateway", "hidden_gcm_checkin_held", {
+    remoteAddress: remoteAddressFromRequest(req),
+  });
+  return new Promise((resolve) => {
+    socket.once("close", () => {
+      hiddenRuntimeGcmSockets.delete(socket);
+      resolve();
+    });
+  });
+}
+
+function isHiddenRuntimeGcmHoldRequest(req, pathname) {
+  // Host 与真实 peer 地址必须同时是 loopback，防止远端伪造 Host 后占用一个永不响应的连接。
+  return (
+    pathname === HIDDEN_RUNTIME_GCM_HOLD_PATH &&
+    req.method === "POST" &&
+    isLoopbackHostHeader(req.headers.host) &&
+    loopbackHostname(remoteAddressFromRequest(req))
+  );
 }
 
 function payloadFromArgs(args) {
@@ -279,7 +323,14 @@ async function handleLocalDownloadPath(req, res, localFiles) {
   }
 }
 
-function installShutdownHandlers(server, localFiles, pickedFiles, pluginService) {
+function installShutdownHandlers(
+  server,
+  localFiles,
+  pickedFiles,
+  pluginService,
+  historyPreview,
+  hiddenRuntimeGcmSockets
+) {
   let shuttingDown = false;
   let restartScheduled = false;
   function shutdown({ exitCode = null, reason = "", signal = "" } = {}) {
@@ -288,10 +339,14 @@ function installShutdownHandlers(server, localFiles, pickedFiles, pluginService)
     // 退出时先释放短期 token 和待处理的官方内部请求，避免请求一直挂起。
     localFiles.dispose();
     if (pickedFiles && typeof pickedFiles.dispose === "function") pickedFiles.dispose();
+    if (historyPreview && typeof historyPreview.dispose === "function") historyPreview.dispose();
     if (pluginService && typeof pluginService.dispose === "function") {
       pluginService.dispose(new Error("gateway shutting down"));
     }
     rejectPendingInternalResponses(new Error("gateway shutting down"));
+    // GCM check-in 响应被有意挂起；先销毁这些本机 socket，避免 http.Server.close 等待到强退超时。
+    for (const socket of hiddenRuntimeGcmSockets) socket.destroy();
+    hiddenRuntimeGcmSockets.clear();
     const exit = () => {
       if (Number.isInteger(exitCode)) {
         markGatewaySilentQuit(reason || "gateway_restart");
@@ -347,6 +402,8 @@ async function listen(server) {
 }
 
 function createRequestHandler({
+  historyPreview,
+  hiddenRuntimeGcmSockets = new Set(),
   localFiles,
   pickedFiles,
   pluginService,
@@ -358,8 +415,8 @@ function createRequestHandler({
    * 路由顺序很关键：
    * 1. 认证和 launcher 探活先处理。
    * 2. 登录页依赖的公开静态资源先放行。
-   * 3. SPA shell 可公开返回，真正敏感数据在后续 API/WS 才校验 token。
-   * 4. 其余 API、官方 renderer 和本地文件入口必须通过 auth gate。
+   * 3. 未登录请求返回公开登录壳；已认证请求直接返回最终 renderer。
+   * 4. 其余 API、官方资源和本地文件入口必须通过 auth gate。
    */
   const handleServiceRestart = createServiceRestartHandler({
     instanceId: GATEWAY_INSTANCE_ID,
@@ -370,6 +427,11 @@ function createRequestHandler({
   return async (req, res) => {
     const url = gatewayUrl(req);
     const pathname = url.pathname;
+
+    if (isHiddenRuntimeGcmHoldRequest(req, pathname)) {
+      // 仅隐藏 Electron 自己的 loopback 请求可进入；放在认证前，避免生成快速 401 导致 GCM 高频重试。
+      return holdHiddenRuntimeGcmRequest(req, hiddenRuntimeGcmSockets);
+    }
 
     // 认证接口必须在通用 auth gate 之前处理，否则首次登录会被拦截。
     if (pathname === "/api/auth/status") return handleAuthStatus(req, res, url);
@@ -396,9 +458,33 @@ function createRequestHandler({
     }
 
     if (staticAssets.isAppShellRoute(req, pathname)) {
-      // index shell 允许公开返回；后续 renderer 资源、API 和 WS 再走 token 校验。
-      // 这么做可以让未登录用户刷新任意前端路由时仍回到登录体验，而不是直接 401 文本页。
-      return staticAssets.serveWebShellIndex(res);
+      const shellAuth = AUTH_PASSWORD_HASH ? authResultForRequest(req, url) : { authenticated: true };
+      if (!shellAuth.authenticated) {
+        // 未登录用户刷新任意前端路由时仍回到登录体验，而不是直接看到 401 文本页。
+        return staticAssets.serveWebShellIndex(res);
+      }
+      if (url.searchParams.has("token")) {
+        // query token 只用于换取 HttpOnly cookie；认证成功后立即清理地址，避免后续同源 Referer 携带令牌。
+        const cleanUrl = new URL(url.href);
+        cleanUrl.searchParams.delete("token");
+        return send(
+          res,
+          302,
+          {
+            location: `${cleanUrl.pathname}${cleanUrl.search}`,
+            "cache-control": "no-store",
+            ...authRefreshHeaders(shellAuth),
+          },
+          ""
+        );
+      }
+      if (hasPendingGatewayPluginSync(req)) {
+        // 匿名入口曾记录插件改动时沿用原同步壳；正常导航没有此 cookie，仍直接进入最终 renderer。
+        return staticAssets.serveWebShellIndex(res);
+      }
+      // 导航请求已经通过认证时直接发送最终 HTML，省掉 auth/status、二次 HTML 请求和 document.write 重解析。
+      const sidebarPreview = await historyPreview?.snapshot?.({ maxWaitMs: 700 });
+      return staticAssets.serveRendererIndex(req, res, authRefreshHeaders(shellAuth), { sidebarPreview });
     }
 
     // 从这里开始进入受保护区：官方 renderer、IPC API、本地文件和诊断接口都不能匿名访问。
@@ -410,18 +496,26 @@ function createRequestHandler({
       res.setHeader(name, value);
     }
 
+    if (pathname === OPENCODEX_RUNTIME_BOOTSTRAP_PATH && req.method === "GET") {
+      // 聚合固定运行时脚本，消除高延迟网络上十余个 parser-blocking 往返；认证边界与配置接口一致。
+      return staticAssets.serveRuntimeBootstrap(req, res, requestAuthRefreshHeaders);
+    }
+
     if (pathname === "/codex-web-config.js") {
       // 运行时配置必须动态生成，因为端口、workspace roots 和 locale 都来自当前进程环境。
-      return send(
-        res,
-        200,
+      const response = gzipIfUseful(
+        req,
         {
           "content-type": "application/javascript; charset=utf-8",
           "cache-control": "no-store",
           ...requestAuthRefreshHeaders,
         },
-        await webConfigScript()
+        Buffer.from(
+          await webConfigScript({ gatewayPluginConfig: pluginService?.configStore?.snapshot?.() || null }),
+          "utf-8"
+        )
       );
+      return send(res, 200, response.headers, response.body);
     }
 
     if (pathname === "/api/health") {
@@ -470,56 +564,45 @@ function createRequestHandler({
 
     if (pathname === "/official-index.patched.html") {
       // 保留这个调试入口，便于单独查看官方 renderer HTML 的注入和 CSP patch 结果。
-      const html = staticAssets.createRendererResponse();
-      if (!html) {
-        return send(
-          res,
-          404,
-          { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
-          "Official renderer bundle is not available yet."
-        );
-      }
-      return send(res, 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }, html);
+      const sidebarPreview = await historyPreview?.snapshot?.({ maxWaitMs: 700 });
+      return staticAssets.serveRendererIndex(req, res, requestAuthRefreshHeaders, { sidebarPreview });
     }
 
     const file = staticAssets.staticFile(pathname);
     if (file && exists(file)) return staticAssets.serveFile(req, res, file, 200, pathname);
 
     if (staticAssets.isAppShellRoute(req, pathname)) {
-      // 受保护区内再兜底一次 SPA shell，覆盖登录后深链刷新场景。
-      return staticAssets.serveWebShellIndex(res);
+      // 理论上导航已在前面返回；保留最终 renderer 兜底，避免未来新增公开路由改变深链行为。
+      const sidebarPreview = await historyPreview?.snapshot?.({ maxWaitMs: 700 });
+      return staticAssets.serveRendererIndex(req, res, requestAuthRefreshHeaders, { sidebarPreview });
     }
 
     return send(res, 404, { "content-type": "text/plain; charset=utf-8" }, "Not Found");
   };
 }
 
-async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots, pluginService) {
-  /**
-   * 浏览器把 Electron ipcRenderer.invoke/send 折叠成 HTTP POST。
-   * gateway 在这里恢复 channel/args，并伪造 IpcMainEvent 交给官方 handler。
-   */
-  let body = "";
-  try {
-    body = await readBody(req, { maxBytes: IPC_INVOKE_BODY_MAX_BYTES });
-  } catch (error) {
-    if (isRequestBodyTooLargeError(error)) {
-      return sendJson(res, 413, { ok: false, error: "Request body is too large." });
-    }
-    throw error;
-  }
-  let parsed = {};
-  try {
-    parsed = JSON.parse(body || "{}");
-  } catch {
-    return sendJson(res, 400, { ok: false, error: "Invalid JSON body" });
-  }
+function ipcInvokeErrorResponse(error) {
+  const response = {
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+  };
+  if (error && typeof error.errorKey === "string" && error.errorKey) response.errorKey = error.errorKey;
+  return {
+    response,
+    status: error && typeof error.status === "number" ? error.status : 500,
+  };
+}
 
+function invalidIpcInvokeError(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
+}
+
+async function executeIpcInvoke(parsed, req, localFiles, pickedFiles, workspaceRoots, pluginService) {
   const channel = typeof parsed.channel === "string" ? parsed.channel : "";
-  if (!channel) {
-    // channel 是官方 IPC 的唯一路由键，缺失时不能继续调用隐藏 runtime。
-    return sendJson(res, 400, { ok: false, error: "Invalid IPC channel" });
-  }
+  // channel 是官方 IPC 的唯一路由键，缺失时不能继续调用隐藏 runtime。
+  if (!channel) throw invalidIpcInvokeError("Invalid IPC channel");
 
   const args = ipcArgsFromRequestBody(parsed);
   const payload = payloadFromArgs(args);
@@ -562,7 +645,7 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
       if (DEBUG_LOGS && !suppressRoutineLog) {
         diagnosticLog("gateway-ipc", "invoke_end", { ...diagnosticBase, elapsedMs, ok: true });
       }
-      return sendJson(res, 200, { ok: true, value });
+      return value;
     }
     if (channel === "opencodex:validate-workspace-root") {
       // 远端浏览器无法打开 Electron 目录选择器，只允许用户显式输入并在 gateway 侧校验本机路径。
@@ -571,9 +654,9 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
       if (DEBUG_LOGS && !suppressRoutineLog) {
         diagnosticLog("gateway-ipc", "invoke_end", { ...diagnosticBase, elapsedMs, ok: true });
       }
-      return sendJson(res, 200, { ok: true, value });
+      return value;
     }
-    // AsyncLocalStorage 让后续官方 webContents.send 和打开文件拦截能知道这次 HTTP IPC 属于哪个浏览器 client。
+    // AsyncLocalStorage 让后续官方 webContents.send 和打开文件拦截能知道这次浏览器 IPC 属于哪个 client。
     const value = await requestContext.run(
       {
         browserHostname,
@@ -601,7 +684,7 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
     if (DEBUG_LOGS || elapsedMs >= IPC_SLOW_LOG_MS) {
       diagnosticLog("gateway-ipc", "invoke_slow", { ...diagnosticBase, elapsedMs, slowThresholdMs: IPC_SLOW_LOG_MS });
     }
-    return sendJson(res, 200, { ok: true, value });
+    return value;
   } catch (error) {
     const elapsedMs = Date.now() - startedAtMs;
     diagnosticWarn("gateway-ipc", "invoke_failed", {
@@ -610,13 +693,48 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
       error: error instanceof Error ? error.message : String(error),
       ok: false,
     });
-    const status = error && typeof error.status === "number" ? error.status : 500;
-    const response = {
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
-    if (error && typeof error.errorKey === "string" && error.errorKey) response.errorKey = error.errorKey;
+    throw error;
+  }
+}
+
+async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots, pluginService) {
+  /**
+   * HTTP 是旧页面和 WS 尚未就绪时的兼容通道；两种传输最终复用同一套官方 IPC 执行逻辑。
+   */
+  let body = "";
+  try {
+    body = await readBody(req, { maxBytes: IPC_INVOKE_BODY_MAX_BYTES });
+  } catch (error) {
+    if (isRequestBodyTooLargeError(error)) {
+      return sendJson(res, 413, { ok: false, error: "Request body is too large." });
+    }
+    throw error;
+  }
+  let parsed = {};
+  try {
+    parsed = JSON.parse(body || "{}");
+  } catch {
+    return sendJson(res, 400, { ok: false, error: "Invalid JSON body" });
+  }
+
+  try {
+    const value = await executeIpcInvoke(parsed, req, localFiles, pickedFiles, workspaceRoots, pluginService);
+    return sendJson(res, 200, { ok: true, value });
+  } catch (error) {
+    const { response, status } = ipcInvokeErrorResponse(error);
     return sendJson(res, status, response);
+  }
+}
+
+async function handleWsIpcInvoke(request, req, clientId, localFiles, pickedFiles, workspaceRoots, pluginService) {
+  // clientId 只信任已完成 hello 的 socket 映射，忽略浏览器帧里可能伪造的同名字段。
+  const parsed = request && typeof request === "object" ? { ...request, clientId } : {};
+  try {
+    const value = await executeIpcInvoke(parsed, req, localFiles, pickedFiles, workspaceRoots, pluginService);
+    return { ok: true, value };
+  } catch (error) {
+    const { response, status } = ipcInvokeErrorResponse(error);
+    return { ...response, status };
   }
 }
 
@@ -639,12 +757,27 @@ async function createGateway() {
   // 先启动官方 runtime，确保后续 health/IPC 路由能看到官方 handler 注册状态。
   await startOfficialRuntime({ decorateAppServerChild: pluginService.modelRouter.decorateAppServerChild });
 
+  const historyPreview = createHistoryPreviewService({ transport: pluginService.modelRouter.transport });
+  // 预热不延迟网关监听；首个导航若更早到达，会在自己的 700ms 预算内复用这次读取。
+  void historyPreview.warm();
   const workspaceRoots = createWorkspaceRootsService();
   const localFiles = createLocalFileService({ getWorkspaceRoots: workspaceRoots.workspaceRoots });
   const pickedFiles = createPickedFilesService();
   const staticAssets = createStaticAssetService({ getI18nSnapshot, getOfficialBundle });
+  // 与 request handler 和退出流程共享同一个集合，确保挂起的本机 GCM socket 可被精确回收。
+  const hiddenRuntimeGcmSockets = new Set();
+  try {
+    // 在端口可访问前完成首屏大主包的 patch/压缩，首个远程导航不再承担一次性 CPU 成本。
+    await staticAssets.prewarmRendererAssets();
+  } catch (error) {
+    diagnosticWarn("gateway", "renderer_asset_prewarm_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
   let requestRestart = () => false;
   const requestHandler = createRequestHandler({
+    historyPreview,
+    hiddenRuntimeGcmSockets,
     localFiles,
     pickedFiles,
     pluginService,
@@ -666,6 +799,17 @@ async function createGateway() {
   // 注入 app-host relay 工厂：WS hub 只管理浏览器连接，真正的官方 MessagePort 仍由 official-runtime 创建。
   const webSocketHub = createWsHub(server, {
     createAppHostRelay: createOfficialAppHostRelay,
+    handleIpcInvoke({ clientId, request, req }) {
+      return handleWsIpcInvoke(
+        request,
+        req,
+        clientId,
+        localFiles,
+        pickedFiles,
+        workspaceRoots,
+        pluginService
+      );
+    },
     handleNotificationEvent: handleOfficialNotificationEvent,
     isAuthed,
     observeAppHostFrame(frame) {
@@ -678,7 +822,14 @@ async function createGateway() {
   });
   // official-runtime 通过这个 hub 把官方 renderer 的异步消息转发给浏览器。
   setWsHub(webSocketHub);
-  const shutdownController = installShutdownHandlers(server, localFiles, pickedFiles, pluginService);
+  const shutdownController = installShutdownHandlers(
+    server,
+    localFiles,
+    pickedFiles,
+    pluginService,
+    historyPreview,
+    hiddenRuntimeGcmSockets
+  );
   requestRestart = shutdownController.requestRestart;
   await listen(server);
 
@@ -686,7 +837,14 @@ async function createGateway() {
   diagnosticLog("gateway", "health_endpoint", { url: `http://${HOST}:${PORT}/api/health` });
   diagnosticLog("gateway", "unknown_ipc_log", { path: path.relative(PROJECT_ROOT, UNKNOWN_IPC_PATH) });
 
-  return { localFiles, pluginService, server, staticAssets, workspaceRoots, wsHub: webSocketHub };
+  return { historyPreview, localFiles, pluginService, server, staticAssets, workspaceRoots, wsHub: webSocketHub };
 }
 
-module.exports = { createGateway, createRequestHandler };
+module.exports = {
+  createGateway,
+  createRequestHandler,
+  __test: {
+    holdHiddenRuntimeGcmRequest,
+    isHiddenRuntimeGcmHoldRequest,
+  },
+};

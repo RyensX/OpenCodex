@@ -20,6 +20,14 @@ const COMPOSER_SOURCE = fs.readFileSync(
 );
 const TOOLTIP_SOURCE = fs.readFileSync(path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js"), "utf8");
 const BRIDGE_SOURCE = fs.readFileSync(path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js"), "utf8");
+const SIDEBAR_PREVIEW_SOURCE = fs.readFileSync(
+  path.join(WEB_SHELL_DIR, "codex-sidebar-preview.js"),
+  "utf8"
+);
+const OFFSCREEN_ANIMATION_GUARD_SOURCE = fs.readFileSync(
+  path.join(WEB_SHELL_DIR, "codex-offscreen-animation-guard.js"),
+  "utf8"
+);
 const REMOTE_FILE_ACTIONS_SOURCE = fs.readFileSync(
   path.join(WEB_SHELL_DIR, "codex-remote-file-actions.js"),
   "utf8"
@@ -89,16 +97,24 @@ class TestStyle {
     return this.values.get(name) || "";
   }
 
-  setProperty(name, value) {
+  getPropertyPriority(name) {
+    return this.priorities?.get(name) || "";
+  }
+
+  setProperty(name, value, priority = "") {
     const nextValue = String(value);
-    if (this.values.get(name) === nextValue) return;
+    const nextPriority = String(priority);
+    if (this.values.get(name) === nextValue && this.priorities?.get(name) === nextPriority) return;
+    this.priorities ||= new Map();
     this.values.set(name, nextValue);
+    this.priorities.set(name, nextPriority);
     this.mutationCount = (this.mutationCount || 0) + 1;
   }
 
   removeProperty(name) {
     if (!this.values.has(name)) return;
     this.values.delete(name);
+    this.priorities?.delete(name);
     this.mutationCount = (this.mutationCount || 0) + 1;
   }
 }
@@ -217,6 +233,378 @@ function createScheduler() {
     },
   };
 }
+
+test("sidebar preview hands off immediately when the official sidebar mounts", () => {
+  const scheduler = createScheduler();
+  const document = new ListenerTarget();
+  let removed = false;
+  let officialReady = false;
+  let observer = null;
+  const localeMarker = new TestElement("meta");
+  localeMarker.setAttribute("content", "/official-patched-v7/assets/zh-CN-test.js");
+  const shellMarker = new TestElement("meta");
+  shellMarker.setAttribute("content", "/official-patched-v7/assets/thread-shell-test.js");
+  const preview = {
+    contains: () => true,
+    remove() {
+      removed = true;
+    },
+    setAttribute() {},
+  };
+  const previewRow = {
+    closest: (selector) => selector === "[data-opencodex-sidebar-preview-row]" ? previewRow : null,
+    getAttribute: () => "thread-1",
+    setAttribute() {},
+  };
+  const officialRow = { getAttribute: () => "local:thread-1" };
+  document.documentElement = {};
+  document.head = new TestElement("head");
+  document.readyState = "loading";
+  document.createElement = (tagName) => new TestElement(tagName);
+  document.getElementById = () => (removed ? null : preview);
+  document.querySelector = () => (officialReady ? officialRow : null);
+  document.querySelectorAll = (selector) =>
+    selector === 'meta[name="opencodex-late-modulepreload"]'
+      ? [localeMarker, shellMarker]
+      : selector === 'link[rel="modulepreload"]'
+        ? document.head.children
+        : officialReady
+          ? [officialRow]
+          : [];
+  const window = new ListenerTarget();
+  Object.assign(window, {
+    MutationObserver: class {
+      constructor(callback) {
+        this.callback = callback;
+        observer = this;
+      }
+      disconnect() {}
+      observe() {}
+    },
+    cancelAnimationFrame: scheduler.cancelAnimationFrame,
+    clearTimeout: scheduler.clearTimeout,
+    requestAnimationFrame: scheduler.requestAnimationFrame,
+    setTimeout: scheduler.setTimeout,
+  });
+  window.window = window;
+
+  vm.runInNewContext(SIDEBAR_PREVIEW_SOURCE, { document, MouseEvent: class {}, window });
+  assert.equal(document.head.children.length, 0);
+  window.emit("load");
+  assert.equal(document.head.children.length, 0);
+  const localeTimer = Array.from(scheduler.timers.values()).find((timer) => timer.delay === 350);
+  assert.ok(localeTimer);
+  localeTimer.callback();
+  assert.equal(document.head.children.length, 2);
+  assert.equal(document.head.children[0].getAttribute("href"), "/official-patched-v7/assets/zh-CN-test.js");
+  assert.equal(document.head.children[1].getAttribute("href"), "/official-patched-v7/assets/thread-shell-test.js");
+  document.emit("DOMContentLoaded");
+  // 常态 React 挂载不启用全树观察；只有用户提前点击预览会话时才临时启用。
+  assert.equal(observer, null);
+  document.emit("click", {
+    target: previewRow,
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.ok(observer);
+  officialReady = true;
+  observer.callback();
+  scheduler.flushFrames();
+
+  assert.equal(removed, true);
+  assert.equal(document.listenerCount("click"), 0);
+  assert.doesNotMatch(SIDEBAR_PREVIEW_SOURCE, /SidebarPreviewDiagnostics/);
+});
+
+test("sidebar preview leaves no observer or timer behind when history is empty", () => {
+  const scheduler = createScheduler();
+  const document = new ListenerTarget();
+  let observerCount = 0;
+  document.documentElement = {};
+  document.head = new TestElement("head");
+  document.readyState = "loading";
+  document.getElementById = () => null;
+  document.querySelector = () => null;
+  document.querySelectorAll = () => [];
+  const window = new ListenerTarget();
+  Object.assign(window, {
+    MutationObserver: class {
+      constructor() {
+        observerCount += 1;
+      }
+      disconnect() {}
+      observe() {}
+    },
+    cancelAnimationFrame: scheduler.cancelAnimationFrame,
+    clearTimeout: scheduler.clearTimeout,
+    requestAnimationFrame: scheduler.requestAnimationFrame,
+    setTimeout: scheduler.setTimeout,
+  });
+  window.window = window;
+
+  vm.runInNewContext(SIDEBAR_PREVIEW_SOURCE, { document, MouseEvent: class {}, window });
+  assert.equal(document.listenerCount("click"), 1);
+  assert.equal(scheduler.timers.size, 1);
+  document.emit("DOMContentLoaded");
+
+  assert.equal(observerCount, 0);
+  assert.equal(document.listenerCount("click"), 0);
+  assert.equal(scheduler.timers.size, 0);
+});
+
+test("offscreen sidebar animations pause until visible and observe replacement spinners", () => {
+  const scheduler = createScheduler();
+  const document = new ListenerTarget();
+  const initialSpinner = new TestElement();
+  const replacementSpinner = new TestElement();
+  initialSpinner.matches = replacementSpinner.matches = (selector) => selector === ".animate-spin";
+  const sidebar = new TestElement();
+  const sidebarEvents = new ListenerTarget();
+  sidebar.addEventListener = sidebarEvents.addEventListener.bind(sidebarEvents);
+  let spinnerTop = 200;
+  sidebar.getBoundingClientRect = () => ({ bottom: 100, left: 0, right: 100, top: 0 });
+  initialSpinner.getBoundingClientRect = () => ({
+    bottom: spinnerTop + 20,
+    left: 0,
+    right: 20,
+    top: spinnerTop,
+  });
+  sidebar.querySelectorAll = (selector) => selector === ".animate-spin" ? [initialSpinner] : [];
+  let mounted = false;
+  let discoveryObserver = null;
+  let sidebarObserver = null;
+  let intersectionObserver = null;
+  document.documentElement = new TestElement("html");
+  document.querySelector = (selector) =>
+    selector === "[data-app-action-sidebar-scroll]" && mounted ? sidebar : null;
+  const mutationObservers = [];
+  const window = new ListenerTarget();
+  Object.assign(window, {
+    IntersectionObserver: class {
+      constructor(callback, options) {
+        this.callback = callback;
+        this.options = options;
+        this.targets = [];
+        this.unobserved = [];
+        intersectionObserver = this;
+      }
+      observe(target) {
+        this.targets.push(target);
+      }
+      unobserve(target) {
+        this.unobserved.push(target);
+      }
+    },
+    MutationObserver: class {
+      constructor(callback) {
+        this.callback = callback;
+        this.disconnected = false;
+        mutationObservers.push(this);
+      }
+      disconnect() {
+        this.disconnected = true;
+      }
+      observe(target) {
+        if (target === document.documentElement) discoveryObserver = this;
+        if (target === sidebar) sidebarObserver = this;
+      }
+    },
+    requestAnimationFrame: scheduler.requestAnimationFrame,
+  });
+  window.window = window;
+
+  vm.runInNewContext(OFFSCREEN_ANIMATION_GUARD_SOURCE, { document, window });
+  assert.ok(discoveryObserver);
+  mounted = true;
+  discoveryObserver.callback();
+  scheduler.flushFrames();
+
+  // 主内容根尚未挂载时保留共享发现监听；两个区域都找到后才会自动关闭。
+  assert.equal(discoveryObserver.disconnected, false);
+  assert.equal(intersectionObserver.options.root, sidebar);
+  assert.equal(initialSpinner.style.getPropertyValue("animation-play-state"), "paused");
+  scheduler.flushFrames();
+  assert.equal(initialSpinner.style.getPropertyValue("animation-play-state"), "paused");
+  spinnerTop = 20;
+  sidebarEvents.emit("scroll");
+  scheduler.flushFrames();
+  assert.equal(initialSpinner.style.getPropertyValue("animation-play-state"), "");
+  intersectionObserver.callback([{ isIntersecting: true, target: initialSpinner }]);
+  assert.equal(initialSpinner.style.getPropertyValue("animation-play-state"), "");
+  intersectionObserver.callback([{ isIntersecting: false, target: initialSpinner }]);
+  assert.equal(initialSpinner.style.getPropertyValue("animation-play-state"), "paused");
+
+  sidebarObserver.callback([{ addedNodes: [replacementSpinner], removedNodes: [initialSpinner] }]);
+  assert.equal(intersectionObserver.targets.includes(replacementSpinner), true);
+  assert.equal(intersectionObserver.unobserved.includes(initialSpinner), true);
+  assert.equal(initialSpinner.style.getPropertyValue("animation-play-state"), "");
+  assert.equal(replacementSpinner.style.getPropertyValue("animation-play-state"), "paused");
+  assert.equal(mutationObservers.length, 2);
+});
+
+test("offscreen horizontal scroll fades pause without changing visible content", () => {
+  const scheduler = createScheduler();
+  const document = new ListenerTarget();
+  document.documentElement = new TestElement("html");
+  const visibleFade = new TestElement();
+  const offscreenFade = new TestElement();
+  const replacementFade = new TestElement();
+  visibleFade.matches = offscreenFade.matches = replacementFade.matches =
+    (selector) => selector === ".horizontal-scroll-fade-mask";
+  let offscreenTop = 200;
+  visibleFade.getBoundingClientRect = () => ({ bottom: 40, left: 10, right: 90, top: 20 });
+  offscreenFade.getBoundingClientRect = () => ({
+    bottom: offscreenTop + 20,
+    left: 10,
+    right: 90,
+    top: offscreenTop,
+  });
+  replacementFade.getBoundingClientRect = () => ({ bottom: 240, left: 10, right: 90, top: 220 });
+  const main = new TestElement("main");
+  const mainEvents = new ListenerTarget();
+  main.addEventListener = mainEvents.addEventListener.bind(mainEvents);
+  main.removeEventListener = mainEvents.removeEventListener.bind(mainEvents);
+  main.getBoundingClientRect = () => ({ bottom: 100, left: 0, right: 100, top: 0 });
+  main.querySelectorAll = (selector) =>
+    selector === ".horizontal-scroll-fade-mask" ? [visibleFade, offscreenFade] : [];
+  document.querySelector = (selector) =>
+    selector === "main[data-app-shell-main-surface]" ? main : null;
+  let mainObserver = null;
+  let intersectionObserver = null;
+  const window = new ListenerTarget();
+  Object.assign(window, {
+    IntersectionObserver: class {
+      constructor(callback, options) {
+        this.callback = callback;
+        this.options = options;
+        this.targets = [];
+        this.unobserved = [];
+        intersectionObserver = this;
+      }
+      disconnect() {}
+      observe(target) {
+        this.targets.push(target);
+      }
+      unobserve(target) {
+        this.unobserved.push(target);
+      }
+    },
+    MutationObserver: class {
+      constructor(callback) {
+        this.callback = callback;
+      }
+      disconnect() {}
+      observe(target, options) {
+        if (target === main && options?.subtree === true) mainObserver = this;
+      }
+    },
+    cancelAnimationFrame: scheduler.cancelAnimationFrame,
+    requestAnimationFrame: scheduler.requestAnimationFrame,
+  });
+  window.window = window;
+
+  vm.runInNewContext(OFFSCREEN_ANIMATION_GUARD_SOURCE, { document, window });
+  assert.equal(intersectionObserver.options.root, main);
+  assert.equal(visibleFade.style.getPropertyValue("animation-play-state"), "paused");
+  assert.equal(offscreenFade.style.getPropertyValue("animation-play-state"), "paused");
+  scheduler.flushFrames();
+  assert.equal(visibleFade.style.getPropertyValue("animation-play-state"), "");
+  assert.equal(offscreenFade.style.getPropertyValue("animation-play-state"), "paused");
+
+  offscreenTop = 30;
+  mainEvents.emit("scroll");
+  scheduler.flushFrames();
+  assert.equal(offscreenFade.style.getPropertyValue("animation-play-state"), "");
+
+  mainObserver.callback([{ addedNodes: [replacementFade], removedNodes: [offscreenFade] }]);
+  assert.equal(intersectionObserver.unobserved.includes(offscreenFade), true);
+  assert.equal(offscreenFade.style.getPropertyValue("animation-play-state"), "");
+  assert.equal(replacementFade.style.getPropertyValue("animation-play-state"), "paused");
+});
+
+test("offscreen animation guard releases and reinstalls when the sidebar root is replaced", () => {
+  const scheduler = createScheduler();
+  const document = new ListenerTarget();
+  document.documentElement = new TestElement("html");
+  const rootContainer = new TestElement();
+  document.documentElement.appendChild(rootContainer);
+
+  function createSidebar() {
+    const spinner = new TestElement();
+    spinner.matches = (selector) => selector === ".animate-spin";
+    spinner.getBoundingClientRect = () => ({ bottom: 220, left: 0, right: 20, top: 200 });
+    const sidebar = new TestElement();
+    const events = new ListenerTarget();
+    sidebar.addEventListener = events.addEventListener.bind(events);
+    sidebar.removeEventListener = events.removeEventListener.bind(events);
+    sidebar.getBoundingClientRect = () => ({ bottom: 100, left: 0, right: 100, top: 0 });
+    sidebar.querySelectorAll = (selector) => selector === ".animate-spin" ? [spinner] : [];
+    return { events, sidebar, spinner };
+  }
+
+  const first = createSidebar();
+  const second = createSidebar();
+  rootContainer.appendChild(first.sidebar);
+  let currentSidebar = first.sidebar;
+  document.querySelector = (selector) =>
+    selector === "[data-app-action-sidebar-scroll]" ? currentSidebar : null;
+  let rootLifecycleObserver = null;
+  const intersectionObservers = [];
+  const window = new ListenerTarget();
+  Object.assign(window, {
+    IntersectionObserver: class {
+      constructor(callback, options) {
+        this.callback = callback;
+        this.options = options;
+        intersectionObservers.push(this);
+      }
+      disconnect() {
+        this.disconnected = true;
+      }
+      observe() {}
+      unobserve() {}
+    },
+    MutationObserver: class {
+      constructor(callback) {
+        this.callback = callback;
+      }
+      disconnect() {
+        this.disconnected = true;
+      }
+      observe(target, options) {
+        this.target = target;
+        this.options = options;
+        if (target === rootContainer && options?.subtree !== true) rootLifecycleObserver = this;
+      }
+    },
+    cancelAnimationFrame: scheduler.cancelAnimationFrame,
+    requestAnimationFrame: scheduler.requestAnimationFrame,
+  });
+  window.window = window;
+
+  vm.runInNewContext(OFFSCREEN_ANIMATION_GUARD_SOURCE, { document, window });
+  assert.ok(rootLifecycleObserver);
+  assert.equal(first.spinner.style.getPropertyValue("animation-play-state"), "paused");
+  assert.equal(first.events.listenerCount("scroll"), 1);
+
+  // 模拟 React 用新的滚动容器替换整个侧栏，而不是只替换容器内部的 spinner。
+  rootContainer.children = [second.sidebar];
+  first.sidebar.parentElement = null;
+  first.sidebar.parentNode = null;
+  second.sidebar.parentElement = rootContainer;
+  second.sidebar.parentNode = rootContainer;
+  currentSidebar = second.sidebar;
+  const previousRootLifecycleObserver = rootLifecycleObserver;
+  previousRootLifecycleObserver.callback([{ addedNodes: [second.sidebar], removedNodes: [first.sidebar] }]);
+  scheduler.flushFrames();
+
+  assert.equal(previousRootLifecycleObserver.disconnected, true);
+  assert.equal(first.events.listenerCount("scroll"), 0);
+  assert.equal(first.spinner.style.getPropertyValue("animation-play-state"), "");
+  assert.equal(second.spinner.style.getPropertyValue("animation-play-state"), "paused");
+  assert.equal(second.events.listenerCount("scroll"), 1);
+  assert.equal(intersectionObservers.at(-1).options.root, second.sidebar);
+});
 
 test("shared viewport coordinator coalesces event storms and owns one listener source", () => {
   const scheduler = createScheduler();
@@ -1092,6 +1480,8 @@ test("low-priority IPC queue rejects overflow instead of retaining unlimited tas
 test("browser IPC requests do not serialize the same single argument twice", () => {
   assert.match(BRIDGE_SOURCE, /stringifyForIpc\(\{ channel, args: ipcArgs, clientId \}\)/);
   assert.doesNotMatch(BRIDGE_SOURCE, /stringifyForIpc\(\{ channel, args: ipcArgs, payload, clientId \}\)/);
+  assert.match(BRIDGE_SOURCE, /IPC_WS_MAX_BODY_CHARS = 16 \* 1024 \* 1024/);
+  assert.match(BRIDGE_SOURCE, /body\.length > IPC_WS_MAX_BODY_CHARS/);
 });
 
 test("app-host oversized frames bypass the limit only when they can be sent immediately", () => {
@@ -1246,6 +1636,11 @@ test("Statsig telemetry fetch messages complete locally without gateway work", (
   );
 });
 
+test("browser Statsig defaults preserve the official new-worktree capability", () => {
+  // Web 壳接管 Statsig 初始化后必须显式打开该官方门，否则 Git 项目的工作树入口会静默消失。
+  assert.match(BRIDGE_SOURCE, /STATSIG_DEFAULT_FEATURE_OVERRIDES\s*=\s*\{[\s\S]*?"505458": true/);
+});
+
 test("token usage passive parsing bounds wide and cyclic payload traversal", () => {
   const window = {
     clearTimeout,
@@ -1367,6 +1762,7 @@ test("whole-document observer filters stay scoped to their feature mounts", () =
   assert.match(BRIDGE_SOURCE, /document\.visibilityState === "hidden"/);
   assert.match(BRIDGE_SOURCE, /if \(!CLIENT_DIAGNOSTICS_ENABLED\) return/);
   assert.match(BRIDGE_SOURCE, /CLIENT_DIAGNOSTICS_ENABLED \? ipcDiagnosticSummary/);
+  assert.match(BRIDGE_SOURCE, /IPC_INVOKE_TIMEOUT_MS = 65_000/);
   assert.match(BRIDGE_SOURCE, /w\.setTimeout\(\(\) => controller\.abort\(\), IPC_INVOKE_TIMEOUT_MS\)/);
   assert.match(BRIDGE_SOURCE, /signal: controller\?\.signal/);
   assert.match(BRIDGE_SOURCE, /CONNECTOR_LOGO_WAITERS_MAX_ENTRIES/);

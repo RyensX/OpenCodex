@@ -3,6 +3,7 @@
   if (w.OpenCodexGatewayPluginSwitches) return;
 
   const PENDING_STORAGE_KEY = "opencodex_gateway_plugin_enable_pending_v1";
+  const PENDING_COOKIE_NAME = "opencodex_gateway_plugin_sync_pending";
 
   function loadPending() {
     try {
@@ -14,8 +15,15 @@
   }
 
   function savePending(value) {
+    const pending = value && typeof value === "object" ? value : {};
     try {
-      localStorage.setItem(PENDING_STORAGE_KEY, JSON.stringify(value || {}));
+      localStorage.setItem(PENDING_STORAGE_KEY, JSON.stringify(pending));
+    } catch {}
+    try {
+      // 服务端只读取“是否存在待同步操作”，具体插件和值仍留在同源 localStorage 中。
+      document.cookie = Object.keys(pending).length > 0
+        ? `${PENDING_COOKIE_NAME}=1; Path=/; SameSite=Lax`
+        : `${PENDING_COOKIE_NAME}=; Path=/; SameSite=Lax; Max-Age=0`;
     } catch {}
   }
 
@@ -61,9 +69,15 @@
 
     async function sync() {
       const available = gatewayPlugins();
+      const pending = loadPending();
+      const availableIds = new Set(available.map((plugin) => plugin.id));
+      // 已卸载插件不再有可提交目标，清掉其遗留意图，避免认证入口永久退回兼容壳。
+      for (const pluginId of Object.keys(pending)) {
+        if (!availableIds.has(pluginId)) delete pending[pluginId];
+      }
+      savePending(pending);
       if (available.length === 0) return;
       let config = await request("/api/opencodex/plugins/config");
-      const pending = loadPending();
       for (const plugin of available) {
         const remote = (config.plugins || []).find((item) => item.id === plugin.id);
         if (!remote) continue;
@@ -82,5 +96,5 @@
     return Object.freeze({ markPending, sync });
   }
 
-  w.OpenCodexGatewayPluginSwitches = Object.freeze({ PENDING_STORAGE_KEY, create });
+  w.OpenCodexGatewayPluginSwitches = Object.freeze({ PENDING_COOKIE_NAME, PENDING_STORAGE_KEY, create });
 })();

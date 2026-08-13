@@ -195,10 +195,13 @@ class LocalCodexBundleProvider {
       const unpackedResult = this.copyUnpackedRuntime({ sourceInfo, tmpDir });
       // 隐藏网关不展示原生宠物窗口，标记专用 fallback 可避免永久能力错误触发无限恢复。
       const runtimeOptimizations = this.runtimeOptimizer.optimize(tmpDir);
+      // 侧栏 Git 与工作树环境都依赖识别官方压缩代码结构；任一布局变化都必须显式告警，不能静默失去保护。
       if (
         runtimeOptimizations.nativePetComposition === "unsupported-layout" ||
         runtimeOptimizations.nativePetPrewarm === "unsupported-layout" ||
-        runtimeOptimizations.macPushRegistration === "unsupported-layout"
+        runtimeOptimizations.macPushRegistration === "unsupported-layout" ||
+        runtimeOptimizations.gitDiscovery === "unsupported-layout" ||
+        runtimeOptimizations.worktreeShellEnvironment === "unsupported-layout"
       ) {
         this.logger.warn(
           `官方隐藏运行时结构已变化，本次仅应用可安全识别的适配：${runtimeOptimizations.unsupportedFiles.join(", ")}`

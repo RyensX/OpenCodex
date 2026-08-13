@@ -6,6 +6,15 @@ if (process.versions && process.versions.electron) {
 const { app } = require("electron");
 const { installLauncherLifecycleWatchdog } = require("./lifecycle/launcher-lifecycle-watchdog.cjs");
 const { installGatewayQuitConfirmationSuppressor, markGatewaySilentQuit } = require("./lifecycle/quit-confirmation-suppressor.cjs");
+const {
+  configureHiddenRuntimeCommandLine,
+  configureHiddenRuntimeEnvironment,
+} = require("./electron/hidden-runtime-command-line.cjs");
+
+// 官方 main 加载前先关闭副本无法使用的更新器；Chromium 开关也必须在 app ready 前设置。
+configureHiddenRuntimeEnvironment();
+configureHiddenRuntimeCommandLine(app);
+// 先应用 Chromium 开关再加载网关编排及其 Electron 依赖，防止未来模块初始化提前创建隐藏 renderer。
 const { createGateway } = require("./server.cjs");
 
 const gatewayAgentMode = process.env.OPENCODEX_GATEWAY_AGENT_MODE === "1";

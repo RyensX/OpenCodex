@@ -8,6 +8,10 @@ const {
   GATEWAY_RESTART_SUPPORTED_ENV,
   createGatewayExitHandler,
 } = require("../../shared/gateway-lifecycle.cjs");
+const {
+  hiddenRuntimeGcmCommandLineArgs,
+  isolateHiddenRuntimeGcmStoresForUserData,
+} = require("../runtime/electron/hidden-runtime-command-line.cjs");
 
 // dev runner 位于 gateway/dev 下，项目根目录需要回退两级。
 const APP_ROOT = path.resolve(__dirname, "..", "..");
@@ -104,7 +108,18 @@ async function main() {
     logger: logLauncher,
   });
 
-  const officialRuntimeArgs = [`--user-data-dir=${officialUserDataDir}`];
+  /**
+   * GCM 可能在 Electron main 脚本执行前打开 Profile。父进程必须先隔离旧凭据，并把替代端点
+   * 直接写进初始 argv，才能保证隐藏 runner 不复用历史 MCS 登录态。
+   */
+  const gcmIsolation = isolateHiddenRuntimeGcmStoresForUserData(officialUserDataDir);
+  if (!gcmIsolation.isolated) {
+    logLauncher(`[launcher] unable to isolate hidden GCM profile: ${gcmIsolation.reason}\n`);
+  }
+  const officialRuntimeArgs = [
+    `--user-data-dir=${officialUserDataDir}`,
+    ...hiddenRuntimeGcmCommandLineArgs(process.env),
+  ];
   spawnGateway(officialRuntime, officialRuntimeArgs);
 
   const stopChild = (signal) => {

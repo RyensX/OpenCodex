@@ -6,7 +6,10 @@ const test = require("node:test");
 const vm = require("node:vm");
 const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
 const { pluginMessagesForLocale } = require("../runtime/core/plugin-assets.cjs");
-const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
+const {
+  OPENCODEX_RUNTIME_BOOTSTRAP_PATH,
+  createStaticAssetService,
+} = require("../runtime/http/static-assets.cjs");
 
 const WEB_SHELL_INDEX = path.resolve(__dirname, "..", "..", "web-shell", "index.html");
 const BRIDGE_POLYFILL = path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js");
@@ -169,6 +172,32 @@ function serveOfficialAssetResponse(service, reqPath, host = "localhost:3737", h
   service.serveFile({ headers: { host, ...headers } }, res, file, 200, reqPath);
   return res;
 }
+
+function runtimeBootstrapSource(service) {
+  const res = makeResponseRecorder();
+  service.serveRuntimeBootstrap({ headers: {} }, res);
+  assert.equal(res.status, 200);
+  return res.body.toString("utf-8");
+}
+
+test("runtime bootstrap honors an explicit gzip rejection", (t) => {
+  const service = createService(makeOfficialWebviewDir(t));
+  const identity = makeResponseRecorder();
+  service.serveRuntimeBootstrap({ headers: { "accept-encoding": "gzip;q=0, br;q=0, *;q=1" } }, identity);
+  const compressed = makeResponseRecorder();
+  service.serveRuntimeBootstrap({ headers: { "accept-encoding": "gzip" } }, compressed);
+  const brotli = makeResponseRecorder();
+  service.serveRuntimeBootstrap({ headers: { "accept-encoding": "br,gzip" } }, brotli);
+
+  assert.equal(identity.status, 200);
+  assert.equal(identity.headers["content-encoding"], undefined);
+  assert.match(identity.headers.etag, /^W\//);
+  assert.equal(identity.body.toString("utf-8"), runtimeBootstrapSource(service));
+  assert.equal(compressed.headers["content-encoding"], "gzip");
+  assert.ok(compressed.body.length < identity.body.length);
+  assert.equal(brotli.headers["content-encoding"], "br");
+  assert.ok(brotli.body.length < compressed.body.length);
+});
 
 async function serveOfficialAssetResponseAsync(service, reqPath, host = "localhost:3737", headers = {}) {
   const file = service.staticFile(reqPath);
@@ -466,6 +495,13 @@ test("bridge reconnects active app-host ports after websocket hello", () => {
   assert.match(bridge, /state\.pending\.unshift\(connectPayload\)/);
   assert.match(bridge, /state\.pendingChars \+= appHostPendingPayloadChars\(connectPayload\)/);
   assert.match(bridge, /for \(const state of appHostPortRelays\.values\(\)\) state\.connected = false/);
+  // 新旧 WS close 事件可能交错；在途 IPC 必须按实际发送 socket 隔离清理。
+  assert.match(bridge, /if \(socket && pending\.socket !== socket\) continue/);
+  assert.match(bridge, /socket: requestSocket/);
+  assert.match(bridge, /rejectPendingGatewayIpc\(new Error\("Gateway WebSocket disconnected"\), socket\)/);
+  // WS 瞬时断线只能让升级前已允许重试的安全读取回退 HTTP，写操作不得重复提交。
+  assert.match(bridge, /clientDiagnostic\("ipc-ws-fallback"/);
+  assert.match(bridge, /retryDelays\.length === 1 \|\| !isTransientGatewayFetchError\(error\)/);
 });
 
 test("bridge resolves window focus from the browser instead of the hidden Electron proxy", () => {
@@ -600,8 +636,10 @@ test("injects remote file actions after the bridge polyfill", (t) => {
   });
 
   const html = service.createRendererResponse();
-  const bridgeIndex = html.indexOf('<script src="/codex-bridge-polyfill.js"></script>');
-  const remoteFileIndex = html.indexOf('<script src="/codex-remote-file-actions.js"></script>');
+  const runtime = runtimeBootstrapSource(service);
+  const bridgeIndex = runtime.indexOf("__codexBridgePolyfillInstalled");
+  const remoteFileIndex = runtime.indexOf("__codexRemoteFileActionsInstalled");
+  assert.match(html, new RegExp(OPENCODEX_RUNTIME_BOOTSTRAP_PATH.replace(".", "\\.")));
   assert.notEqual(bridgeIndex, -1);
   assert.notEqual(remoteFileIndex, -1);
   assert.equal(remoteFileIndex > bridgeIndex, true);
@@ -615,15 +653,19 @@ test("injects smart scheduling settings and summary into the authenticated rende
   const webviewDir = makeOfficialWebviewDir(t);
   const service = createService(webviewDir);
   const html = service.createRendererResponse();
+  const runtime = runtimeBootstrapSource(service);
 
   assert.match(html, /codex-smart-model-router-settings\.css/);
-  assert.match(html, /codex-smart-scheduling-injection-health\.js/);
-  assert.match(html, /codex-smart-model-router-settings\.js/);
-  assert.match(html, /codex-smart-model-router-composer\.js/);
   assert.match(html, /codex-smart-scheduling-summary\.css/);
-  assert.match(html, /codex-smart-scheduling-summary\.js/);
+  assert.match(runtime, /__OpenCodexSmartSchedulingInjectionHealthInstalled/);
+  assert.match(runtime, /__OpenCodexSmartModelRouterSettingsInstalled/);
+  assert.match(runtime, /__OpenCodexSmartModelRouterComposerInstalled/);
+  assert.match(runtime, /__OpenCodexSmartSchedulingSummaryInstalled/);
+  assert.match(runtime, /gatewayPluginConfig/);
+  assert.match(runtime, /opencodex_gateway_plugin_sync_pending=1/);
+  assert.ok(runtime.indexOf("gatewayPluginConfig") < runtime.indexOf("__OpenCodexSmartSchedulingInjectionHealthInstalled"));
   assert.equal(
-    html.indexOf("codex-smart-scheduling-injection-health.js") < html.indexOf("codex-smart-model-router-settings.js"),
+    runtime.indexOf("__OpenCodexSmartSchedulingInjectionHealthInstalled") < runtime.indexOf("__OpenCodexSmartModelRouterSettingsInstalled"),
     true
   );
   assert.equal(
@@ -638,6 +680,89 @@ test("injects smart scheduling settings and summary into the authenticated rende
     service.staticFile("/codex-smart-scheduling-summary.js"),
     path.resolve(__dirname, "..", "..", "web-shell", "codex-smart-scheduling-summary.js")
   );
+});
+
+test("pre-renders escaped recent threads and preloads official startup modules", (t) => {
+  const webviewDir = makeTempDir(t);
+  fs.mkdirSync(path.join(webviewDir, "assets"), { recursive: true });
+  fs.writeFileSync(path.join(webviewDir, "assets", "zh-CN-Locale01.js"), "export default {};");
+  fs.writeFileSync(path.join(webviewDir, "assets", "thread-app-shell-chrome-Wrapper01.js"), "export {};");
+  fs.writeFileSync(
+    path.join(webviewDir, "assets", "thread-app-shell-chrome-Implementation01.js"),
+    `export default "${"implementation".repeat(20)}";`
+  );
+  fs.writeFileSync(path.join(webviewDir, "assets", "home-ambient-suggestions-content-Home01.js"), "export {};");
+  fs.writeFileSync(path.join(webviewDir, "assets", "codex-home-announcements-Wrapper01.js"), "export {};");
+  fs.writeFileSync(
+    path.join(webviewDir, "index.html"),
+    [
+      "<html><head>",
+      '<script type="module" src="./assets/index-test.js"></script>',
+      '<link rel="modulepreload" href="./assets/app-initial-test.js">',
+      '<link rel="stylesheet" crossorigin href="./assets/app-initial-test.css">',
+      "<title>Codex</title></head><body><div id=\"root\"></div></body></html>",
+    ].join("")
+  );
+  const html = createStaticAssetService({
+    getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
+    getOfficialBundle: () => ({ webviewDir }),
+  }).createRendererResponse({
+    sidebarPreview: {
+      threads: [{ id: 'thread-\"<unsafe>', title: '<img src=x onerror="bad">' }],
+    },
+  });
+
+  assert.match(html, /data-opencodex-sidebar-preview-ready/);
+  assert.match(html, /&lt;img src=x onerror=&quot;bad&quot;&gt;/);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, new RegExp(`${PATCHED_OFFICIAL_PREFIX}assets/index-test\\.js`));
+  assert.match(html, new RegExp(`${PATCHED_OFFICIAL_PREFIX}assets/app-initial-test\\.js`));
+  assert.match(html, new RegExp(`${PATCHED_OFFICIAL_PREFIX}assets/app-initial-test\\.css`));
+  // preload 必须继承正式样式的 CORS 模式，否则浏览器会把同一份首屏 CSS 下载两次。
+  assert.match(
+    html,
+    new RegExp(
+      `link rel="preload" as="style" crossorigin href="${PATCHED_OFFICIAL_PREFIX}assets/app-initial-test\\.css"`
+    )
+  );
+  assert.match(
+    html,
+    new RegExp(`meta name="opencodex-late-modulepreload" content="${PATCHED_OFFICIAL_PREFIX}assets/zh-CN-Locale01\\.js"`)
+  );
+  assert.match(html, new RegExp(`${PATCHED_OFFICIAL_PREFIX}assets/thread-app-shell-chrome-Wrapper01\\.js`));
+  assert.doesNotMatch(html, /thread-app-shell-chrome-Implementation01\.js/);
+  assert.match(html, new RegExp(`${PATCHED_OFFICIAL_PREFIX}assets/home-ambient-suggestions-content-Home01\\.js`));
+  assert.match(html, new RegExp(`${PATCHED_OFFICIAL_PREFIX}assets/codex-home-announcements-Wrapper01\\.js`));
+  assert.doesNotMatch(
+    html,
+    new RegExp(`link rel="modulepreload"[^>]+${PATCHED_OFFICIAL_PREFIX}assets/zh-CN-Locale01\\.js`)
+  );
+  assert.ok(html.indexOf('rel="modulepreload"') < html.indexOf('/codex-web-config.js'));
+});
+
+test("prewarms local and remote main bundle Brotli and gzip representations before first navigation", async (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const assetsDir = path.join(webviewDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assetName = "app-initial-Prewarm01.js";
+  fs.writeFileSync(path.join(assetsDir, assetName), `export default "${"x".repeat(4096)}";`);
+  const service = createService(webviewDir);
+
+  await service.prewarmRendererAssets();
+  const beforeRequest = service.assetCacheDiagnostics();
+  const response = await serveOfficialAssetResponseAsync(
+    service,
+    `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`,
+    "127.0.0.1:3737",
+    { "accept-encoding": "br,gzip" }
+  );
+
+  assert.equal(beforeRequest.entries, 2);
+  assert.equal(beforeRequest.compressionRuns, 4);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["content-encoding"], "br");
+  assert.equal(service.assetCacheDiagnostics().compressionRuns, 4);
+  assert.equal(service.assetCacheDiagnostics().hits, 1);
 });
 
 test("smart scheduling hides placeholder effort only while the composer model is Auto", () => {
@@ -883,6 +1008,35 @@ test("plugin loader registers manifest-only plugins without inventing an index s
   assert.match(source, /opencodex\.smart-model-router/);
   assert.doesNotMatch(source, /smart-model-router\/index\.js/);
   assert.match(source, /registerPlugin\(manifest\)/);
+
+  function executeWithConfig(gatewayPluginConfig) {
+    let reloadCount = 0;
+    const document = {
+      readyState: "loading",
+      set cookie(_value) {},
+      write() {},
+    };
+    const window = {
+      __CODEX_WEB_CONFIG__: { gatewayPluginConfig },
+      OpenCodexPluginSystem: { registerPlugin() {}, plugins: { setEnabled() {} } },
+    };
+    window.window = window;
+    vm.runInNewContext(source, {
+      console,
+      document,
+      localStorage: {
+        getItem: () => JSON.stringify({ "opencodex.smart-model-router": false }),
+      },
+      location: { reload: () => { reloadCount += 1; } },
+      window,
+    });
+    return reloadCount;
+  }
+
+  // 公开登录壳没有受保护配置，必须等待用户认证，不能因 pending 状态形成刷新循环。
+  assert.equal(executeWithConfig(undefined), 0);
+  // 已认证直达页发现升级前遗留操作时只回退一次，让原同步壳提交该操作。
+  assert.equal(executeWithConfig({ plugins: [] }), 1);
 });
 
 test("renames official open-in-folder locale message only for remote browser hosts", (t) => {

@@ -2237,10 +2237,14 @@ function buildGatewayStatus() {
   };
 }
 
-async function webConfigScript() {
+async function webConfigScript(options = {}) {
   // 这个脚本由浏览器入口动态加载，避免把本机路径和端口写死到 web-shell 构建产物里。
   const i18n = withPluginI18nMessages(getI18nSnapshot());
   const initialSidebarBootstrap = await initialSidebarBootstrapForRenderer();
+  const gatewayPluginConfig =
+    options.gatewayPluginConfig && typeof options.gatewayPluginConfig === "object"
+      ? options.gatewayPluginConfig
+      : null;
   return `(() => {
   window.__CODEX_WEB_CONFIG__ = {
     gatewayBaseUrl: location.origin,
@@ -2251,6 +2255,8 @@ async function webConfigScript() {
     localeSource: ${JSON.stringify(i18n.source || "")},
     localeMode: ${JSON.stringify(i18n.mode || "")},
     messages: ${JSON.stringify(i18n.messages)},
+    // 网关持久化插件以服务端为准；随既有配置脚本下发，避免首屏再增加一次 GET 往返。
+    gatewayPluginConfig: ${JSON.stringify(gatewayPluginConfig)},
     // 浏览器诊断仅在服务端会消费日志或显式排查 WS 时开启，正常模式不产生额外上报请求。
     debugClientDiagnostics: ${JSON.stringify(DEBUG_LOGS || process.env.OPENCODEX_DEBUG_WS === "1")},
     // debugWs 只控制 WS 大包/慢解析采样，不控制压缩；压缩属于 gateway 传输层优化。

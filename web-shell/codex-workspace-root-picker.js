@@ -5,6 +5,11 @@
 
   // 这个模块只负责“远端浏览器输入路径”的交互，真正的 Electron/官方 IPC 仍由 bridge 转发。
   const WORKSPACE_ROOT_VALIDATE_CHANNEL = "opencodex:validate-workspace-root";
+  const ADD_WORKSPACE_ROOT_MESSAGE = "electron-add-new-workspace-root-option";
+  const PICK_WORKSPACE_ROOT_MESSAGE = "electron-pick-workspace-root-option";
+  const WORKSPACE_ROOT_PICKED_MESSAGE = "workspace-root-option-picked";
+  const MESSAGE_MODE_ADD = "add";
+  const MESSAGE_MODE_PICK = "pick";
   const dialogState = {
     focusInput: null,
     promise: null,
@@ -37,6 +42,12 @@
     const helper = bridgeHelpers().invoke;
     if (typeof helper === "function") return helper(channel, ...args);
     return Promise.reject(new Error("OpenCodex bridge is not ready."));
+  }
+
+  function deliverLocalRendererMessage(channel, payload) {
+    const helper = bridgeHelpers().deliverLocalRendererMessage;
+    if (typeof helper === "function") return helper(channel, payload);
+    throw new Error("OpenCodex renderer message bridge is not ready.");
   }
 
   function normalizeErrorMessage(error) {
@@ -82,15 +93,39 @@
     return !!payload && typeof payload === "object" && typeof payload.root === "string" && payload.root.trim();
   }
 
+  function messageMode(payload) {
+    if (!payload || typeof payload !== "object" || shouldUseNativeWorkspaceRootPicker()) return "";
+    // 旧协议带 root 的消息是适配器校验后的二次转发，不能再次接管形成循环。
+    if (payload.type === ADD_WORKSPACE_ROOT_MESSAGE && !hasWorkspaceRootPayload(payload)) return MESSAGE_MODE_ADD;
+    // 新协议是“只选择、不持久化”，官方 Main 会忽略 root 并打开原生目录框，所以远端必须完整接管。
+    if (payload.type === PICK_WORKSPACE_ROOT_MESSAGE) return MESSAGE_MODE_PICK;
+    return "";
+  }
+
   function shouldHandleMessage(payload) {
-    // 只有“使用现有文件夹”且 payload 没有 root 时才接管；带 root 的消息交还官方逻辑。
-    return (
-      payload &&
-      typeof payload === "object" &&
-      payload.type === "electron-add-new-workspace-root-option" &&
-      !hasWorkspaceRootPayload(payload) &&
-      !shouldUseNativeWorkspaceRootPicker()
-    );
+    return !!messageMode(payload);
+  }
+
+  function allowsMultipleWorkspaceRoots(payload) {
+    if (!payload || typeof payload !== "object") return false;
+    if (payload.allowMultiple === true) return true;
+    return !!(payload.params && typeof payload.params === "object" && payload.params.allowMultiple === true);
+  }
+
+  function workspaceRootPaths(rawValue, allowMultiple) {
+    const value = String(rawValue || "");
+    if (!allowMultiple) return [value];
+    // 原生 multiSelections 的等价 Web 输入是一行一个路径；去重时保留用户填写顺序。
+    const uniquePaths = [];
+    const seen = new Set();
+    for (const line of value.split(/\r?\n/)) {
+      const candidate = line.trim();
+      if (!candidate || seen.has(candidate)) continue;
+      seen.add(candidate);
+      uniquePaths.push(candidate);
+    }
+    // 空输入仍交给 gateway 返回统一的本地化错误，避免前后端出现两套校验文案。
+    return uniquePaths.length > 0 ? uniquePaths : [""];
   }
 
   function localizedError(error) {
@@ -116,7 +151,9 @@
     });
   }
 
-  function showDialog(onSubmit) {
+  function showDialog(options) {
+    const allowMultiple = !!(options && options.allowMultiple);
+    const onSubmit = options && options.onSubmit;
     if (dialogState.promise) {
       // 同一时刻只允许一个路径弹窗，重复点击只把焦点拉回输入框。
       if (typeof dialogState.focusInput === "function") dialogState.focusInput();
@@ -134,7 +171,7 @@
       panel.setAttribute("aria-modal", "true");
       panel.setAttribute("aria-labelledby", "codex-web-workspace-root-title");
 
-      // DOM 结构刻意贴近官方 compact dialog：标题、说明、单行输入、底部操作按钮。
+      // DOM 结构刻意贴近官方 compact dialog：标题、说明、路径输入、底部操作按钮。
       const header = document.createElement("div");
       header.className = "codex-web-workspace-root-header";
 
@@ -154,16 +191,24 @@
 
       const description = document.createElement("p");
       description.className = "codex-web-workspace-root-description";
-      description.textContent = t("web.workspaceRoot.dialog.description");
+      description.textContent = t(
+        allowMultiple ? "web.workspaceRoot.dialog.multipleDescription" : "web.workspaceRoot.dialog.description"
+      );
       panel.appendChild(description);
 
-      const input = document.createElement("input");
+      const input = document.createElement(allowMultiple ? "textarea" : "input");
       input.className = "codex-web-workspace-root-input";
-      input.type = "text";
+      if (allowMultiple) input.className += " codex-web-workspace-root-input-multiple";
+      if (!allowMultiple) input.type = "text";
       input.autocomplete = "off";
       input.spellcheck = false;
-      input.placeholder = t("web.workspaceRoot.dialog.placeholder");
-      input.setAttribute("aria-label", t("web.workspaceRoot.dialog.pathLabel"));
+      input.placeholder = t(
+        allowMultiple ? "web.workspaceRoot.dialog.multiplePlaceholder" : "web.workspaceRoot.dialog.placeholder"
+      );
+      input.setAttribute(
+        "aria-label",
+        t(allowMultiple ? "web.workspaceRoot.dialog.multiplePathLabel" : "web.workspaceRoot.dialog.pathLabel")
+      );
       panel.appendChild(input);
 
       const actions = document.createElement("div");
@@ -219,7 +264,7 @@
         event.preventDefault();
         setBusy(true);
         try {
-          // 成功完成官方添加项目 IPC 后才关闭弹窗；失败只吐司并保留输入内容。
+          // 路径选择结果成功交给官方 Renderer/Main 后才关闭；失败只吐司并保留输入内容。
           await onSubmit(input.value);
           close(true);
         } catch (error) {
@@ -243,8 +288,8 @@
     return dialogState.promise;
   }
 
-  async function submitRemoteWorkspaceRoot(payload, rawPath) {
-    // 先让 gateway 在运行 OpenCodex 的机器上校验路径，再把规范化 root 交给官方项目逻辑。
+  async function validateRemoteWorkspaceRoot(rawPath) {
+    // 所有目录都先由运行 OpenCodex 的机器校验并注册到本地文件访问白名单。
     const validation = await invoke(WORKSPACE_ROOT_VALIDATE_CHANNEL, { path: rawPath });
     const root = validation && typeof validation.root === "string" ? validation.root : "";
     if (!root) {
@@ -252,9 +297,29 @@
       error.workspaceRootErrorKey = "web.workspaceRoot.error.unavailable";
       throw error;
     }
+    return root;
+  }
+
+  async function submitRemoteWorkspaceRoots(payload, rawValue, mode, allowMultiple) {
+    const paths = workspaceRootPaths(rawValue, allowMultiple);
+    const roots = [];
+    // 全部校验成功后才通知官方 Renderer，避免多选中途失败造成半完成的工程表单状态。
+    for (const rawPath of paths) roots.push(await validateRemoteWorkspaceRoot(rawPath));
+
+    if (mode === MESSAGE_MODE_PICK) {
+      try {
+        // 新协议由官方 Renderer 自己维护工程表单；逐条模拟 Main 的选择结果即可。
+        for (const root of roots) deliverLocalRendererMessage(WORKSPACE_ROOT_PICKED_MESSAGE, { root });
+        return;
+      } catch (error) {
+        error.workspaceRootErrorKey = "web.workspaceRoot.error.addFailed";
+        throw error;
+      }
+    }
+
     try {
-      // 官方 handler 负责持久化、刷新项目列表和切换选中状态；Web 侧不复刻这部分状态机。
-      await invoke("codex_desktop:message-from-view", { ...payload, root });
+      // 旧协议仍交给官方 Main 持久化、刷新项目列表和切换选中状态。
+      await invoke("codex_desktop:message-from-view", { ...payload, root: roots[0] });
     } catch (error) {
       error.workspaceRootErrorKey = "web.workspaceRoot.error.addFailed";
       throw error;
@@ -262,8 +327,13 @@
   }
 
   function handleMessage(payload) {
-    if (!shouldHandleMessage(payload)) return null;
-    return showDialog((rawPath) => submitRemoteWorkspaceRoot(payload, rawPath));
+    const mode = messageMode(payload);
+    if (!mode) return null;
+    const allowMultiple = mode === MESSAGE_MODE_PICK && allowsMultipleWorkspaceRoots(payload);
+    return showDialog({
+      allowMultiple,
+      onSubmit: (rawValue) => submitRemoteWorkspaceRoots(payload, rawValue, mode, allowMultiple),
+    });
   }
 
   w.OpenCodexWorkspaceRootPicker = {

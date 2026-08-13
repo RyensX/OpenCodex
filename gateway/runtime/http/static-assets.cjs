@@ -35,6 +35,11 @@ const PATCHED_ASSET_PATCH_REVISION = "11";
 const ASYNC_PATCH_MIN_BYTES = 512 * 1024;
 const OFFICIAL_ASSET_PATCH_WORKER_IDLE_MS = 30_000;
 const OFFICIAL_ASSET_PATCH_WORKER_PATH = path.join(__dirname, "official-asset-patch-worker.cjs");
+const LATE_STARTUP_MODULE_PREFIXES = [
+  "thread-app-shell-chrome-",
+  "home-ambient-suggestions-content-",
+  "codex-home-announcements-",
+];
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
 const OPENCODEX_PLUGIN_SYSTEM_PATH = "/opencodex-plugin-system.js";
@@ -48,6 +53,9 @@ const CODEX_SMART_SCHEDULING_SUMMARY_PATH = "/codex-smart-scheduling-summary.js"
 const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overlay.css";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
+const OPENCODEX_RUNTIME_BOOTSTRAP_PATH = "/opencodex-runtime-bootstrap.js";
+const OPENCODEX_SIDEBAR_PREVIEW_PATH = "/codex-sidebar-preview.js";
+const OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH = "/codex-offscreen-animation-guard.js";
 const CODEX_BRIDGE_POLYFILL_PATH = "/codex-bridge-polyfill.js";
 const CODEX_REMOTE_FILE_ACTIONS_PATH = "/codex-remote-file-actions.js";
 const CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH = "/codex-workspace-root-picker.css";
@@ -214,6 +222,11 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH, path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
+  [OPENCODEX_SIDEBAR_PREVIEW_PATH, path.join(WEB_SHELL_DIR, "codex-sidebar-preview.js")],
+  [
+    OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH,
+    path.join(WEB_SHELL_DIR, "codex-offscreen-animation-guard.js"),
+  ],
   [CODEX_BRIDGE_POLYFILL_PATH, path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js")],
   [CODEX_REMOTE_FILE_ACTIONS_PATH, path.join(WEB_SHELL_DIR, "codex-remote-file-actions.js")],
   [CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.css")],
@@ -240,6 +253,7 @@ function createStaticAssetService({
   let officialAssetFileNamesCache = null;
   const patchedAssetCache = new Map();
   const patchedAssetBuildPromises = new Map();
+  let runtimeBootstrapCache = null;
   let patchedAssetCacheBytes = 0;
   const patchedAssetCacheStats = {
     compressionRuns: 0,
@@ -430,7 +444,8 @@ function createStaticAssetService({
         // 使用异步 zlib，把大型官方 chunk 的冷启动压缩移出 Node 主事件循环。
         zlib.brotliCompress(
           data,
-          { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } },
+          // 质量 6 对当前主包比质量 4 再缩小约 8%，启动预热会吸收一次性压缩成本。
+          { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 6 } },
           done
         );
         return;
@@ -492,8 +507,267 @@ function createStaticAssetService({
     };
   }
 
+  function canBundleRuntimeBootstrap(entries = listPluginEntries()) {
+    // 外部插件可能依赖 document.currentScript；发现外部入口时保留逐文件加载语义，不擅自内联。
+    return entries.every((entry) => !entry.entryFile || entry.sourceId === "builtin");
+  }
+
+  function pluginGatewayStateBootstrapScript() {
+    // 这段逻辑同时用于聚合运行时和外部插件兼容 loader，保证两条加载路径的网关开关语义一致。
+    return `  const pendingStorageKey = "opencodex_gateway_plugin_enable_pending_v1";
+  let pending = {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem(pendingStorageKey) || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) pending = parsed;
+  } catch {}
+  const gatewayConfig = window.__CODEX_WEB_CONFIG__?.gatewayPluginConfig;
+  if (gatewayConfig && Object.keys(pending).length > 0) {
+    try { document.cookie = "opencodex_gateway_plugin_sync_pending=1; Path=/; SameSite=Lax"; } catch {}
+    // 兼容升级前遗留的待提交操作：只发生一次重载，随后服务端回到原登录壳并沿用既有同步流程。
+    location.reload();
+    return;
+  }
+  if (pluginSystem?.plugins && Array.isArray(gatewayConfig?.plugins)) {
+    const gatewayManifestIds = new Set(
+      manifests.filter((manifest) => manifest?.persistence === "gateway").map((manifest) => String(manifest.id || ""))
+    );
+    for (const plugin of gatewayConfig.plugins) {
+      if (gatewayManifestIds.has(String(plugin?.id || "")) && typeof plugin?.enabled === "boolean") {
+        // 在任何插件入口执行前写入权威开关，保持多设备和重启后的 renderer 状态一致。
+        if (pluginSystem.plugins.isEnabled?.(plugin.id) !== plugin.enabled) {
+          pluginSystem.plugins.setEnabled(plugin.id, plugin.enabled);
+        }
+      }
+    }
+  }`;
+  }
+
+  function pluginManifestRegistrationScript(entries) {
+    const manifests = entries.map((entry) => entry.manifest).filter(Boolean);
+    return `(() => {
+  const manifests = ${JSON.stringify(manifests)};
+  const pluginSystem = window.OpenCodexPluginSystem || window.__OpenCodexPluginSystem;
+  if (pluginSystem && typeof pluginSystem.registerPlugin === "function") {
+    for (const manifest of manifests) pluginSystem.registerPlugin(manifest);
+  }
+${pluginGatewayStateBootstrapScript()}
+})();\n`;
+  }
+
+  function runtimeBootstrapFileGroups(entries) {
+    return {
+      beforePlugins: [
+        WEB_SHELL_STATIC_FILES.get(OPENCODEX_SIDEBAR_PREVIEW_PATH),
+        WEB_SHELL_STATIC_FILES.get(OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH),
+        WEB_SHELL_STATIC_FILES.get(OPENCODEX_PLUGIN_SYSTEM_PATH),
+      ],
+      pluginSources: entries
+        .filter((entry) => entry.entryFile && entry.sourceId === "builtin")
+        .map((entry) => entry.entryFile),
+      afterPlugins: [
+        CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH,
+        CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH,
+        CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH,
+        CODEX_SMART_SCHEDULING_SUMMARY_PATH,
+        OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH,
+        OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH,
+        CODEX_BRIDGE_POLYFILL_PATH,
+        CODEX_REMOTE_FILE_ACTIONS_PATH,
+        CODEX_WORKSPACE_ROOT_PICKER_PATH,
+        CODEX_TOOLTIP_DISMISS_GUARD_PATH,
+      ].map((reqPath) => WEB_SHELL_STATIC_FILES.get(reqPath)),
+    };
+  }
+
+  function runtimeBootstrapFingerprint(entries, groups) {
+    const files = [...groups.beforePlugins, ...groups.pluginSources, ...groups.afterPlugins];
+    const fileIdentities = files.map((file) => {
+      try {
+        const stat = fs.statSync(file);
+        return [file, stat.dev, stat.ino, stat.size, stat.mtimeMs];
+      } catch {
+        return [file, "missing"];
+      }
+    });
+    // 插件 version 已覆盖入口、manifest 与 i18n；固定脚本再按文件身份判断，未变化时不重读和散列正文。
+    return JSON.stringify({
+      files: fileIdentities,
+      plugins: entries.map((entry) => [entry.sourceId, entry.name, entry.version]),
+    });
+  }
+
+  function createRuntimeBootstrapScript(entries, groups) {
+    // 每段脚本都用分号隔开，避免前一文件的尾部表达式与后一文件 IIFE 发生自动分号插入歧义。
+    return [
+      ...groups.beforePlugins.map(readText),
+      pluginManifestRegistrationScript(entries),
+      ...groups.pluginSources.map(readText),
+      ...groups.afterPlugins.map(readText),
+    ].join("\n;\n");
+  }
+
+  function runtimeBootstrapEntry() {
+    const entries = listPluginEntries();
+    const groups = runtimeBootstrapFileGroups(entries);
+    const fingerprint = runtimeBootstrapFingerprint(entries, groups);
+    if (runtimeBootstrapCache?.fingerprint === fingerprint) return runtimeBootstrapCache;
+    const source = Buffer.from(createRuntimeBootstrapScript(entries, groups), "utf-8");
+    // 文件身份未变化时复用正文、散列和压缩体，避免每次刷新都重读整套浏览器运行时。
+    runtimeBootstrapCache = {
+      // gzip 与 identity 字节不同但语义相同，用弱校验器配合 Vary，避免跨编码误用强 ETag。
+      etag: `W/"${crypto.createHash("sha256").update(source).digest("base64url")}"`,
+      fingerprint,
+      representations: new Map([["identity", source]]),
+      source,
+    };
+    return runtimeBootstrapCache;
+  }
+
+  function runtimeBootstrapRepresentation(req, entry) {
+    const brotliQuality = acceptedEncodingQuality(req, "br");
+    const gzipQuality = acceptedEncodingQuality(req, "gzip");
+    const encoding =
+      process.env.CODEX_WEB_DISABLE_GZIP === "1"
+        ? "identity"
+        : brotliQuality > 0 && brotliQuality >= gzipQuality
+          ? "br"
+          : gzipQuality > 0
+            ? "gzip"
+            : "identity";
+    let body = entry.representations.get(encoding);
+    if (!body) {
+      body =
+        encoding === "br"
+          ? zlib.brotliCompressSync(entry.source, {
+              // 运行时脚本不到 0.5MB，质量 4 在很低启动成本下即可比 gzip 再缩小约 13%。
+              params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 },
+            })
+          : zlib.gzipSync(entry.source);
+      entry.representations.set(encoding, body);
+    }
+    return { body, encoding };
+  }
+
+  function startupAssetPreloads(rawHtml) {
+    const urls = new Set();
+    for (const match of rawHtml.matchAll(/<script\b[^>]*\btype=["']module["'][^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)) {
+      urls.add(match[1]);
+    }
+    for (const match of rawHtml.matchAll(/<link\b(?=[^>]*\brel=["']modulepreload["'])[^>]*\bhref=["']([^"']+)["'][^>]*>/gi)) {
+      urls.add(match[1]);
+    }
+    const modulePreloads = Array.from(urls, (href) =>
+      `<link rel="modulepreload" crossorigin href="${escapeHtml(href)}">`
+    );
+    const stylePreloads = Array.from(
+      rawHtml.matchAll(/<link\b(?=[^>]*\brel=["']stylesheet["'])[^>]*\bhref=["']([^"']+)["'][^>]*>/gi),
+      (match) => {
+        const crossorigin = match[0].match(/\bcrossorigin(?:\s*=\s*["']([^"']*)["'])?/i);
+        const crossoriginAttribute = crossorigin
+          ? ` crossorigin${crossorigin[1] ? `="${escapeHtml(crossorigin[1])}"` : ""}`
+          : "";
+        // preload 与最终 stylesheet 必须使用同一 CORS 模式，否则 Chromium 会把同一主 CSS 下载两次。
+        return `<link rel="preload" as="style"${crossoriginAttribute} href="${escapeHtml(match[1])}">`;
+      }
+    );
+    // 注入脚本位于原始 modulepreload 之前；复制轻量 preload 提示可让大主包与动态配置并行下载。
+    return [...modulePreloads, ...stylePreloads].join("\n    ");
+  }
+
+  function lateLocaleModuleHref(locale) {
+    const normalizedLocale = String(locale || "").trim();
+    if (!normalizedLocale) return "";
+    const localeAsset = officialAssetFileNames().find(
+      (fileName) => fileName.startsWith(`${normalizedLocale}-`) && fileName.endsWith(".js")
+    );
+    return localeAsset ? `${PATCHED_OFFICIAL_PREFIX}assets/${localeAsset}` : "";
+  }
+
+  function lateStartupModuleHrefs(locale) {
+    const officialBundle = getOfficialBundle();
+    const fileNames = officialAssetFileNames(officialBundle);
+    const hrefs = [lateLocaleModuleHref(locale)];
+    if (officialBundle?.webviewDir) {
+      let selectedFileNames = officialAssetFileNamesCache?.lateStartupModuleFileNames;
+      if (!selectedFileNames) {
+        selectedFileNames = [];
+        for (const prefix of LATE_STARTUP_MODULE_PREFIXES) {
+          const candidates = fileNames
+            .filter((fileName) => fileName.startsWith(prefix) && fileName.endsWith(".js"))
+            .map((fileName) => {
+              try {
+                return {
+                  fileName,
+                  size: fs.statSync(path.join(officialBundle.webviewDir, "assets", fileName)).size,
+                };
+              } catch {
+                // 官方缓存切换期间文件可能刚好被替换；忽略失效索引，不能让整个 renderer HTML 返回 500。
+                return null;
+              }
+            })
+            .filter(Boolean)
+            .sort((left, right) => left.size - right.size || left.fileName.localeCompare(right.fileName));
+          /**
+           * 官方构建会给部分懒模块生成一个很小的 re-export 入口；预载最小入口即可让浏览器递归发现
+           * 它的静态依赖，避免同时给几十个 chunk 注入高优先级提示。
+           */
+          if (candidates[0]) selectedFileNames.push(candidates[0].fileName);
+        }
+        // 官方资源目录在当前 gateway 生命周期内只读；复用选择结果，避免每次导航重复 stat 候选 chunk。
+        if (officialAssetFileNamesCache) {
+          officialAssetFileNamesCache.lateStartupModuleFileNames = selectedFileNames;
+        }
+      }
+      hrefs.push(...selectedFileNames.map((fileName) => `${PATCHED_OFFICIAL_PREFIX}assets/${fileName}`));
+    }
+    return Array.from(new Set(hrefs.filter(Boolean)));
+  }
+
+  function sidebarPreviewMarkup(snapshot, locale) {
+    const threads = Array.isArray(snapshot?.threads) ? snapshot.threads.slice(0, 12) : [];
+    if (threads.length === 0) return "";
+    const chinese = String(locale || "").toLowerCase().startsWith("zh");
+    const recentLabel = chinese ? "最近" : "Recent";
+    const newThreadLabel = chinese ? "新对话" : "New thread";
+    const fallbackTitle = chinese ? "未命名会话" : "Untitled conversation";
+    const rows = threads
+      .map((thread) => {
+        const id = escapeHtml(String(thread?.id || ""));
+        const title = escapeHtml(String(thread?.title || fallbackTitle));
+        return `<button type="button" data-opencodex-sidebar-preview-row data-opencodex-thread-id="${id}" title="${title}"><span>${title}</span></button>`;
+      })
+      .join("");
+    return `<aside id="opencodex-sidebar-preview" aria-label="${recentLabel}" aria-busy="true" data-opencodex-sidebar-preview-ready>
+      <div class="opencodex-sidebar-preview__toolbar"><span class="opencodex-sidebar-preview__window">▣</span><span>←</span><span>→</span></div>
+      <div class="opencodex-sidebar-preview__brand">Codex <span>⌄</span></div>
+      <div class="opencodex-sidebar-preview__new"><span>⌑</span>${newThreadLabel}</div>
+      <div class="opencodex-sidebar-preview__section">${recentLabel}</div>
+      <div class="opencodex-sidebar-preview__rows">${rows}</div>
+    </aside>`;
+  }
+
+  function sidebarPreviewStyles() {
+    return `<style id="opencodex-sidebar-preview-styles">
+      #opencodex-sidebar-preview{position:fixed;inset:0 auto 0 0;z-index:30;box-sizing:border-box;width:276px;overflow:hidden;border-right:1px solid rgba(26,28,31,.09);background:#fafafa;color:#242424;font:14px/20px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+      #opencodex-sidebar-preview button{font:inherit;color:inherit}
+      .opencodex-sidebar-preview__toolbar{display:flex;height:46px;align-items:center;gap:20px;padding:0 18px;color:#a0a0a0}
+      .opencodex-sidebar-preview__window{margin-left:76px}
+      .opencodex-sidebar-preview__brand{display:flex;align-items:center;gap:5px;padding:4px 17px 12px;font-size:17px;font-weight:600}
+      .opencodex-sidebar-preview__brand span{font-size:13px;font-weight:400;color:#777}
+      .opencodex-sidebar-preview__new{display:flex;align-items:center;gap:9px;padding:8px 18px;font-weight:500}
+      .opencodex-sidebar-preview__section{padding:24px 17px 8px;color:#929292;font-size:13px}
+      .opencodex-sidebar-preview__rows{padding:0 8px}
+      #opencodex-sidebar-preview [data-opencodex-sidebar-preview-row]{display:block;box-sizing:border-box;width:100%;height:30px;overflow:hidden;border:0;border-radius:7px;background:transparent;padding:5px 10px 5px 32px;text-align:left;white-space:nowrap;text-overflow:ellipsis;cursor:pointer}
+      #opencodex-sidebar-preview [data-opencodex-sidebar-preview-row]:hover,#opencodex-sidebar-preview [data-opencodex-sidebar-preview-row][aria-busy="true"]{background:rgba(0,0,0,.045)}
+      #opencodex-sidebar-preview [data-opencodex-sidebar-preview-row] span{display:block;overflow:hidden;text-overflow:ellipsis}
+      #opencodex-sidebar-preview+#root .startup-loader{box-sizing:border-box;padding-left:276px}
+      @media(max-width:719px){#opencodex-sidebar-preview{display:none}#opencodex-sidebar-preview+#root .startup-loader{padding-left:0}}
+      @media(prefers-color-scheme:dark){:root:not(.electron-light) #opencodex-sidebar-preview{border-color:rgba(255,255,255,.1);background:#171717;color:#ececec}:root:not(.electron-light) #opencodex-sidebar-preview [data-opencodex-sidebar-preview-row]:hover{background:rgba(255,255,255,.07)}}
+    </style>`;
+  }
+
   /** 给官方 renderer HTML 注入 web-shell polyfill 和运行时配置。 */
-  function transformOfficialHtml(rawHtml) {
+  function transformOfficialHtml(rawHtml, options = {}) {
     /**
      * 官方 index.html 原本跑在 Electron app:///file 环境。
      * 浏览器环境需要额外注入：
@@ -505,15 +779,16 @@ function createStaticAssetService({
      * - bridge polyfill，把 Electron API 转成 HTTP/WS 调用。
      */
     let html = rawHtml;
+    const i18n = currentI18n();
     // 官方 HTML 是 Electron renderer 用的，浏览器里需要补 locale、移动端 viewport 和站点图标。
-    html = patchHtmlLang(html, currentI18n().locale);
+    html = patchHtmlLang(html, i18n.locale);
     html = html.replace(
       /<meta([^>]*\bname=["']viewport["'][^>]*)>/i,
       '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />'
     );
     const iconLinks = [
-      '<link rel="icon" type="image/png" href="/assets/icon.png" />',
-      '<link rel="apple-touch-icon" href="/assets/icon.png" />',
+      '<link rel="icon" type="image/png" sizes="192x192" href="/assets/pwa-icon-192.png" />',
+      '<link rel="apple-touch-icon" href="/assets/pwa-icon-192.png" />',
     ].join("\n    ");
     if (!/<link[^>]+\brel=["'][^"']*icon/i.test(html)) {
       html = html.replace(/<title>/i, `${iconLinks}\n    <title>`);
@@ -531,9 +806,38 @@ function createStaticAssetService({
        */
       return isFontPreload ? "" : tag;
     });
+    const startupPreloads = startupAssetPreloads(html);
+    const lateModuleHrefs = lateStartupModuleHrefs(i18n.locale);
+    const previewMarkup = sidebarPreviewMarkup(options.sidebarPreview, i18n.locale);
+    const useRuntimeBundle = canBundleRuntimeBootstrap();
+    const runtimeScripts = useRuntimeBundle
+      ? [
+          '<link rel="preload" as="script" href="/codex-web-config.js">',
+          `<link rel="preload" as="script" href="${OPENCODEX_RUNTIME_BOOTSTRAP_PATH}">`,
+          '<script src="/codex-web-config.js"></script>',
+          `<script src="${OPENCODEX_RUNTIME_BOOTSTRAP_PATH}"></script>`,
+        ]
+      : [
+          '<script src="/codex-web-config.js"></script>',
+          `<script src="${OPENCODEX_SIDEBAR_PREVIEW_PATH}"></script>`,
+          `<script src="${OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH}"></script>`,
+          `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
+          `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
+          `<script src="${CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH}"></script>`,
+          `<script src="${CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH}"></script>`,
+          `<script src="${CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH}"></script>`,
+          `<script src="${CODEX_SMART_SCHEDULING_SUMMARY_PATH}"></script>`,
+          `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
+          `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
+          `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
+          `<script src="${CODEX_REMOTE_FILE_ACTIONS_PATH}"></script>`,
+          `<script src="${CODEX_WORKSPACE_ROOT_PICKER_PATH}"></script>`,
+          `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
+        ];
     // manifest 在 Cloudflare Access 等前置认证后面也必须带同源凭据，否则 Chrome 可能拿不到受保护的 manifest。
     const base = [
       '<base href="/official/">',
+      startupPreloads,
       `<link rel="manifest" href="${PWA_MANIFEST_PATH}" crossorigin="use-credentials">`,
       '<meta name="theme-color" content="#ffffff">',
       '<meta name="application-name" content="OpenCodex">',
@@ -541,36 +845,32 @@ function createStaticAssetService({
       '<meta name="apple-mobile-web-app-title" content="OpenCodex">',
       '<meta name="apple-mobile-web-app-capable" content="yes">',
       '<meta name="apple-mobile-web-app-status-bar-style" content="default">',
+      lateModuleHrefs
+        .map((href) => `<meta name="opencodex-late-modulepreload" content="${escapeHtml(href)}">`)
+        .join("\n    "),
       OFFICIAL_LOADING_SHIMMER_POWER_GUARD,
+      previewMarkup ? sidebarPreviewStyles() : "",
       `<link id="codex-web-window-controls-overlay-styles" rel="stylesheet" href="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH}">`,
       `<link id="codex-smart-model-router-settings-styles" rel="stylesheet" href="${CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH}">`,
       `<link id="codex-smart-scheduling-summary-styles" rel="stylesheet" href="${CODEX_SMART_SCHEDULING_SUMMARY_CSS_PATH}">`,
       `<link id="codex-web-workspace-root-picker-styles" rel="stylesheet" href="${CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH}">`,
-      '<script src="/codex-web-config.js"></script>',
-      `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
-      `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
-      `<script src="${CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH}"></script>`,
-      `<script src="${CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH}"></script>`,
-      `<script src="${CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH}"></script>`,
-      `<script src="${CODEX_SMART_SCHEDULING_SUMMARY_PATH}"></script>`,
-      `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
-      `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
-      `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
-      `<script src="${CODEX_REMOTE_FILE_ACTIONS_PATH}"></script>`,
-      `<script src="${CODEX_WORKSPACE_ROOT_PICKER_PATH}"></script>`,
-      `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
+      ...runtimeScripts,
     ].join("\n    ");
     if (/<head[^>]*>/i.test(html)) {
       html = html.replace(/<head([^>]*)>/i, `<head$1>\n    ${base}`);
+    }
+    if (previewMarkup && /<body[^>]*>/i.test(html)) {
+      // aside 与 #root 保持相邻，加载期 CSS 才能把官方 Logo 居中到主内容区域。
+      html = html.replace(/<body([^>]*)>/i, `<body$1>\n    ${previewMarkup}`);
     }
     return patchOfficialHtmlForWeb(html);
   }
 
   /** 给少量运行时 patch 过的官方 chunk 换路径命名空间，绕开浏览器 immutable 缓存。 */
   function patchOfficialAssetUrls(rawHtml) {
-    // 只给 JS 资源改到 patched 命名空间，CSS/图片无需响应期 patch，继续走官方 immutable 缓存。
+    // JS 的相对导入会把 CSS 也落到 patched 命名空间；HTML 同步改写 CSS，避免同一文件下载两次。
     return rawHtml.replace(
-      /((?:src|href)=["']\/official\/assets\/[^"'?#]+\.js)(["'])/g,
+      /((?:src|href)=["']\/official\/assets\/[^"'?#]+\.(?:js|css))(["'])/g,
       (_match, prefix, quote) => `${prefix.replace("/official/assets/", `${PATCHED_OFFICIAL_PREFIX}assets/`)}${quote}`
     );
   }
@@ -715,6 +1015,7 @@ function createStaticAssetService({
   if (pluginSystem && typeof pluginSystem.registerPlugin === "function") {
     for (const manifest of manifests) pluginSystem.registerPlugin(manifest);
   }
+${pluginGatewayStateBootstrapScript()}
   // loader 由 gateway 生成；刷新页面即可重新扫描 web-shell/plugins 下的旧式脚本插件。
   function loadPlugin(url) {
     if (document.readyState === "loading") {
@@ -761,12 +1062,12 @@ function createStaticAssetService({
     return reqPath.startsWith("/official/");
   }
 
-  function createRendererResponse() {
-    // 这个响应主要用于调试官方 renderer；实际页面入口仍是 web-shell index。
+  function createRendererResponse(options = {}) {
+    // 已认证页面直接返回最终 renderer，避免 web-shell 再 fetch 并重写整份文档。
     const located = locateOfficialIndex();
     if (!located) return null;
     const html = readText(located.file);
-    return transformOfficialHtml(html);
+    return transformOfficialHtml(html, options);
   }
 
   /** 判断是否应该回退到 SPA shell；刷新 /local/:id 这类官方前端路由时不能返回 404。 */
@@ -1143,6 +1444,86 @@ function createStaticAssetService({
     );
   }
 
+  function serveRendererIndex(req, res, headers = {}, options = {}) {
+    const html = createRendererResponse(options);
+    if (!html) {
+      return send(
+        res,
+        404,
+        { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", ...headers },
+        "Official renderer bundle is not available yet."
+      );
+    }
+    // renderer HTML 引用动态配置和带版本的静态资源；入口本身不缓存，升级后刷新即可切换新 bundle。
+    const response = gzipIfUseful(
+      req,
+      { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers },
+      Buffer.from(html, "utf-8")
+    );
+    return send(
+      res,
+      200,
+      response.headers,
+      response.body
+    );
+  }
+
+  function serveRuntimeBootstrap(req, res, headers = {}) {
+    const entry = runtimeBootstrapEntry();
+    if (requestHasMatchingEtag(req, entry.etag)) {
+      return send(
+        res,
+        304,
+        {
+          "cache-control": "private, no-cache, must-revalidate",
+          etag: entry.etag,
+          vary: "Accept-Encoding",
+          ...headers,
+        },
+        ""
+      );
+    }
+    const representation = runtimeBootstrapRepresentation(req, entry);
+    return send(
+      res,
+      200,
+      {
+        "content-type": "application/javascript; charset=utf-8",
+        "cache-control": "private, no-cache, must-revalidate",
+        etag: entry.etag,
+        vary: "Accept-Encoding",
+        ...(representation.encoding !== "identity" ? { "content-encoding": representation.encoding } : {}),
+        ...headers,
+      },
+      representation.body
+    );
+  }
+
+  async function prewarmRendererAssets() {
+    if (process.env.CODEX_WEB_DISABLE_ASSET_CACHE === "1") return;
+    if (canBundleRuntimeBootstrap()) {
+      // 浏览器会在解析阶段阻塞等待该脚本；把拼接、散列和两种压缩表示全部移到监听端口之前完成。
+      const bootstrapEntry = runtimeBootstrapEntry();
+      runtimeBootstrapRepresentation({ headers: { "accept-encoding": "br,gzip" } }, bootstrapEntry);
+      runtimeBootstrapRepresentation({ headers: { "accept-encoding": "gzip" } }, bootstrapEntry);
+    }
+    const mainFileName = officialAssetFileNames()
+      .filter((fileName) => /^app-initial-[A-Za-z0-9_-]+\.js$/.test(fileName))
+      .sort()[0];
+    if (!mainFileName) return;
+    const reqPath = `${PATCHED_OFFICIAL_PREFIX}assets/${mainFileName}`;
+    const file = locateOfficialAsset(`assets/${mainFileName}`);
+    if (!file) return;
+    // 本机调试与远程浏览器的主包 patch 可能不同；同时准备 HTTPS/Brotli 与 HTTP/gzip 两条传输路径。
+    await Promise.all(
+      ["127.0.0.1", "opencodex.remote"].map(async (host) => {
+        const req = { headers: { "accept-encoding": "br,gzip", host } };
+        const entry = await cachedPatchedAsset(reqPath, file, req);
+        await Promise.all([cachedRepresentation(entry, "br"), cachedRepresentation(entry, "gzip")]);
+      })
+    );
+  }
+
   function servePluginLoader(res) {
     send(
       res,
@@ -1158,11 +1539,14 @@ function createStaticAssetService({
     isAppShellRoute,
     isPublicStaticPath,
     patchOfficialAssetData: patchOfficialAsset,
+    prewarmRendererAssets,
     serveFile,
     servePluginLoader,
+    serveRendererIndex,
+    serveRuntimeBootstrap,
     serveWebShellIndex,
     staticFile,
   };
 }
 
-module.exports = { createStaticAssetService };
+module.exports = { OPENCODEX_RUNTIME_BOOTSTRAP_PATH, createStaticAssetService };

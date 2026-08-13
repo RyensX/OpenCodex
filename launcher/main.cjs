@@ -19,6 +19,10 @@ const {
   createGatewayExitHandler,
   createSingleFlightGatewayStarter,
 } = require("../shared/gateway-lifecycle.cjs");
+const {
+  hiddenRuntimeGcmCommandLineArgs,
+  isolateHiddenRuntimeGcmStoresForUserData,
+} = require("../gateway/runtime/electron/hidden-runtime-command-line.cjs");
 const packageMetadata = require("../package.json");
 
 const APP_ROOT = path.resolve(__dirname, "..");
@@ -721,7 +725,18 @@ async function startGatewayOnce() {
   }
 
   const officialUserDataDir = path.join(paths.runtimeDir, "official-user-data");
-  const officialRuntimeArgs = [`--user-data-dir=${officialUserDataDir}`];
+  /**
+   * Chromium Profile/GCM 可能早于 Electron main 脚本初始化；spawn 前先移走旧凭据，再通过原始
+   * argv 固定本机静默端点，避免隐藏 runner 沿用历史 MCS 长连接。
+   */
+  const gcmIsolation = isolateHiddenRuntimeGcmStoresForUserData(officialUserDataDir);
+  if (!gcmIsolation.isolated) {
+    appendLog(`[launcher] unable to isolate hidden GCM profile: ${gcmIsolation.reason}\n`, { urgent: true });
+  }
+  const officialRuntimeArgs = [
+    `--user-data-dir=${officialUserDataDir}`,
+    ...hiddenRuntimeGcmCommandLineArgs({ PORT: String(gatewayState.port) }),
+  ];
   const childEnv = {
     ...process.env,
     OPENCODEX_GATEWAY_ENTRY: paths.gatewayScriptPath,

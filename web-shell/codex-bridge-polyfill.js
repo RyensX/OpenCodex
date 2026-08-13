@@ -31,7 +31,11 @@
   const CONNECTOR_LOGO_WAITERS_MAX_ENTRIES = 512;
   const CONNECTOR_LOGO_RESPONSE_TIMEOUT_MS = 20_000;
   const BROWSER_NOTIFICATION_MAX_ACTIVE = 128;
-  const IPC_INVOKE_TIMEOUT_MS = 30_000;
+  // 官方部分工作区/Git 调用自身允许执行 60 秒；桥接层多留 5 秒传输余量，不能先于官方逻辑超时。
+  const IPC_INVOKE_TIMEOUT_MS = 65_000;
+  const IPC_WS_MAX_PENDING = 4096;
+  // 单个 UTF-16 code unit 最多占 3 个 UTF-8 字节；16MB 阈值可确保外层 JSON 始终低于服务端 64MB WS 帧上限。
+  const IPC_WS_MAX_BODY_CHARS = 16 * 1024 * 1024;
   const APP_HOST_RELAY_MAX_ENTRIES = 64;
   const BRIDGE_TOAST_BODY_RETRY_MAX = 12;
   const BRIDGE_TOAST_BODY_RETRY_BASE_MS = 40;
@@ -410,6 +414,8 @@
   const STATSIG_DEFAULT_FEATURE_OVERRIDES = {
     guardian_approval: true,
     "3903742690": true,
+    // 官方新会话的“新工作树”入口由该门控制；Web 本地快照必须保留桌面端已有能力。
+    "505458": true,
     artifacts: true,
   };
   const clientId =
@@ -417,6 +423,8 @@
   let ws = null;
   let wsReady = false;
   const wsReadyWaiters = new Set();
+  const pendingGatewayIpc = new Map();
+  let gatewayIpcSequence = 0;
   let reconnectTimer = null;
   let reconnectDelay = 500;
   let reconnectDeferredUntilVisible = false;
@@ -1352,6 +1360,13 @@
     }
   }
 
+  /** Web 适配模块生成的官方入站消息需要同时覆盖 bridge 订阅和 window message 两种消费方式。 */
+  function deliverLocalRendererMessage(channel, payload) {
+    const delivered = dispatch(channel, payload);
+    emitWindowMessage(channel, payload);
+    return delivered;
+  }
+
   /** 浏览器页面才是真实交互窗口，不能沿用隐藏 Electron 代理窗口的 focus 状态。 */
   function browserWindowIsFocused() {
     return document.visibilityState !== "hidden" && document.hasFocus();
@@ -1884,7 +1899,8 @@
   /** 只把浏览器网络层的瞬时失败视为可重试，HTTP 500 等业务错误不在这里吞。 */
   function isTransientGatewayFetchError(error) {
     const message = error instanceof Error ? error.message : String(error || "");
-    return /failed to fetch|networkerror|load failed|aborted|timed? ?out/i.test(message);
+    // WS 断线和原 fetch 网络错误属于同一类瞬时传输故障；仅安全读取允许回退重试。
+    return /failed to fetch|networkerror|load failed|aborted|timed? ?out|websocket.*disconnected/i.test(message);
   }
 
   /** 判断 fetch-message 是否适合短重试；避免用户发送消息这类写操作被重复提交。 */
@@ -2003,6 +2019,68 @@
         wsState: websocketStateName(ws),
       });
       return false;
+    }
+  }
+
+  function rejectPendingGatewayIpc(error, socket = null) {
+    for (const [requestId, pending] of pendingGatewayIpc.entries()) {
+      // 重连时旧 socket 可能晚于新 socket 关闭；只拒绝由该连接发出的请求，不能误伤新连接请求。
+      if (socket && pending.socket !== socket) continue;
+      pendingGatewayIpc.delete(requestId);
+      w.clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+  }
+
+  function handleGatewayIpcResult(message) {
+    if (!message || message.type !== "opencodex:ipc-result") return false;
+    const requestId = typeof message.requestId === "string" ? message.requestId : "";
+    const pending = pendingGatewayIpc.get(requestId);
+    if (!pending) return true;
+    pendingGatewayIpc.delete(requestId);
+    w.clearTimeout(pending.timer);
+    pending.resolve(message);
+    return true;
+  }
+
+  function invokeGatewayOverWs(body) {
+    if (!ws || ws.readyState !== w.WebSocket.OPEN || !wsReady) return null;
+    if (pendingGatewayIpc.size >= IPC_WS_MAX_PENDING) return null;
+    // 大附件继续使用原 HTTP 通道，保留 100MB pick-files 能力并避免巨型 WS 字符串阻塞事件循环。
+    if (typeof body !== "string" || body.length > IPC_WS_MAX_BODY_CHARS) return null;
+    // 请求必须记住实际发送连接；全局 ws 在重连期间可能在 close 回调前已经被替换。
+    const requestSocket = ws;
+    gatewayIpcSequence = (gatewayIpcSequence + 1) % Number.MAX_SAFE_INTEGER;
+    const requestId = `${clientId}:${gatewayIpcSequence}`;
+    let resolveRequest;
+    let rejectRequest;
+    const promise = new Promise((resolve, reject) => {
+      resolveRequest = resolve;
+      rejectRequest = reject;
+    });
+    const timer = w.setTimeout(() => {
+      if (!pendingGatewayIpc.delete(requestId)) return;
+      const error = new Error("WebSocket IPC request timed out");
+      error.status = 504;
+      rejectRequest(error);
+    }, IPC_INVOKE_TIMEOUT_MS);
+    pendingGatewayIpc.set(requestId, {
+      reject: rejectRequest,
+      resolve: resolveRequest,
+      socket: requestSocket,
+      timer,
+    });
+    try {
+      // body 已由统一 IPC 序列化器生成，直接嵌入 WS 外层，避免再次遍历大消息或附件元数据。
+      requestSocket.send(
+        `{"type":"opencodex:ipc-invoke","clientId":${JSON.stringify(clientId)},"requestId":${JSON.stringify(requestId)},"request":${body}}`
+      );
+      return promise;
+    } catch (error) {
+      pendingGatewayIpc.delete(requestId);
+      w.clearTimeout(timer);
+      // send 在写入前同步失败时可以安全回退 HTTP；已发出后的断线由 close 统一拒绝，避免重复写操作。
+      return null;
     }
   }
 
@@ -2404,64 +2482,86 @@
     const body = stringifyForIpc({ channel, args: ipcArgs, clientId });
     const retryDelays = shouldRetryGatewayInvoke(channel, payload) ? [0, 80, 250] : [0];
     let res = null;
+    let json = null;
+    let responseStatus = 0;
     let lastFetchError = null;
     try {
-      for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
-        if (retryDelays[attempt] > 0) await delay(retryDelays[attempt]);
-        const attemptStartedAtMs = CLIENT_DIAGNOSTICS_ENABLED ? Date.now() : 0;
-        if (!suppressRoutineDiagnostic) {
-          clientDiagnostic("ipc-http-attempt", {
-            ...diagnosticSummary,
-            attempt: attempt + 1,
-            wsReady,
-            wsState: websocketStateName(ws),
-          });
-        }
-        const controller = typeof w.AbortController === "function" ? new w.AbortController() : null;
-        const requestTimeout = controller
-          ? w.setTimeout(() => controller.abort(), IPC_INVOKE_TIMEOUT_MS)
-          : null;
+      const wsResponse = invokeGatewayOverWs(body);
+      if (wsResponse) {
         try {
-          res = await w.fetch("/api/ipc/invoke", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: gatewayAuthHeaders({ "content-type": "application/json" }),
-            body,
-            signal: controller?.signal,
-          });
-          if (!suppressRoutineDiagnostic) {
-            clientDiagnostic("ipc-http-response", {
-              ...diagnosticSummary,
-              attempt: attempt + 1,
-              elapsedMs: Date.now() - attemptStartedAtMs,
-              ok: res.ok,
-              status: res.status,
-            });
-          }
-          lastFetchError = null;
-          break;
+          json = await wsResponse;
+          responseStatus = Number(json?.status || (json?.ok === false ? 500 : 200));
         } catch (error) {
           lastFetchError = error;
-          clientDiagnostic("ipc-http-error", {
+          // 只恢复升级前就允许重试的幂等读取；写操作可能已经执行，断线后绝不能改走 HTTP 重复提交。
+          if (retryDelays.length === 1 || !isTransientGatewayFetchError(error)) throw error;
+          clientDiagnostic("ipc-ws-fallback", {
             ...diagnosticSummary,
-            attempt: attempt + 1,
-            elapsedMs: Date.now() - attemptStartedAtMs,
             error: error instanceof Error ? error.message : String(error),
             errorName: error && error.name ? String(error.name) : "",
           });
-          if (!isTransientGatewayFetchError(error) || attempt === retryDelays.length - 1) throw error;
-        } finally {
-          if (requestTimeout) w.clearTimeout(requestTimeout);
         }
       }
+      if (!wsResponse || lastFetchError) {
+        // 老页面、浏览器不支持 WS 或握手尚未完成时继续走原 HTTP 通道，行为与升级前一致。
+        for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+          if (retryDelays[attempt] > 0) await delay(retryDelays[attempt]);
+          const attemptStartedAtMs = CLIENT_DIAGNOSTICS_ENABLED ? Date.now() : 0;
+          if (!suppressRoutineDiagnostic) {
+            clientDiagnostic("ipc-http-attempt", {
+              ...diagnosticSummary,
+              attempt: attempt + 1,
+              wsReady,
+              wsState: websocketStateName(ws),
+            });
+          }
+          const controller = typeof w.AbortController === "function" ? new w.AbortController() : null;
+          const requestTimeout = controller
+            ? w.setTimeout(() => controller.abort(), IPC_INVOKE_TIMEOUT_MS)
+            : null;
+          try {
+            res = await w.fetch("/api/ipc/invoke", {
+              method: "POST",
+              credentials: "same-origin",
+              headers: gatewayAuthHeaders({ "content-type": "application/json" }),
+              body,
+              signal: controller?.signal,
+            });
+            if (!suppressRoutineDiagnostic) {
+              clientDiagnostic("ipc-http-response", {
+                ...diagnosticSummary,
+                attempt: attempt + 1,
+                elapsedMs: Date.now() - attemptStartedAtMs,
+                ok: res.ok,
+                status: res.status,
+              });
+            }
+            lastFetchError = null;
+            break;
+          } catch (error) {
+            lastFetchError = error;
+            clientDiagnostic("ipc-http-error", {
+              ...diagnosticSummary,
+              attempt: attempt + 1,
+              elapsedMs: Date.now() - attemptStartedAtMs,
+              error: error instanceof Error ? error.message : String(error),
+              errorName: error && error.name ? String(error.name) : "",
+            });
+            if (!isTransientGatewayFetchError(error) || attempt === retryDelays.length - 1) throw error;
+          } finally {
+            if (requestTimeout) w.clearTimeout(requestTimeout);
+          }
+        }
+        if (!res) throw lastFetchError || new Error("IPC invoke failed before request was sent");
+        json = await res.json().catch(() => null);
+        responseStatus = res.status;
+      }
 
-      if (!res) throw lastFetchError || new Error("IPC invoke failed before request was sent");
-      const json = await res.json().catch(() => null);
-      if (!res.ok || (json && typeof json === "object" && json.ok === false)) {
-        const message = ipcInvokeErrorMessage(channel, res.status, json);
+      if (responseStatus >= 400 || (json && typeof json === "object" && json.ok === false)) {
+        const message = ipcInvokeErrorMessage(channel, responseStatus, json);
         const error = new Error(message);
         error.channel = channel;
-        error.status = res.status;
+        error.status = responseStatus;
         error.response = json;
         throw error;
       }
@@ -2474,7 +2574,7 @@
             json && typeof json === "object" && Object.prototype.hasOwnProperty.call(json, "value")
               ? payloadShape(json.value)
               : payloadShape(json),
-          status: res.status,
+          status: responseStatus,
         });
       }
       if (json && typeof json === "object" && Object.prototype.hasOwnProperty.call(json, "value")) {
@@ -2502,7 +2602,7 @@
     }
   }
 
-  /** 模拟 Electron ipcRenderer.invoke，实际通过 gateway 的 /api/ipc/invoke 完成。 */
+  /** 模拟 Electron ipcRenderer.invoke，优先复用 gateway WS，未就绪时兼容回退 HTTP。 */
   async function invoke(channel, ...args) {
     const payload = payloadFromIpcArgs(args);
     if (channel === "pick-files") return pickFilesInBrowser(payload);
@@ -3285,6 +3385,7 @@
   w.__codexWebPayloadShape = payloadShape;
   // 独立 Web 能力模块通过这个最小 helper 面访问 bridge，避免把业务弹窗继续塞进 polyfill。
   w.__codexWebBridgeHelpers = {
+    deliverLocalRendererMessage,
     invoke,
     normalizeErrorMessage,
     showToast: showBridgeToast,
@@ -3359,6 +3460,18 @@
           if (WS_DEBUG_ENABLED) {
             maybeLogLargeOrSlowWsInbound({
               handledBy: "hello-ack",
+              handleMs: Math.max(0, Date.now() - parseStartedAtMs - parseMs),
+              parseMs,
+              rawChars,
+              summary: gatewayWsInboundSummary(msg),
+            });
+          }
+          return;
+        }
+        if (handleGatewayIpcResult(msg)) {
+          if (WS_DEBUG_ENABLED) {
+            maybeLogLargeOrSlowWsInbound({
+              handledBy: "ipc-result",
               handleMs: Math.max(0, Date.now() - parseStartedAtMs - parseMs),
               parseMs,
               rawChars,
@@ -3470,6 +3583,7 @@
       }
     });
     socket.addEventListener("close", (event) => {
+      rejectPendingGatewayIpc(new Error("Gateway WebSocket disconnected"), socket);
       if (ws === socket) {
         wsReady = false;
         // MessagePort 属于页面而不是 WS；保留它，并在下一次 hello-ack 后重新接到官方 listener。

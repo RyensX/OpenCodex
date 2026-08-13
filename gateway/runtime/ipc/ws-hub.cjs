@@ -29,6 +29,7 @@ const WS_MAX_BUFFERED_BYTES = Math.max(
   Number(process.env.OPENCODEX_WS_MAX_BUFFERED_BYTES) || 64 * 1024 * 1024
 );
 const APP_HOST_RELAY_MAX_ENTRIES = Math.max(1, Number(process.env.OPENCODEX_APP_HOST_MAX_RELAYS) || 64);
+const WS_IPC_MAX_IN_FLIGHT = Math.max(32, Number(process.env.OPENCODEX_WS_IPC_MAX_IN_FLIGHT) || 4096);
 const ROUTE_ID_SCAN_MAX_NODES = 128;
 const BROADCAST_DEDUPE_MAX_ENTRIES_PER_SOCKET = 16;
 const BROADCAST_DEDUPE_MAX_WINDOW_MS = 60_000;
@@ -107,6 +108,7 @@ function createWsHub(
   server,
   {
     createAppHostRelay,
+    handleIpcInvoke,
     handleNotificationEvent,
     isAuthed,
     maxAppHostRelays = APP_HOST_RELAY_MAX_ENTRIES,
@@ -706,8 +708,70 @@ function createWsHub(
     return true;
   }
 
+  function handleIpcInvokeMessage(ws, req, message) {
+    const clientId = normalizedWsClientId(ws, message);
+    const requestId = message && typeof message.requestId === "string" ? message.requestId : "";
+    const request = message && message.request && typeof message.request === "object" ? message.request : null;
+    const sendResult = (result) =>
+      safeSend(
+        ws,
+        {
+          ...(result || {}),
+          // 回包身份只能由当前已认证请求决定，官方 handler 的业务字段不能覆盖路由字段。
+          type: "opencodex:ipc-result",
+          requestId,
+        },
+        { route: "ipc-result", suppressDiagnostic: true }
+      );
+    if (
+      !clientId ||
+      ws.__codexWebClientId !== clientId ||
+      !requestId ||
+      requestId.length > 160 ||
+      !request
+    ) {
+      // 无法关联页面或回包 id 的帧不进入官方 handler，避免跨页面路由和无主异步任务。
+      if (requestId && requestId.length <= 160) {
+        sendResult({ ok: false, status: 400, error: "Invalid WebSocket IPC request" });
+      }
+      return true;
+    }
+    if (typeof handleIpcInvoke !== "function") {
+      sendResult({ ok: false, status: 503, error: "WebSocket IPC is unavailable" });
+      return true;
+    }
+    const inFlight = Number(ws.__opencodexIpcInFlight || 0);
+    if (inFlight >= WS_IPC_MAX_IN_FLIGHT) {
+      sendResult({ ok: false, status: 429, error: "Too many in-flight WebSocket IPC requests" });
+      return true;
+    }
+
+    ws.__opencodexIpcInFlight = inFlight + 1;
+    // 不 await 当前 message 回调：官方首屏会并发发起大量互不依赖的读取，串行执行会重新制造队头阻塞。
+    Promise.resolve()
+      .then(() => handleIpcInvoke({ clientId, request, req }))
+      .then((result) => sendResult(result))
+      .catch((error) => {
+        diagnosticWarn("ws-hub", "ipc_invoke_failed", {
+          clientId: shortId(clientId),
+          error: error instanceof Error ? error.message : String(error),
+          requestId: shortId(requestId),
+        });
+        sendResult({
+          ok: false,
+          status: error && typeof error.status === "number" ? error.status : 500,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        ws.__opencodexIpcInFlight = Math.max(0, Number(ws.__opencodexIpcInFlight || 1) - 1);
+      });
+    return true;
+  }
+
   function handleWsControlMessage(ws, req, message) {
     if (!message || typeof message !== "object") return false;
+    if (message.type === "opencodex:ipc-invoke") return handleIpcInvokeMessage(ws, req, message);
     if (message.type === "opencodex:notification-event") {
       // 通知 click/close 只从已认证 WS 回传；hub 不理解官方通知语义，直接交回 runtime 的 fake Notification。
       return typeof handleNotificationEvent === "function" ? handleNotificationEvent(message, ws, req) : true;
