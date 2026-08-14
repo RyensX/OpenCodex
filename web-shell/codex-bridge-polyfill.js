@@ -377,6 +377,7 @@
     w.crypto?.randomUUID?.() || `web-client-${Math.random().toString(36).slice(2)}`;
   let ws = null;
   let wsReady = false;
+  let threadStatusRendererReady = false;
   const wsReadyWaiters = new Set();
   let reconnectTimer = null;
   let reconnectDelay = 500;
@@ -1633,7 +1634,23 @@
       }
     }
     flushAllAppHostRelayMessages();
+    sendThreadStatusRendererReady();
   }
+
+  function sendThreadStatusRendererReady() {
+    if (!threadStatusRendererReady || !wsReady || !ws || ws.readyState !== w.WebSocket.OPEN) return false;
+    try {
+      ws.send(JSON.stringify({ type: "thread-status-renderer-ready", clientId }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  w.__OpenCodexThreadStatusRendererReady = () => {
+    threadStatusRendererReady = true;
+    sendThreadStatusRendererReady();
+  };
 
   function waitForGatewayWsReady() {
     if (!cfg.gatewayWsUrl || !("WebSocket" in w)) return Promise.resolve(false);
@@ -2972,6 +2989,9 @@
           }
           if (effectiveChannel === "fetch-stream-error") {
             surfaceFetchIpcError("fetch-stream-error", messagePayload);
+          }
+          if (effectiveChannel === "persisted-atom-updated" && messagePayload?.key) {
+            setPersistedAtomSnapshotValue(messagePayload.key, messagePayload.value, !!messagePayload.deleted);
           }
           handleTokenUsageGatewayPayload(messagePayload);
           if (shouldDispatchGatewayMessage(msg.channel, effectiveChannel)) {

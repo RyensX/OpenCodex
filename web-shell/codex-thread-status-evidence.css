@@ -1,0 +1,40 @@
+[data-opencodex-pending-row="true"] {
+  position: relative;
+}
+
+.opencodex-thread-status-pending {
+  position: absolute;
+  top: 50%;
+  right: 28px;
+  box-sizing: border-box;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid var(--color-token-text-tertiary, #8b8b8b);
+  border-radius: 50%;
+  background: var(--color-background-surface-under, #fff);
+  color: var(--color-token-text-tertiary, #8b8b8b);
+  transform: translateY(-50%);
+  z-index: 2;
+}
+
+.opencodex-thread-status-pending::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 1.5px;
+  height: 4px;
+  border-radius: 1px;
+  background: currentColor;
+}
+
+.opencodex-thread-status-pending::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 5px;
+  width: 3px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: currentColor;
+}

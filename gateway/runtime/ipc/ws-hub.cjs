@@ -414,6 +414,19 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return () => clientReadyListeners.delete(listener);
   }
 
+  function notifyClientReady(clientId, ws) {
+    for (const listener of clientReadyListeners) {
+      try {
+        listener({ clientId, socket: ws });
+      } catch (error) {
+        diagnosticWarn("ws-hub", "client_ready_listener_failed", {
+          clientId: shortId(clientId),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   function normalizedWsClientId(ws, message) {
     // 控制帧允许带 clientId，但最终必须和 hello 注册到 socket 上的 clientId 一致。
     const messageClientId = message && typeof message.clientId === "string" ? message.clientId : "";
@@ -628,16 +641,12 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
                 error: error instanceof Error ? error.message : String(error),
               });
             }
-            for (const listener of clientReadyListeners) {
-              try {
-                listener({ clientId, socket: ws });
-              } catch (error) {
-                diagnosticWarn("ws-hub", "client_ready_listener_failed", {
-                  clientId: shortId(clientId),
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              }
-            }
+            notifyClientReady(clientId, ws);
+            return;
+          }
+          if (message?.type === "thread-status-renderer-ready") {
+            if (!clientId || ws.__codexWebClientId !== clientId) return;
+            notifyClientReady(clientId, ws);
             return;
           }
           if (handleWsControlMessage(ws, req, message)) return;

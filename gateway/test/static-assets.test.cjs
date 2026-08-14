@@ -3,12 +3,27 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
 const { pluginMessagesForLocale } = require("../runtime/core/plugin-assets.cjs");
 const { createStaticAssetService } = require("../runtime/http/static-assets.cjs");
 
 const WEB_SHELL_INDEX = path.resolve(__dirname, "..", "..", "web-shell", "index.html");
 const BRIDGE_POLYFILL = path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js");
+const THREAD_STATUS_EVIDENCE = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "web-shell",
+  "codex-thread-status-evidence.js"
+);
+const THREAD_STATUS_EVIDENCE_CSS = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "web-shell",
+  "codex-thread-status-evidence.css"
+);
 const SMART_SCHEDULING_SETTINGS = path.resolve(
   __dirname,
   "..",
@@ -96,6 +111,94 @@ function makeResponseRecorder() {
     },
   };
 }
+
+test("bridge keeps a replayed persisted atom in later sync responses", async () => {
+  class FakeWebSocket {
+    static OPEN = 1;
+    constructor() {
+      this.listeners = new Map();
+      this.readyState = FakeWebSocket.OPEN;
+      FakeWebSocket.instance = this;
+    }
+    addEventListener(type, listener) {
+      if (!this.listeners.has(type)) this.listeners.set(type, []);
+      this.listeners.get(type).push(listener);
+    }
+    emit(type, event) {
+      for (const listener of this.listeners.get(type) || []) listener(event);
+    }
+    send() {}
+    close() {}
+  }
+  const document = {
+    __codexAppFsImageRewriteInstalled: true,
+    __codexGatewayAuthMenuInjectionInstalled: true,
+    __codexWebviewShimInstalled: true,
+    documentElement: { dataset: {}, lang: "" },
+    title: "",
+  };
+  const window = {
+    OpenCodexPluginSystem: { activate() {} },
+    __CODEX_WEB_CONFIG__: {
+      gatewayBaseUrl: "http://127.0.0.1:3737",
+      gatewayWsUrl: "ws://127.0.0.1:3737/ws",
+      persistedAtomSnapshot: { "unread-thread-ids-by-host-v1": { local: ["thread-old"] } },
+    },
+    __codexAppHostMessagePortBridgeInstalled: true,
+    addEventListener() {},
+    dispatchEvent() {},
+    localStorage: { getItem() { return null; }, removeItem() {}, setItem() {} },
+    postMessage() {},
+    setTimeout,
+    WebSocket: FakeWebSocket,
+  };
+  const context = {
+    clearTimeout,
+    console,
+    crypto: require("node:crypto").webcrypto,
+    CustomEvent: class {},
+    document,
+    Event: class {},
+    fetch: async () => ({ json: async () => ({ ok: true, value: true }), ok: true }),
+    Headers,
+    location: { href: "http://127.0.0.1:3737/", origin: "http://127.0.0.1:3737" },
+    MessageEvent: class { constructor(type, options) { this.type = type; this.data = options.data; } },
+    navigator: {},
+    queueMicrotask,
+    setTimeout,
+    URL,
+    WebSocket: FakeWebSocket,
+    window,
+  };
+  window.crypto = context.crypto;
+  window.document = document;
+  window.fetch = context.fetch;
+  window.Headers = Headers;
+  window.location = context.location;
+  window.navigator = context.navigator;
+  vm.runInNewContext(fs.readFileSync(BRIDGE_POLYFILL, "utf8"), context);
+
+  FakeWebSocket.instance.emit("open", {});
+  FakeWebSocket.instance.emit("message", { data: JSON.stringify({ type: "hello-ack" }) });
+  FakeWebSocket.instance.emit("message", {
+    data: JSON.stringify({
+      channel: "persisted-atom-updated",
+      payload: {
+        key: "unread-thread-ids-by-host-v1",
+        value: { local: ["thread-current"] },
+        deleted: false,
+      },
+    }),
+  });
+  let synced;
+  window.electronAPI.on("persisted-atom-sync", (payload) => { synced = payload; });
+  await window.electronAPI.sendMessageFromView({ type: "persisted-atom-sync-request" });
+
+  assert.equal(
+    JSON.stringify(synced.state["unread-thread-ids-by-host-v1"]),
+    JSON.stringify({ local: ["thread-current"] })
+  );
+});
 
 function serveOfficialAsset(service, reqPath, host) {
   const file = service.staticFile(reqPath);
@@ -261,7 +364,7 @@ test("patched official renderer CSP does not duplicate an existing manifest-src"
   assert.equal(manifestDirectiveCount, 1);
 });
 
-test("injects remote file actions after the bridge polyfill", (t) => {
+test("injects status evidence and remote file actions after the bridge polyfill", (t) => {
   const webviewDir = makeOfficialWebviewDir(t);
   const service = createStaticAssetService({
     getI18nSnapshot: () => ({ locale: "zh-CN", messages: {} }),
@@ -270,10 +373,16 @@ test("injects remote file actions after the bridge polyfill", (t) => {
 
   const html = service.createRendererResponse();
   const bridgeIndex = html.indexOf('<script src="/codex-bridge-polyfill.js"></script>');
+  const statusEvidenceIndex = html.indexOf('<script src="/codex-thread-status-evidence.js"></script>');
   const remoteFileIndex = html.indexOf('<script src="/codex-remote-file-actions.js"></script>');
   assert.notEqual(bridgeIndex, -1);
+  assert.notEqual(statusEvidenceIndex, -1);
   assert.notEqual(remoteFileIndex, -1);
+  assert.match(html, /<link id="codex-thread-status-evidence-styles" rel="stylesheet" href="\/codex-thread-status-evidence\.css">/);
+  assert.equal(statusEvidenceIndex > bridgeIndex, true);
   assert.equal(remoteFileIndex > bridgeIndex, true);
+  assert.equal(service.staticFile("/codex-thread-status-evidence.js"), THREAD_STATUS_EVIDENCE);
+  assert.equal(service.staticFile("/codex-thread-status-evidence.css"), THREAD_STATUS_EVIDENCE_CSS);
   assert.equal(
     service.staticFile("/codex-remote-file-actions.js"),
     path.resolve(__dirname, "..", "..", "web-shell", "codex-remote-file-actions.js")
