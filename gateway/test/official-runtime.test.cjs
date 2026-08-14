@@ -427,6 +427,12 @@ test("official live observer follows known threads without sending control reque
   );
   assert.equal(writes.some((message) => String(message.method).startsWith("thread-follower-")), false);
 
+  observer.refresh();
+  assert.deepEqual(
+    writes.slice(-2).map((message) => message.params.following),
+    [false, true]
+  );
+
   socket.emit(
     "data",
     encodeIpcFrame({

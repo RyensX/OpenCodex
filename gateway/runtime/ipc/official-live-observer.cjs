@@ -412,6 +412,10 @@ function createOfficialLiveObserver(options = {}) {
   }
 
   function refresh() {
+    // WebSocket ready 前返回的 snapshot 无法送达浏览器；切换 following 强制 Desktop 重发当前状态。
+    for (const { conversationId, hostId } of knownThreads.values()) {
+      sendFollowing(conversationId, hostId, false);
+    }
     resubscribeKnownThreads();
   }
 
