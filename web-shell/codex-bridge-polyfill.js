@@ -2555,6 +2555,8 @@
     target.getPreloadStartedAtMs = () => preloadStartedAtMs;
     // 侧栏快照必须同步返回；刷新时官方启动广播不会重放，不能再固定返回 null。
     target.getInitialSidebarBootstrap = () => cfg.initialSidebarBootstrap ?? null;
+    // 官方 preload 同步返回 UA；Web 侧直接使用浏览器 UA，避免错误落入异步 IPC fallback。
+    target.getDesktopUserAgent = () => navigator.userAgent;
     // DeviceCheck 依赖桌面原生能力，Web 壳必须同步报告不支持，不能让 Promise 被误判为 true。
     target.isDeviceCheckSupported = () => false;
     target.isIntelMacBuild = () => /macintosh|mac os x/i.test(navigator.userAgent) && /intel/i.test(navigator.userAgent);

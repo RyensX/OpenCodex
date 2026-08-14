@@ -123,6 +123,7 @@ test("bridge keeps synchronous official preload methods out of the adaptive IPC 
   // 这两个官方 preload 方法必须同步返回基础值；一旦返回 Promise，最新版 renderer 会在首屏直接崩溃。
   assert.match(source, /target\.getPreloadStartedAtMs = \(\) => preloadStartedAtMs;/);
   assert.match(source, /target\.getInitialSidebarBootstrap = \(\) => cfg\.initialSidebarBootstrap \?\? null;/);
+  assert.match(source, /target\.getDesktopUserAgent = \(\) => navigator\.userAgent;/);
   assert.match(source, /target\.isDeviceCheckSupported = \(\) => false;/);
   assert.match(source, /target\.startFileDrag = \(\) => false;/);
   assert.ok(source.indexOf("target.getInitialSidebarBootstrap") < source.indexOf("createAdaptiveBridgeProxy"));
