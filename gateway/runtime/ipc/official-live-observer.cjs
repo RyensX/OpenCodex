@@ -354,8 +354,35 @@ function createOfficialLiveObserver(options = {}) {
   }
 
   function observeSidebarBootstrap(bootstrap) {
-    const entries = bootstrap?.catalogSnapshot?.entries;
-    if (!Array.isArray(entries)) return 0;
+    const hasCatalogEntries = Array.isArray(bootstrap?.catalogSnapshot?.entries);
+    const entries = hasCatalogEntries
+      ? [...bootstrap.catalogSnapshot.entries]
+      : [];
+    const globalStateEntries = Array.isArray(bootstrap?.globalStateEntries)
+      ? bootstrap.globalStateEntries
+      : [];
+    const globalState = new Map(
+      globalStateEntries
+        .filter((entry) => entry && typeof entry.key === "string")
+        .map((entry) => [entry.key, entry.value])
+    );
+    const addThreadIds = (threadIds) => {
+      if (!Array.isArray(threadIds)) return;
+      for (const threadId of threadIds) entries.push({ threadId });
+    };
+    // 最新 Desktop 把可见 thread 拆到 global state；旧版 catalogSnapshot 仍保留兼容。
+    addThreadIds(globalState.get("pinned-thread-ids"));
+    const projectThreadOrders = globalState.get("sidebar-project-thread-orders");
+    if (projectThreadOrders && typeof projectThreadOrders === "object") {
+      for (const order of Object.values(projectThreadOrders)) addThreadIds(order?.threadIds);
+    }
+    addThreadIds(globalState.get("projectless-thread-ids"));
+    const hasGlobalThreadEntries = [
+      "pinned-thread-ids",
+      "sidebar-project-thread-orders",
+      "projectless-thread-ids",
+    ].some((key) => globalState.has(key));
+    if (!hasCatalogEntries && !hasGlobalThreadEntries) return 0;
     let observed = 0;
     const visibleThreads = new Set();
     for (const entry of entries) {

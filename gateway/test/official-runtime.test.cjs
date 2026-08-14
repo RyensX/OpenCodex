@@ -278,6 +278,46 @@ test("sidebar bootstrap reconciles threads that are no longer visible", () => {
   observer.stop();
 });
 
+test("sidebar bootstrap observes visible threads from current global state entries", () => {
+  const observer = createOfficialLiveObserver({ reconnectDelayMs: -1 });
+  observer.observeSidebarBootstrap({
+    globalStateEntries: [
+      { key: "pinned-thread-ids", value: ["thread-pinned", "thread-shared"] },
+      {
+        key: "sidebar-project-thread-orders",
+        value: {
+          "project-a": { threadIds: ["thread-project", "thread-shared"] },
+          "project-b": { threadIds: ["thread-second-project"] },
+        },
+      },
+      { key: "projectless-thread-ids", value: ["thread-projectless"] },
+      { key: "selected-project", value: { type: "local", projectId: "project-a" } },
+    ],
+  });
+
+  assert.deepEqual([...observer.__test.getKnownThreads().keys()], [
+    "local\u0000thread-pinned",
+    "local\u0000thread-shared",
+    "local\u0000thread-project",
+    "local\u0000thread-second-project",
+    "local\u0000thread-projectless",
+  ]);
+  observer.stop();
+});
+
+test("sidebar bootstrap clears subscriptions when current global state is explicitly empty", () => {
+  const observer = createOfficialLiveObserver({ reconnectDelayMs: -1 });
+  observer.observeSidebarBootstrap({
+    globalStateEntries: [{ key: "pinned-thread-ids", value: ["thread-old"] }],
+  });
+  observer.observeSidebarBootstrap({
+    globalStateEntries: [{ key: "pinned-thread-ids", value: [] }],
+  });
+
+  assert.deepEqual([...observer.__test.getKnownThreads().keys()], []);
+  observer.stop();
+});
+
 test("official chunked messages are acknowledged and restored before browser routing", () => {
   const receiver = new __test.OfficialChunkedMessageReceiver();
   const marker = "codex-host-chunked-message-v1";
