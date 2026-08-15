@@ -207,10 +207,10 @@ function serveOfficialAsset(service, reqPath, host) {
   return res.body.toString("utf-8");
 }
 
-function serveOfficialAssetResponse(service, reqPath, host = "localhost:3737") {
+function serveOfficialAssetResponse(service, reqPath, host = "localhost:3737", headers = {}) {
   const file = service.staticFile(reqPath);
   const res = makeResponseRecorder();
-  service.serveFile({ headers: { host } }, res, file, 200, reqPath);
+  service.serveFile({ headers: { host, ...headers } }, res, file, 200, reqPath);
   return res;
 }
 
@@ -702,7 +702,7 @@ test("renames official open-in-folder locale message only for remote browser hos
   assert.match(loopbackSource, /"artifactTab\.preview\.openInFolder":`打开所在文件夹`/);
 });
 
-test("only caches content-hashed patched assets as immutable", (t) => {
+test("revalidates dynamically patched hash assets instead of discarding them", (t) => {
   const webviewDir = makeOfficialWebviewDir(t);
   const assetsDir = path.join(webviewDir, "assets");
   fs.mkdirSync(assetsDir, { recursive: true });
@@ -731,8 +731,26 @@ test("only caches content-hashed patched assets as immutable", (t) => {
   const legacy = serveOfficialAssetResponse(service, "/official-patched/assets/app-Dk3EPlSk.js");
 
   assert.equal(current.headers["cache-control"], "public, max-age=31536000, immutable");
-  assert.equal(dynamic.headers["cache-control"], "no-store");
+  assert.equal(dynamic.headers["cache-control"], "public, no-cache");
+  assert.match(dynamic.headers.etag, /^W\/"[A-Za-z0-9_-]+"$/);
+  assert.equal(dynamic.headers.vary, "Accept-Encoding");
   assert.match(dynamic.body.toString("utf-8"), /下载文件/);
+  const revalidated = serveOfficialAssetResponse(
+    patchedService,
+    `${PATCHED_OFFICIAL_PREFIX}assets/locale-Ab1_cdEF.js`,
+    "192.168.60.218:3737",
+    { "if-none-match": `"stale", ${dynamic.headers.etag.slice(2)}` }
+  );
+  assert.equal(revalidated.status, 304);
+  assert.equal(revalidated.body.length, 0);
+  assert.equal(revalidated.headers.vary, "Accept-Encoding");
+  const wildcard = serveOfficialAssetResponse(
+    patchedService,
+    `${PATCHED_OFFICIAL_PREFIX}assets/locale-Ab1_cdEF.js`,
+    "192.168.60.218:3737",
+    { "if-none-match": "*" }
+  );
+  assert.equal(wildcard.status, 304);
   assert.equal(fixedName.headers["cache-control"], "no-store");
   assert.equal(legacy.headers["cache-control"], "no-store");
 });

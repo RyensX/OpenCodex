@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const {
   PATCHED_OFFICIAL_PREFIX,
   WEB_SHELL_ASSETS_PREFIX,
@@ -16,7 +17,7 @@ const {
   pluginEntryFileFromRequestPath,
   withPluginI18nMessages,
 } = require("../core/plugin-assets.cjs");
-const { gzipIfUseful, send } = require("./http-utils.cjs");
+const { gzipIfUseful, headerValue, send } = require("./http-utils.cjs");
 const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
@@ -68,6 +69,17 @@ const APP_SERVER_BACKGROUND_METHODS = [
   "plugin/list",
   "skills/list",
 ];
+
+function ifNoneMatchMatches(value, etag) {
+  const normalizedEtag = etag.replace(/^W\//, "");
+  return String(value || "")
+    .split(",")
+    .some((candidate) => {
+      const normalizedCandidate = candidate.trim();
+      return normalizedCandidate === "*" || normalizedCandidate.replace(/^W\//, "") === normalizedEtag;
+    });
+}
+
 // 固定 web-shell 资源只在这里登记一次，白名单和文件映射共用同一份配置。
 const WEB_SHELL_STATIC_FILES = new Map([
   [FAVICON_PATH, path.join(WEB_SHELL_ASSETS_DIR, "icon.png")],
@@ -545,10 +557,9 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
       // patched 前缀不包含官方 runtime 版本，只有 Vite content-hash 文件名能安全跨升级长期缓存。
       if (
         reqPath.startsWith(PATCHED_OFFICIAL_PREFIX) &&
-        !responsePatched &&
         /-[A-Za-z0-9_-]{8}\.js$/.test(patchedOfficialAssetName(reqPath))
       ) {
-        return "public, max-age=31536000, immutable";
+        return responsePatched ? "public, no-cache" : "public, max-age=31536000, immutable";
       }
       // 旧前缀没有可靠版本位，只用于兼容浏览器残留的懒加载请求。
       return "no-store";
@@ -563,11 +574,22 @@ function createStaticAssetService({ getI18nSnapshot, getOfficialBundle }) {
   function serveFile(req, res, file, status = 200, reqPath = "") {
     const sourceData = fs.readFileSync(file);
     const data = patchOfficialAsset(reqPath, sourceData, req);
+    const cacheControl = cacheControlForRequestPath(reqPath, data !== sourceData);
+    const etag =
+      cacheControl === "public, no-cache"
+        ? `W/"${crypto.createHash("sha256").update(data).digest("base64url")}"`
+        : "";
+    if (etag && ifNoneMatchMatches(headerValue(req.headers, "if-none-match"), etag)) {
+      send(res, 304, { "cache-control": cacheControl, etag, vary: "Accept-Encoding" }, "");
+      return;
+    }
     const response = gzipIfUseful(
       req,
       {
         "content-type": mimeType(file),
-        "cache-control": cacheControlForRequestPath(reqPath, data !== sourceData),
+        "cache-control": cacheControl,
+        ...(etag ? { etag } : {}),
+        ...(etag ? { vary: "Accept-Encoding" } : {}),
       },
       data
     );
