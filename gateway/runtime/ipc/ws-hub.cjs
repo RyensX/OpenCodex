@@ -575,7 +575,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
     return false;
   }
 
-  // 只接受 /ws 升级，并校验 gateway 访问 token。浏览器 WebSocket 不能自定义 header，所以允许 query/cookie。
+  // 只接受 /ws 升级，并用同源 HttpOnly cookie 校验 gateway 访问 token。
   server.on("upgrade", (req, socket, head) => {
     // 先在 HTTP upgrade 阶段完成路径和 auth 校验，失败时不创建 WebSocket 对象。
     const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
@@ -583,7 +583,7 @@ function createWsHub(server, { createAppHostRelay, handleNotificationEvent, isAu
       diagnosticWarn("ws-hub", "upgrade_rejected_path", { url: req.url || "" });
       return socket.destroy();
     }
-    if (!isAuthed(req, url)) {
+    if (!isAuthed(req)) {
       logAuthRejected(url.pathname);
       return socket.destroy();
     }

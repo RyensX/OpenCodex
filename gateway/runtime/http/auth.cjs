@@ -181,11 +181,12 @@ function makeAuthStore(options = {}) {
   const tokens = new Map();
   let lastRefreshAtMs = 0;
   const hashToken = (token) => crypto.createHash("sha256").update(String(token)).digest("base64url");
+  const effectiveExpiresAtMs = (entry) => entry?.pendingExpiresAtMs || entry?.expiresAtMs || 0;
   const prune = () => {
     const currentTime = now();
     let changed = false;
     for (const [hash, entry] of tokens) {
-      if (!entry || entry.expiresAtMs <= currentTime) {
+      if (!entry || effectiveExpiresAtMs(entry) <= currentTime) {
         tokens.delete(hash);
         changed = true;
       }
@@ -202,11 +203,16 @@ function makeAuthStore(options = {}) {
       version: 1,
       passwordId,
       lastRefreshAtMs,
-      tokens: [...tokens].map(([hash, entry]) => ({ hash, expiresAtMs: entry.expiresAtMs })),
+      tokens: [...tokens].map(([hash, entry]) => ({ hash, expiresAtMs: effectiveExpiresAtMs(entry) })),
     };
     fs.writeFileSync(temporaryPath, `${JSON.stringify(document, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
     try {
       fs.renameSync(temporaryPath, filePath);
+      for (const entry of tokens.values()) {
+        if (!entry.pendingExpiresAtMs) continue;
+        entry.expiresAtMs = entry.pendingExpiresAtMs;
+        delete entry.pendingExpiresAtMs;
+      }
     } catch (error) {
       try {
         fs.unlinkSync(temporaryPath);
@@ -216,19 +222,21 @@ function makeAuthStore(options = {}) {
   }
 
   if (passwordId && filePath && exists(filePath)) {
+    let document = null;
     try {
-      const document = JSON.parse(readText(filePath));
-      if (document?.version === 1 && document.passwordId !== passwordId) {
-        persist();
-      } else if (document?.version === 1 && Array.isArray(document.tokens)) {
-        lastRefreshAtMs = Number.isSafeInteger(document.lastRefreshAtMs) ? document.lastRefreshAtMs : 0;
-        for (const item of document.tokens) {
-          if (!/^[A-Za-z0-9_-]{43}$/.test(item?.hash || "") || !Number.isSafeInteger(item?.expiresAtMs)) continue;
-          tokens.set(item.hash, { expiresAtMs: item.expiresAtMs });
-        }
-        prune();
-      }
+      document = JSON.parse(readText(filePath));
     } catch {}
+    if (document?.version === 1 && document.passwordId !== passwordId) {
+      // 密码变更必须可靠清空旧 session；写盘失败时拒绝启动，不能让旧 token 在密码切回后复活。
+      persist();
+    } else if (document?.version === 1 && Array.isArray(document.tokens)) {
+      lastRefreshAtMs = Number.isSafeInteger(document.lastRefreshAtMs) ? document.lastRefreshAtMs : 0;
+      for (const item of document.tokens) {
+        if (!/^[A-Za-z0-9_-]{43}$/.test(item?.hash || "") || !Number.isSafeInteger(item?.expiresAtMs)) continue;
+        tokens.set(item.hash, { expiresAtMs: item.expiresAtMs });
+      }
+      prune();
+    }
   }
 
   return {
@@ -237,28 +245,34 @@ function makeAuthStore(options = {}) {
       const token = crypto.randomBytes(32).toString("base64url");
       const expiresAtMs = now() + ttlMs;
       tokens.set(hashToken(token), { expiresAtMs });
-      lastRefreshAtMs = now();
+      if (lastRefreshAtMs === 0) lastRefreshAtMs = now();
       persist();
       return { token, expiresAtMs };
     },
-    validate(token) {
+    validate(token, { refresh = true } = {}) {
       // 每次成功校验都滑动续期，用户持续使用时不会被固定过期时间强制踢出。
       if (!token) return null;
       const hash = hashToken(token);
       const entry = tokens.get(hash);
       if (!entry) return null;
-      if (entry.expiresAtMs <= now()) {
+      if (effectiveExpiresAtMs(entry) <= now()) {
         tokens.delete(hash);
         persist();
         return null;
       }
-      const nextExpiresAtMs = now() + ttlMs;
-      if (now() - lastRefreshAtMs >= persistIntervalMs) {
-        entry.expiresAtMs = nextExpiresAtMs;
-        lastRefreshAtMs = now();
-        persist();
+      const currentTime = now();
+      if (refresh) entry.pendingExpiresAtMs = currentTime + ttlMs;
+      if (refresh && currentTime - lastRefreshAtMs >= persistIntervalMs) {
+        const previousLastRefreshAtMs = lastRefreshAtMs;
+        lastRefreshAtMs = currentTime;
+        try {
+          persist();
+        } catch (error) {
+          lastRefreshAtMs = previousLastRefreshAtMs;
+          throw error;
+        }
       }
-      return entry;
+      return { expiresAtMs: entry.expiresAtMs };
     },
     revoke(token) {
       if (!token) return;
@@ -327,6 +341,11 @@ function authTokenFromRequest(req, url = null) {
   return String(cookies[COOKIE_NAME] || "").trim();
 }
 
+function authTokenFromWebSocketRequest(req) {
+  const cookies = parseCookies(req.headers.cookie || "");
+  return String(cookies[COOKIE_NAME] || "").trim();
+}
+
 function authResultForRequest(req, url = null) {
   // 没配置密码时 gateway 处于无认证模式，保持本地开发默认可用。
   if (!AUTH_PASSWORD_HASH) return { authRequired: false, authenticated: true, token: "", expiresAtMs: null };
@@ -340,8 +359,9 @@ function authResultForRequest(req, url = null) {
   };
 }
 
-function isAuthed(req, url = null) {
-  return authResultForRequest(req, url).authenticated;
+function isAuthed(req) {
+  if (!AUTH_PASSWORD_HASH) return true;
+  return !!authStore.validate(authTokenFromWebSocketRequest(req), { refresh: false });
 }
 
 function isLauncherRequest(req) {
@@ -547,7 +567,9 @@ module.exports = {
   isLauncherRequest,
   sendUnauthorized,
   __test: {
+    COOKIE_NAME,
     authCookieHeader,
+    authTokenFromWebSocketRequest,
     isSecureRequest,
     makeAuthStore,
   },
