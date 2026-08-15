@@ -355,7 +355,7 @@ function createRequestHandler({ localFiles, pickedFiles, pluginService, staticAs
     // 从这里开始进入受保护区：官方 renderer、IPC API、本地文件和诊断接口都不能匿名访问。
     const requestAuthForRefresh = AUTH_PASSWORD_HASH ? authResultForRequest(req, url) : null;
     if (AUTH_PASSWORD_HASH && !requestAuthForRefresh.authenticated) return sendUnauthorized(req, res);
-    const requestAuthRefreshHeaders = authRefreshHeaders(requestAuthForRefresh);
+    const requestAuthRefreshHeaders = authRefreshHeaders(requestAuthForRefresh, req);
     // 对已登录请求顺手刷新 cookie TTL，浏览器长时间使用时不需要频繁重新登录。
     for (const [name, value] of Object.entries(requestAuthRefreshHeaders)) {
       res.setHeader(name, value);

@@ -134,7 +134,7 @@ OpenCodex本身不提供远程访问服务，如果需要在其他设备中远�
 | `OPENCODEX_PLUGIN_DIRS` | 空 | 外部插件根目录，结构需与 `web-shell/plugins` 一致；多个目录可用系统路径分隔符或 JSON 数组传入。 |
 | `OPENCODEX_LOG_MAX_MB` | `10` | Launcher 写入的 `gateway.log` 单文件大小上限，单位 MB；最多额外保留一个 `gateway.log.old`。 |
 | `CODEX_WEB_CONFIG_PATH` | `config.yaml` | gateway 认证配置文件路径。 |
-| `CODEX_WEB_AUTH_TOKEN_TTL_MS` | `43200000` | gateway 访问 token 有效期，默认 12 小时。 |
+| `CODEX_WEB_AUTH_TOKEN_TTL_MS` | `604800000` | gateway 访问 token 有效期，默认 7 天；登录在浏览器和 gateway 重启后仍保留。 |
 | `CODEX_WEB_DEBUG` | 空 | 设为 `1` 或 `true` 后输出更多调试日志。 |
 | `CODEX_WEB_SLOW_LOG_MS` | `750` | IPC 慢调用日志阈值，单位毫秒。 |
 | `CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS` | `300000` | 本地文件预览 URL token 有效期，单位毫秒。 |

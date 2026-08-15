@@ -41,9 +41,10 @@ const AUTH_CONFIG_PATH = process.env.CODEX_WEB_CONFIG_PATH
 const LAUNCHER_TOKEN = process.env.CODEX_WEB_LAUNCHER_TOKEN || "";
 const PASSWORD_HASH_PREFIX = "sha256-v1:";
 const COOKIE_NAME = "codex_web_auth";
+const AUTH_TOKEN_STORE_PATH = path.join(RUNTIME_DIR, "auth-tokens.json");
 const AUTH_TOKEN_TTL_MS = Math.max(
   1_000,
-  Number(process.env.CODEX_WEB_AUTH_TOKEN_TTL_MS || 12 * 60 * 60 * 1000)
+  Number(process.env.CODEX_WEB_AUTH_TOKEN_TTL_MS || 7 * 24 * 60 * 60 * 1000)
 );
 const DEBUG_LOGS = process.env.CODEX_WEB_DEBUG === "1" || process.env.CODEX_WEB_DEBUG === "true";
 const IPC_SLOW_LOG_MS = Number(process.env.CODEX_WEB_SLOW_LOG_MS || 750);
@@ -206,6 +207,7 @@ function officialRuntimeTempDir() {
 
 module.exports = {
   AUTH_CONFIG_PATH,
+  AUTH_TOKEN_STORE_PATH,
   AUTH_TOKEN_TTL_MS,
   CODEX_GENERATED_IMAGES_DIR,
   CODEX_HOME,

@@ -144,18 +144,8 @@
   }
 
   function gatewayWebSocketUrl() {
-    const rawUrl = cfg.gatewayWsUrl || location.origin.replace(/^http/, "ws") + "/ws";
-    const token = gatewayAuthToken();
-    if (!token) return rawUrl;
-    try {
-      const parsed = new URL(rawUrl, location.href);
-      // WebSocket 不能自定义 header，只能用短期 token query 配合 gateway 的 auth gate。
-      parsed.searchParams.set("token", token);
-      return parsed.toString();
-    } catch {
-      const separator = rawUrl.includes("?") ? "&" : "?";
-      return `${rawUrl}${separator}token=${encodeURIComponent(token)}`;
-    }
+    // 浏览器 WebSocket 与 gateway 同源，握手自动携带 HttpOnly cookie；token 不能进入 URL/代理日志。
+    return cfg.gatewayWsUrl || location.origin.replace(/^http/, "ws") + "/ws";
   }
 
   function forceGatewayLoginOnNextBoot() {

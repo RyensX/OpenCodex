@@ -137,7 +137,7 @@ OpenCodex itself does not provide a remote access service. If you need remote ac
 | `OPENCODEX_PLUGIN_DIRS` | Empty | External plugin root directories matching the `web-shell/plugins` layout; pass multiple roots with the platform path delimiter or a JSON array. |
 | `OPENCODEX_LOG_MAX_MB` | `10` | Size limit, in MB, for the Launcher-written `gateway.log`; at most one extra `gateway.log.old` is kept. |
 | `CODEX_WEB_CONFIG_PATH` | `config.yaml` | Path to the gateway authentication config file. |
-| `CODEX_WEB_AUTH_TOKEN_TTL_MS` | `43200000` | Gateway access token lifetime, 12 hours by default. |
+| `CODEX_WEB_AUTH_TOKEN_TTL_MS` | `604800000` | Gateway access token lifetime, 7 days by default; login survives browser and gateway restarts. |
 | `CODEX_WEB_DEBUG` | Empty | Set to `1` or `true` to output more debug logs. |
 | `CODEX_WEB_SLOW_LOG_MS` | `750` | Slow IPC call logging threshold, in milliseconds. |
 | `CODEX_WEB_LOCAL_FILE_TOKEN_TTL_MS` | `300000` | Local file preview URL token lifetime, in milliseconds. |

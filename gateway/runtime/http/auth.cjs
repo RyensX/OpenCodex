@@ -1,11 +1,14 @@
 const crypto = require("crypto");
 const fs = require("fs");
+const path = require("path");
 const {
   AUTH_CONFIG_PATH,
+  AUTH_TOKEN_STORE_PATH,
   AUTH_TOKEN_TTL_MS,
   COOKIE_NAME,
   LAUNCHER_TOKEN,
   PASSWORD_HASH_PREFIX,
+  ensureDir,
   exists,
   readText,
 } = require("../core/config.cjs");
@@ -168,27 +171,74 @@ function loadAuthPasswordHashFromConfig() {
 
 const AUTH_PASSWORD_HASH = loadAuthPasswordHashFromConfig();
 
-/** 只保存 token hash；重启 gateway 后 token 自然失效。 */
-function makeAuthStore() {
-  /**
-   * token 存储只放内存：
-   * - 泄露面小，不写磁盘。
-   * - gateway 重启后全部失效，符合本地 Web 入口的安全预期。
-   */
+function makeAuthStore(options = {}) {
+  const filePath = options.filePath || AUTH_TOKEN_STORE_PATH;
+  const now = typeof options.now === "function" ? options.now : Date.now;
+  const passwordHash = options.passwordHash === undefined ? AUTH_PASSWORD_HASH : options.passwordHash;
+  const persistIntervalMs = options.persistIntervalMs === undefined ? 60 * 60 * 1_000 : options.persistIntervalMs;
+  const ttlMs = options.ttlMs || AUTH_TOKEN_TTL_MS;
+  const passwordId = passwordHash ? sha256Hex(`opencodex-auth-store:${passwordHash}`) : "";
   const tokens = new Map();
+  let lastRefreshAtMs = 0;
   const hashToken = (token) => crypto.createHash("sha256").update(String(token)).digest("base64url");
   const prune = () => {
-    const now = Date.now();
+    const currentTime = now();
+    let changed = false;
     for (const [hash, entry] of tokens) {
-      if (!entry || entry.expiresAtMs <= now) tokens.delete(hash);
+      if (!entry || entry.expiresAtMs <= currentTime) {
+        tokens.delete(hash);
+        changed = true;
+      }
     }
+    return changed;
   };
+
+  function persist() {
+    if (!passwordId || !filePath) return;
+    prune();
+    ensureDir(path.dirname(filePath));
+    const temporaryPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+    const document = {
+      version: 1,
+      passwordId,
+      lastRefreshAtMs,
+      tokens: [...tokens].map(([hash, entry]) => ({ hash, expiresAtMs: entry.expiresAtMs })),
+    };
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(document, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+    try {
+      fs.renameSync(temporaryPath, filePath);
+    } catch (error) {
+      try {
+        fs.unlinkSync(temporaryPath);
+      } catch {}
+      throw error;
+    }
+  }
+
+  if (passwordId && filePath && exists(filePath)) {
+    try {
+      const document = JSON.parse(readText(filePath));
+      if (document?.version === 1 && document.passwordId !== passwordId) {
+        persist();
+      } else if (document?.version === 1 && Array.isArray(document.tokens)) {
+        lastRefreshAtMs = Number.isSafeInteger(document.lastRefreshAtMs) ? document.lastRefreshAtMs : 0;
+        for (const item of document.tokens) {
+          if (!/^[A-Za-z0-9_-]{43}$/.test(item?.hash || "") || !Number.isSafeInteger(item?.expiresAtMs)) continue;
+          tokens.set(item.hash, { expiresAtMs: item.expiresAtMs });
+        }
+        prune();
+      }
+    } catch {}
+  }
+
   return {
     issue() {
       prune();
       const token = crypto.randomBytes(32).toString("base64url");
-      const expiresAtMs = Date.now() + AUTH_TOKEN_TTL_MS;
+      const expiresAtMs = now() + ttlMs;
       tokens.set(hashToken(token), { expiresAtMs });
+      lastRefreshAtMs = now();
+      persist();
       return { token, expiresAtMs };
     },
     validate(token) {
@@ -197,15 +247,31 @@ function makeAuthStore() {
       const hash = hashToken(token);
       const entry = tokens.get(hash);
       if (!entry) return null;
-      if (entry.expiresAtMs <= Date.now()) {
+      if (entry.expiresAtMs <= now()) {
         tokens.delete(hash);
+        persist();
         return null;
       }
-      entry.expiresAtMs = Date.now() + AUTH_TOKEN_TTL_MS;
+      const nextExpiresAtMs = now() + ttlMs;
+      if (now() - lastRefreshAtMs >= persistIntervalMs) {
+        entry.expiresAtMs = nextExpiresAtMs;
+        lastRefreshAtMs = now();
+        persist();
+      }
       return entry;
     },
     revoke(token) {
-      if (token) tokens.delete(hashToken(token));
+      if (!token) return;
+      const hash = hashToken(token);
+      const entry = tokens.get(hash);
+      if (!entry) return;
+      tokens.delete(hash);
+      try {
+        persist();
+      } catch (error) {
+        tokens.set(hash, entry);
+        throw error;
+      }
     },
   };
 }
@@ -285,23 +351,34 @@ function isLauncherRequest(req) {
   return typeof value === "string" && value === LAUNCHER_TOKEN;
 }
 
-function authCookieHeader(token) {
-  return `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`;
+function isSecureRequest(req) {
+  if (req?.socket?.encrypted) return true;
+  const forwardedProto = String(headerValue(req?.headers || {}, "x-forwarded-proto") || "")
+    .split(",", 1)[0]
+    .trim()
+    .toLowerCase();
+  return forwardedProto === "https";
 }
 
-function clearAuthCookieHeader() {
+function authCookieHeader(token, expiresAtMs, nowMs = Date.now(), secure = false) {
+  const maxAgeSeconds = Math.max(0, Math.ceil((expiresAtMs - nowMs) / 1_000));
+  return `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}; Expires=${new Date(expiresAtMs).toUTCString()}${secure ? "; Secure" : ""}`;
+}
+
+function clearAuthCookieHeader(secure = false) {
   const expired = "Thu, 01 Jan 1970 00:00:00 GMT";
+  const secureSuffix = secure ? "; Secure" : "";
   return [
-    `${COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0; Expires=${expired}`,
-    `${COOKIE_NAME}=; Path=/; SameSite=Lax; Max-Age=0; Expires=${expired}`,
-    `${COOKIE_NAME}=; HttpOnly; Path=/api/auth; SameSite=Lax; Max-Age=0; Expires=${expired}`,
-    `${COOKIE_NAME}=; Path=/api/auth; SameSite=Lax; Max-Age=0; Expires=${expired}`,
+    `${COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0; Expires=${expired}${secureSuffix}`,
+    `${COOKIE_NAME}=; Path=/; SameSite=Lax; Max-Age=0; Expires=${expired}${secureSuffix}`,
+    `${COOKIE_NAME}=; HttpOnly; Path=/api/auth; SameSite=Lax; Max-Age=0; Expires=${expired}${secureSuffix}`,
+    `${COOKIE_NAME}=; Path=/api/auth; SameSite=Lax; Max-Age=0; Expires=${expired}${secureSuffix}`,
   ];
 }
 
-function authRefreshHeaders(auth) {
+function authRefreshHeaders(auth, req) {
   if (!auth || !auth.authenticated || !auth.token || !auth.expiresAtMs) return {};
-  return { "set-cookie": authCookieHeader(auth.token, auth.expiresAtMs) };
+  return { "set-cookie": authCookieHeader(auth.token, auth.expiresAtMs, Date.now(), isSecureRequest(req)) };
 }
 
 function isValidPasswordHash(value) {
@@ -413,7 +490,7 @@ async function handleAuthLogin(req, res) {
     },
     {
       "cache-control": "no-store",
-      "set-cookie": authCookieHeader(issued.token, issued.expiresAtMs),
+      "set-cookie": authCookieHeader(issued.token, issued.expiresAtMs, Date.now(), isSecureRequest(req)),
     }
   );
 }
@@ -431,7 +508,7 @@ function handleAuthStatus(req, res, url) {
       expiresAtMs: auth.expiresAtMs,
       ttlMs: AUTH_PASSWORD_HASH ? AUTH_TOKEN_TTL_MS : null,
     },
-    { "cache-control": "no-store", ...authRefreshHeaders(auth) }
+    { "cache-control": "no-store", ...authRefreshHeaders(auth, req) }
   );
 }
 
@@ -445,7 +522,7 @@ function handleAuthLogout(req, res, url) {
     { ok: true },
     {
       "cache-control": "no-store",
-      "set-cookie": clearAuthCookieHeader(),
+      "set-cookie": clearAuthCookieHeader(isSecureRequest(req)),
     }
   );
 }
@@ -469,4 +546,9 @@ module.exports = {
   isAuthed,
   isLauncherRequest,
   sendUnauthorized,
+  __test: {
+    authCookieHeader,
+    isSecureRequest,
+    makeAuthStore,
+  },
 };
