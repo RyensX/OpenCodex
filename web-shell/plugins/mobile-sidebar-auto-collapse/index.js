@@ -191,16 +191,25 @@
         collapseAfterSelection();
       };
 
+      const handlePointerDown = (event) => {
+        if (!isEnabled() || !isMobile() || event.pointerType !== "touch") return;
+        if (!sidebarConversationRowFromTarget(event.target)) return;
+        // 官方 dnd-kit 移动 6px 就激活拖拽；隔离触摸起点，让浏览器保留纵向滚动。
+        event.stopPropagation();
+      };
+
       const disposeViewMessage = context.events.on("view:message", (payload) => {
         if (isEnabled() && isMobile() && isNewConversationMessage(payload)) collapseAfterSelection();
       });
 
       document.addEventListener("click", handleClick, true);
+      document.addEventListener("pointerdown", handlePointerDown, true);
 
       return () => {
         if (collapseTimer) w.clearTimeout(collapseTimer);
         disposeViewMessage();
         document.removeEventListener("click", handleClick, true);
+        document.removeEventListener("pointerdown", handlePointerDown, true);
         document.__opencodexMobileSidebarPluginInstalled = false;
       };
     },
