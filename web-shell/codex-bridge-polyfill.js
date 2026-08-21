@@ -1248,7 +1248,13 @@
 
   /** 只兜底展示 fetch 形态的 IPC 兼容错误，invoke 错误交给官方前端调用栈自然处理。 */
   function shouldSurfaceFetchIpcError(status, message) {
-    if (status === 400) return true;
+    if (status === 400) {
+      // 移动订阅（App Store / Google Play）的账单/支付方式提示对使用无影响，静默忽略，避免误弹故障弹窗
+      if (/payment methods for mobile subscriptions|mobile subscriptions must be managed/i.test(message || "")) {
+        return false;
+      }
+      return true;
+    }
     return /unsupported codex ipc channel|method not found|no electron ipc handler|invalid ipc channel/i.test(
       message || ""
     );
