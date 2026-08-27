@@ -788,4 +788,5 @@
 
     return tokenUsageCapability;
   };
+  w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.protocol.token-usage");
 })();

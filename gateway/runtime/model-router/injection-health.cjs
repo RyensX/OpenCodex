@@ -15,6 +15,14 @@ const INJECTION_POINTS = Object.freeze([
 const GLOBAL_POINT_SET = new Set(GLOBAL_INJECTION_POINTS);
 const BROWSER_POINT_SET = new Set(BROWSER_INJECTION_POINTS);
 const MAX_BROWSER_REPORTERS = 64;
+const COMPATIBILITY_POINT_BY_INJECTION = Object.freeze({
+  "app-server-router": "gateway.runtime.app-server.transport",
+  "auto-model-catalog": "gateway.runtime.app-server.virtual-model",
+  "route-presentation": "gateway.runtime.app-server.route-metadata",
+  "settings-page": "web.runtime.smart-router.settings",
+  "composer-adapter": "web.runtime.smart-router.composer",
+  "summary-adapter": "web.runtime.smart-router.summary",
+});
 
 function normalizedRuntimeIdentity(value) {
   const source = value && typeof value === "object" ? value : {};
@@ -33,7 +41,7 @@ function normalizedClientId(value) {
   return /^[a-zA-Z0-9_-]{8,96}$/.test(clientId) ? clientId : "";
 }
 
-function createInjectionHealthRegistry({ getRuntimeIdentity = () => ({}) } = {}) {
+function createInjectionHealthRegistry({ getRuntimeIdentity = () => ({}), compatibilityService = null } = {}) {
   const gatewayReports = new Map();
   const browserReports = new Map();
   let runtimeIdentity = normalizedRuntimeIdentity(getRuntimeIdentity());
@@ -56,6 +64,16 @@ function createInjectionHealthRegistry({ getRuntimeIdentity = () => ({}) } = {})
     synchronizeRuntime();
     if (!GLOBAL_POINT_SET.has(point)) return false;
     gatewayReports.set(point, Date.now());
+    const compatibilityPoint = COMPATIBILITY_POINT_BY_INJECTION[point];
+    if (compatibilityPoint) {
+      try {
+        compatibilityService?.installPoint(compatibilityPoint, {
+          locatorRevision: "smart-router-injection-v1",
+          strategyId: "legacy-health-adapter",
+        });
+        compatibilityService?.recordHit(compatibilityPoint);
+      } catch {}
+    }
     return true;
   }
 
@@ -71,6 +89,16 @@ function createInjectionHealthRegistry({ getRuntimeIdentity = () => ({}) } = {})
       browserReports.set(normalizedId, reports);
     }
     reports.set(point, Date.now());
+    const compatibilityPoint = COMPATIBILITY_POINT_BY_INJECTION[point];
+    if (compatibilityPoint) {
+      try {
+        compatibilityService?.browserReport({
+          clientId: normalizedId,
+          id: compatibilityPoint,
+          phase: "active",
+        });
+      } catch {}
+    }
     return true;
   }
 
@@ -109,6 +137,7 @@ function createInjectionHealthRegistry({ getRuntimeIdentity = () => ({}) } = {})
 
 module.exports = {
   BROWSER_INJECTION_POINTS,
+  COMPATIBILITY_POINT_BY_INJECTION,
   GLOBAL_INJECTION_POINTS,
   INJECTION_POINTS,
   createInjectionHealthRegistry,

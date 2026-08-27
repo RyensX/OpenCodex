@@ -88,6 +88,7 @@
       const viewportCoordinator = w.__OpenCodexViewportCoordinator;
       if (!viewportCoordinator || typeof viewportCoordinator.subscribe !== "function") return null;
       document.__opencodexIosFixInstalled = true;
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.ios-layout");
 
       let keyboardOpeningUntilMs = 0;
       let mutationObserver = null;

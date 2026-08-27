@@ -281,30 +281,49 @@ function ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath
   return { copied: true };
 }
 
-async function createPortableRunner({ layout, runtimeDir, logger }) {
+async function createPortableRunner({ layout, runtimeDir, logger, runCompatibility = (_id, operation) => operation() }) {
   const workDir = path.join(runtimeDir, "official-electron-runner");
   const runnerRootDir = path.join(workDir, `${process.platform}-${process.arch}`);
   const runnerResourcesDir = path.join(runnerRootDir, "resources");
   const runnerExecutablePath = path.join(runnerRootDir, runnerExecutableNameForPlatform());
   const markerPath = path.join(workDir, `runtime-manifest-${process.platform}-${process.arch}.json`);
 
-  ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath, markerPath, logger });
+  runCompatibility(
+    "static.cache.runner.portable-layout",
+    () => ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath, markerPath, logger }),
+    "portable-runtime-copy"
+  );
   // app.asar 是 OpenCodex gateway 壳，必须每次按当前代码路径重写；官方资源目录只通过 env/process.resourcesPath 指回原安装包。
   fs.rmSync(runnerResourcesDir, { recursive: true, force: true });
   fs.mkdirSync(runnerResourcesDir, { recursive: true });
-  const runnerAsarPath = await writeGatewayAsar({ runnerResourcesDir, workDir });
-  patchWindowsRunnerAsarIntegrity({
-    runnerRootDir,
-    runnerExecutablePath,
-    sourceExecutablePath: layout.executablePath,
-    runnerAsarPath,
-    logger,
-  });
+  const runnerAsarPath = await runCompatibility(
+    "static.cache.runner.gateway-asar",
+    () => writeGatewayAsar({ runnerResourcesDir, workDir }),
+    "asar-package"
+  );
+  if (process.platform === "win32") {
+    runCompatibility(
+      "static.cache.runner.windows-asar-integrity",
+      () => patchWindowsRunnerAsarIntegrity({
+        runnerRootDir,
+        runnerExecutablePath,
+        sourceExecutablePath: layout.executablePath,
+        runnerAsarPath,
+        logger,
+      }),
+      "pe-resource"
+    );
+  }
 
   logLine(logger, `prepared official Electron runner: root=${runnerRootDir}`);
   logLine(logger, `official Electron source: app=${layout.appRoot} asar=${layout.asarPath}`);
 
   return {
+    compatibilityPoints: [
+      "static.cache.runner.portable-layout",
+      "static.cache.runner.gateway-asar",
+      ...(process.platform === "win32" ? ["static.cache.runner.windows-asar-integrity"] : []),
+    ],
     executablePath: runnerExecutablePath,
     runnerAppPath: runnerRootDir,
     officialAppPath: layout.appRoot,

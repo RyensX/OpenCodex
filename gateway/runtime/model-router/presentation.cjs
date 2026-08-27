@@ -50,7 +50,7 @@ function visitProtocolMessages(value, visitor, depth = 0, state = null) {
   }
 }
 
-function createSmartSchedulingPresentation({ modelRouter, onClientRemoved, sendTo } = {}) {
+function createSmartSchedulingPresentation({ compatibilityService, modelRouter, onClientRemoved, sendTo } = {}) {
   const clientsByThread = new Map();
 
   function rememberClient(threadId, clientId) {
@@ -124,6 +124,7 @@ function createSmartSchedulingPresentation({ modelRouter, onClientRemoved, sendT
     if (!payload) return;
     const clients = clientsByThread.get(payload.event.threadId);
     if (!clients || clients.size === 0) return;
+    compatibilityService?.recordHit("gateway.runtime.app-server.route-metadata");
     for (const clientId of clients) {
       // 路由展示只能定向回发给曾在该任务发起 turn 的页面，禁止缺失 client 时回退成广播。
       sendTo?.(clientId, payload, { suppressDiagnostic: true });

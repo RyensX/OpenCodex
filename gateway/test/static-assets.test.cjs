@@ -6,6 +6,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
 const { pluginMessagesForLocale } = require("../runtime/core/plugin-assets.cjs");
+const { createCompatibilityService } = require("../runtime/compatibility/service.cjs");
 const {
   OPENCODEX_RUNTIME_BOOTSTRAP_PATH,
   createStaticAssetService,
@@ -137,8 +138,9 @@ function makeOfficialWebviewDir(t) {
   return dir;
 }
 
-function createService(webviewDir) {
+function createService(webviewDir, compatibilityService = null) {
   return createStaticAssetService({
+    compatibilityService,
     getI18nSnapshot: () => ({ locale: "en-US", messages: {} }),
     getOfficialBundle: () => ({ webviewDir }),
   });
@@ -179,6 +181,34 @@ function runtimeBootstrapSource(service) {
   assert.equal(res.status, 200);
   return res.body.toString("utf-8");
 }
+
+test("runtime compatibility page is protected and its reporter loads before feature scripts", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const service = createService(webviewDir);
+  const pagePath = "/opencodex/runtime-compatibility";
+  assert.equal(service.isPublicStaticPath(pagePath), false);
+  assert.match(service.protectedStaticFile(pagePath), /runtime-compatibility\.html$/);
+  assert.equal(fs.existsSync(service.protectedStaticFile(pagePath)), true);
+
+  const bootstrap = runtimeBootstrapSource(service);
+  const compatibilityIndex = bootstrap.indexOf("OpenCodexRuntimeCompatibility");
+  const sidebarIndex = bootstrap.indexOf("__opencodexSidebarPreviewInstalled");
+  assert.ok(compatibilityIndex >= 0);
+  assert.ok(sidebarIndex > compatibilityIndex);
+});
+
+test("compatibility capabilities preserve renderer HTML output byte for byte", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const baseline = createService(webviewDir).createRendererResponse();
+  const compatibilityService = createCompatibilityService();
+  const migrated = createService(webviewDir, compatibilityService).createRendererResponse();
+  assert.equal(migrated, baseline);
+  assert.equal(
+    compatibilityService.registry.point("static.cache.renderer.html.runtime-bootstrap").status,
+    "healthy"
+  );
+  compatibilityService.dispose();
+});
 
 test("runtime bootstrap honors an explicit gzip rejection", (t) => {
   const service = createService(makeOfficialWebviewDir(t));

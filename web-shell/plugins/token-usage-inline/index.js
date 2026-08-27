@@ -249,6 +249,7 @@
         return null;
       }
       document.__opencodexTokenUsageInlineInstalled = true;
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.token-usage-inline");
 
       const observedRows = new Set();
       const pendingScanRoots = new Set();

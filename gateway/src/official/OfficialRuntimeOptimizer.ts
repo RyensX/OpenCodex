@@ -51,8 +51,9 @@ function matchCount(source: string, pattern: RegExp): number {
  * 官方安装目录始终保持只读；补丁也只有在隐藏网关进程显式设置环境标记时才生效。
  */
 class OfficialRuntimeOptimizer {
-  constructor({ fileSystem }: { fileSystem: any }) {
+  constructor({ fileSystem, compatibilityService = null }: { fileSystem: any; compatibilityService?: any }) {
     this.fileSystem = fileSystem;
+    this.compatibilityService = compatibilityService;
   }
 
   optimize(bundleDir: string): any {
@@ -67,6 +68,7 @@ class OfficialRuntimeOptimizer {
     let worktreeShellEnvironmentReadyFileCount = 0;
     let patchedFileCount = 0;
     let prewarmReadyFileCount = 0;
+    let nativePetRestoreMarkerCount = 0;
     const unsupportedFiles = [];
 
     for (const entry of this.fileSystem.readDir(buildDir, { withFileTypes: true })) {
@@ -92,18 +94,48 @@ class OfficialRuntimeOptimizer {
           matchCount(source, NATIVE_PET_PREWARM_PATTERN) +
           matchCount(source, OPTIMIZED_NATIVE_PET_PREWARM_PATTERN);
         const restoreMarkerCount = source.split(NATIVE_PET_RESTORE_MARKER).length - 1;
+        nativePetRestoreMarkerCount += restoreMarkerCount;
         const recognizedRestoreCount =
           matchCount(source, NATIVE_PET_RESTORE_PATTERN) +
           matchCount(source, OPTIMIZED_NATIVE_PET_RESTORE_PATTERN);
         // 一个 chunk 可能同时打包多份 Native pet 实现；只识别其中一份时仍必须报告布局不完整。
-        if (recognizedFactoryCount >= markerCount) compositionReadyFileCount += 1;
+        const factorySupported = recognizedFactoryCount >= markerCount;
+        const prewarmSupported = recognizedPrewarmCount >= markerCount;
+        const restoreSupported = recognizedRestoreCount >= restoreMarkerCount;
+        if (factorySupported) compositionReadyFileCount += 1;
         else unsupportedParts.push("native-bridge");
-        if (recognizedPrewarmCount >= markerCount && recognizedRestoreCount >= restoreMarkerCount) {
+        if (prewarmSupported && restoreSupported) {
           prewarmReadyFileCount += 1;
         } else unsupportedParts.push("prewarm");
-        optimized = this.patchNativePetRestore(
-          this.patchNativePetPrewarm(this.patchNativePetFactory(optimized))
-        );
+        optimized = this.runPatchPoint({
+          id: "static.cache.main.native-pet.factory",
+          source: optimized,
+          fileName: entry.name,
+          candidateCount: recognizedFactoryCount,
+          expectedCandidates: markerCount,
+          supported: factorySupported,
+          patcher: (value) => this.patchNativePetFactory(value),
+        });
+        optimized = this.runPatchPoint({
+          id: "static.cache.main.native-pet.prewarm",
+          source: optimized,
+          fileName: entry.name,
+          candidateCount: recognizedPrewarmCount,
+          expectedCandidates: markerCount,
+          supported: prewarmSupported,
+          patcher: (value) => this.patchNativePetPrewarm(value),
+        });
+        if (restoreMarkerCount > 0) {
+          optimized = this.runPatchPoint({
+            id: "static.cache.main.native-pet.restore",
+            source: optimized,
+            fileName: entry.name,
+            candidateCount: recognizedRestoreCount,
+            expectedCandidates: restoreMarkerCount,
+            supported: restoreSupported,
+            patcher: (value) => this.patchNativePetRestore(value),
+          });
+        }
       }
 
       if (hasMacPush) {
@@ -112,9 +144,18 @@ class OfficialRuntimeOptimizer {
         const recognizedCount =
           matchCount(source, MAC_PUSH_REGISTRATION_PATTERN) +
           matchCount(source, OPTIMIZED_MAC_PUSH_REGISTRATION_PATTERN);
-        if (recognizedCount >= markerCount) macPushReadyFileCount += 1;
+        const supported = recognizedCount >= markerCount;
+        if (supported) macPushReadyFileCount += 1;
         else unsupportedParts.push("mac-push");
-        optimized = this.patchMacPushRegistration(optimized);
+        optimized = this.runPatchPoint({
+          id: "static.cache.main.macos-push-registration",
+          source: optimized,
+          fileName: entry.name,
+          candidateCount: recognizedCount,
+          expectedCandidates: markerCount,
+          supported,
+          patcher: (value) => this.patchMacPushRegistration(value),
+        });
       }
 
       if (hasGitDiscovery) {
@@ -136,19 +177,42 @@ class OfficialRuntimeOptimizer {
           source.includes(GIT_BACKGROUND_CACHE_MARKER)
             ? markerCount
             : 0);
-        if (
-          recognizedOriginCount >= markerCount &&
-          recognizedLocalPrefilterCount >= markerCount &&
-          recognizedBackgroundTimeoutCount >= markerCount
-        ) {
+        const originSupported = recognizedOriginCount >= markerCount;
+        const prefilterSupported = recognizedLocalPrefilterCount >= markerCount;
+        const backgroundSupported = recognizedBackgroundTimeoutCount >= markerCount;
+        if (originSupported && prefilterSupported && backgroundSupported) {
           gitDiscoveryReadyFileCount += 1;
         } else {
           unsupportedParts.push("git-discovery");
         }
         // 只合并完全相同的 origin 探测；隐藏网关的侧栏后台任务使用保护时限，用户主动与远端 Git 操作仍保留官方超时。
-        optimized = this.patchGitOriginResolver(
-          this.patchGitLocalPrefilter(this.patchGitBackgroundTimeout(optimized))
-        );
+        optimized = this.runPatchPoint({
+          id: "static.cache.main.git-background-command",
+          source: optimized,
+          fileName: entry.name,
+          candidateCount: recognizedBackgroundTimeoutCount,
+          expectedCandidates: markerCount,
+          supported: backgroundSupported,
+          patcher: (value) => this.patchGitBackgroundTimeout(value),
+        });
+        optimized = this.runPatchPoint({
+          id: "static.cache.main.git-local-prefilter",
+          source: optimized,
+          fileName: entry.name,
+          candidateCount: recognizedLocalPrefilterCount,
+          expectedCandidates: markerCount,
+          supported: prefilterSupported,
+          patcher: (value) => this.patchGitLocalPrefilter(value),
+        });
+        optimized = this.runPatchPoint({
+          id: "static.cache.main.git-origin-resolver",
+          source: optimized,
+          fileName: entry.name,
+          candidateCount: recognizedOriginCount,
+          expectedCandidates: markerCount,
+          supported: originSupported,
+          patcher: (value) => this.patchGitOriginResolver(value),
+        });
       }
 
       if (hasWorktreeShellEnvironment) {
@@ -157,9 +221,18 @@ class OfficialRuntimeOptimizer {
         const recognizedCount =
           matchCount(source, WORKTREE_SHELL_ENVIRONMENT_PATTERN) +
           (source.includes(WORKTREE_SHELL_ENVIRONMENT_CACHE_MARKER) ? markerCount : 0);
-        if (recognizedCount >= markerCount) worktreeShellEnvironmentReadyFileCount += 1;
+        const supported = recognizedCount >= markerCount;
+        if (supported) worktreeShellEnvironmentReadyFileCount += 1;
         else unsupportedParts.push("worktree-shell-environment");
-        optimized = this.patchWorktreeShellEnvironment(optimized);
+        optimized = this.runPatchPoint({
+          id: "static.cache.main.worktree-shell-environment",
+          source: optimized,
+          fileName: entry.name,
+          candidateCount: recognizedCount,
+          expectedCandidates: markerCount,
+          supported,
+          patcher: (value) => this.patchWorktreeShellEnvironment(value),
+        });
       }
 
       if (optimized !== source) {
@@ -207,7 +280,77 @@ class OfficialRuntimeOptimizer {
           ? "gateway-coalesced"
           : "unsupported-layout";
     }
+    this.reportAbsentPoint("static.cache.main.native-pet.factory", markerFileCount);
+    this.reportAbsentPoint("static.cache.main.native-pet.prewarm", markerFileCount);
+    this.reportAbsentPoint("static.cache.main.native-pet.restore", nativePetRestoreMarkerCount);
+    this.reportAbsentPoint("static.cache.main.macos-push-registration", macPushMarkerFileCount);
+    this.reportAbsentPoint("static.cache.main.git-origin-resolver", gitDiscoveryMarkerFileCount);
+    this.reportAbsentPoint("static.cache.main.git-local-prefilter", gitDiscoveryMarkerFileCount);
+    this.reportAbsentPoint("static.cache.main.git-background-command", gitDiscoveryMarkerFileCount);
+    this.reportAbsentPoint("static.cache.main.worktree-shell-environment", worktreeShellEnvironmentMarkerFileCount);
     return result;
+  }
+
+  private runPatchPoint({
+    id,
+    source,
+    fileName,
+    candidateCount,
+    expectedCandidates,
+    supported,
+    patcher,
+  }: {
+    id: string;
+    source: string;
+    fileName: string;
+    candidateCount: number;
+    expectedCandidates: number;
+    supported: boolean;
+    patcher: (source: string) => string;
+  }): string {
+    // 兼容骨架只增加状态和受控入口；布局部分变化时继续沿用旧版“安全命中部分仍应用”的行为。
+    if (!supported || expectedCandidates < 1) {
+      if (this.compatibilityService) {
+        try {
+          const method = candidateCount > expectedCandidates ? "ambiguousPoint" : "unsupportedPoint";
+          this.compatibilityService[method](id, {
+            locatorRevision: "official-main-v1",
+            strategyId: "static-regex",
+            candidateCount,
+            expectedCandidates: Math.max(1, expectedCandidates),
+            reason: `Expected ${expectedCandidates} candidates but found ${candidateCount}`,
+          });
+        } catch {}
+      }
+      return patcher(source);
+    }
+    if (!this.compatibilityService) return patcher(source);
+    try {
+      const capability = this.compatibilityService.bindCapability(id, patcher, {
+        locatorRevision: "official-main-v1",
+        strategyId: "static-regex",
+        candidateCount,
+        expectedCandidates,
+        targetKey: fileName,
+        fallback: patcher,
+        verify: () => typeof patcher === "function",
+      });
+      return capability(source);
+    } catch {
+      // 诊断骨架失败时直接执行原 patch，不能改变缓存生成结果或阻断 Gateway 启动。
+      return patcher(source);
+    }
+  }
+
+  private reportAbsentPoint(id: string, markerFileCount: number): void {
+    if (!this.compatibilityService || markerFileCount > 0) return;
+    try {
+      this.compatibilityService.unsupportedPoint(id, {
+        locatorRevision: "official-main-v1",
+        strategyId: "static-regex",
+        reason: "Official capability marker is not present",
+      });
+    } catch {}
   }
 
   private patchNativePetFactory(source: string): string {

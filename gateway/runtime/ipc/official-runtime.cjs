@@ -56,6 +56,7 @@ const ROUTE_ID_SCAN_MAX_NODES = 256;
 let officialBundle = null;
 let wsHub = null;
 let appServerChildDecorator = null;
+let runtimeCompatibility = null;
 let removeWsClientReadyListener = null;
 // 官方 runtime 会把自身 TMPDIR 改到隔离目录；observer 必须在此之前记住原始 fallback socket。
 const ORIGINAL_SYSTEM_TMPDIR = os.tmpdir();
@@ -108,6 +109,126 @@ const appServerSpawnHook = {
   decoratorError: null,
   lastError: null,
 };
+
+const GATEWAY_BOOTSTRAP_COMPATIBILITY_POINTS = Object.freeze([
+  "gateway.runtime.environment.official-app",
+  "gateway.runtime.environment.no-asar",
+  "gateway.runtime.chromium.hidden-services",
+  "gateway.runtime.chromium.gcm-profile",
+  "gateway.runtime.node.electron-module-loader",
+  "gateway.runtime.electron.notification",
+  "gateway.runtime.electron.tray",
+  "gateway.runtime.electron.ipc-main",
+  "gateway.runtime.electron.ipc-event",
+  "gateway.runtime.electron.browser-window",
+  "gateway.runtime.electron.web-contents-send",
+  "gateway.runtime.electron.dialog-open",
+  "gateway.runtime.electron.shell-open",
+  "gateway.runtime.electron.single-instance",
+  "gateway.runtime.electron.quit-dialog",
+  "gateway.runtime.electron.dock-visibility",
+  "gateway.runtime.process.app-server-launch",
+  "gateway.runtime.process.remote-file-manager",
+  "gateway.runtime.process.computer-use-installer",
+  "gateway.runtime.app-server.transport",
+  "gateway.runtime.app-server.virtual-model",
+  "gateway.runtime.app-server.turn-router",
+  "gateway.runtime.app-server.internal-session",
+  "gateway.runtime.app-server.route-metadata",
+  "gateway.runtime.app-server.history-context",
+  "gateway.runtime.app-host.relay",
+  "gateway.runtime.ipc.request-route",
+  "gateway.runtime.ipc.chunked-message",
+  "gateway.runtime.ipc.app-catalog-compaction",
+  "gateway.runtime.ipc.hidden-renderer-suppression",
+  "gateway.runtime.ipc.initial-sidebar-bootstrap",
+  "gateway.runtime.ipc.thread-list-invalidation",
+  "gateway.runtime.ipc.live-observer",
+  "gateway.runtime.ipc.workspace-context",
+  "gateway.runtime.ipc.open-file-context",
+  "gateway.runtime.ipc.computer-use-auth",
+]);
+
+function installRuntimeCompatibilityPoints(ids, strategyId = "gateway-bootstrap") {
+  if (!runtimeCompatibility) return;
+  for (const id of ids) {
+    try {
+      runtimeCompatibility.installPoint(id, {
+        locatorRevision: "gateway-runtime-v1",
+        strategyId,
+      });
+    } catch (error) {
+      diagnosticWarn("official-runtime", "compatibility_point_install_failed", {
+        id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+function recordRuntimeCompatibilityHit(id, count = 1) {
+  try {
+    return runtimeCompatibility?.recordHit(id, count) || false;
+  } catch {
+    return false;
+  }
+}
+
+function runRuntimeCompatibilityCapability(id, operation, strategyId) {
+  if (!runtimeCompatibility) return operation();
+  let capability = operation;
+  try {
+    capability = runtimeCompatibility.bindCapability(id, operation, {
+      locatorRevision: "gateway-runtime-v1",
+      strategyId,
+      // 骨架异常时仍执行原安装函数，不能改变 Electron Hook 的安装顺序或错误合约。
+      fallback: operation,
+      verify: () => typeof operation === "function",
+    });
+  } catch {}
+  return capability();
+}
+
+function installRunnerCompatibilityPoints() {
+  let ids = [];
+  try {
+    const parsed = JSON.parse(process.env.OPENCODEX_RUNNER_COMPATIBILITY_POINTS || "[]");
+    if (Array.isArray(parsed)) ids = parsed;
+  } catch {}
+  const installed = new Set(
+    ids.filter((id) => typeof id === "string" && id.startsWith("static.cache.runner."))
+  );
+  installRuntimeCompatibilityPoints(installed, "runner-build-receipt");
+  for (const id of [
+    "static.cache.runner.macos-background-bundle",
+    "static.cache.runner.macos-entry-signature",
+    "static.cache.runner.portable-layout",
+    "static.cache.runner.gateway-asar",
+    "static.cache.runner.windows-asar-integrity",
+  ]) {
+    if (!installed.has(id)) runtimeCompatibility?.disablePoint(id, "Not applicable on the current platform");
+  }
+}
+
+function validateInstalledRuntimeCompatibilityPoints() {
+  if (!runtimeCompatibility) return;
+  const checks = [
+    ["gateway.runtime.process.app-server-launch", appServerSpawnHookStatus().installed, appServerSpawnHookStatus().lastError],
+    ["gateway.runtime.node.electron-module-loader", officialElectronModuleHookStatus().installed, officialElectronModuleHookStatus().lastError],
+    ["gateway.runtime.electron.notification", officialNotificationHookStatus().installed, officialNotificationHookStatus().lastError],
+    ["gateway.runtime.electron.tray", hiddenTrayHookStatus().installed, hiddenTrayHookStatus().lastError],
+  ];
+  for (const [id, installed, lastError] of checks) {
+    if (installed) continue;
+    try {
+      runtimeCompatibility.failPoint(id, lastError || "Runtime hook was not installed", {
+        locatorRevision: "gateway-runtime-v1",
+        strategyId: "runtime-status-verification",
+        fallbackReason: "Official runtime behavior",
+      });
+    } catch {}
+  }
+}
 
 const COMPUTER_USE_AUTH_URLS = new Set([
   "computer-use-background-auth-read",
@@ -296,6 +417,8 @@ function fileManagerPathFromSpawn(command, normalizedArgs) {
 function maybeInterceptRemoteFileManagerOpen(filePath) {
   const store = currentRequestStore();
   if (!shouldInterceptRemoteFileManagerStore(store)) return false;
+  recordRuntimeCompatibilityHit("gateway.runtime.process.remote-file-manager");
+  recordRuntimeCompatibilityHit("gateway.runtime.electron.shell-open");
   const normalizedPath = typeof filePath === "string" ? filePath : String(filePath || "");
   if (!normalizedPath) {
     emitRemoteFileDownloadError("empty_path", "");
@@ -399,6 +522,7 @@ function wrapComputerUseInstallerExecCallback(command, normalizedArgs, callback)
 }
 
 function recordHiddenAppServerRedirect(launcher, command, normalizedArgs, replacementBinaryPath) {
+  recordRuntimeCompatibilityHit("gateway.runtime.process.app-server-launch");
   appServerSpawnHook.interceptCount += 1;
   appServerSpawnHook.lastInterceptAt = new Date().toISOString();
   appServerSpawnHook.lastLauncher = launcher;
@@ -454,6 +578,7 @@ function redirectHiddenAppServerExecFile(originalExecFile, bundle, self, command
     );
   }
   if (looksLikeComputerUseInstaller(command)) {
+    recordRuntimeCompatibilityHit("gateway.runtime.process.computer-use-installer");
     const execCallback = execFileCallbackFromArgs(args, options, callback);
     const wrappedCallback = wrapComputerUseInstallerExecCallback(command, normalizedArgs, execCallback);
     if (wrappedCallback) {
@@ -951,6 +1076,7 @@ function installDialogHooks() {
 
   electron.dialog.showOpenDialog = function patchedShowOpenDialog(parentOrOptions, maybeOptions) {
     if (isHiddenOfficialDialogParent(parentOrOptions)) {
+      recordRuntimeCompatibilityHit("gateway.runtime.electron.dialog-open");
       const options = maybeOptions || {};
       const mode = canUseAppleScriptOpenDirectoryDialog(options) ? "osascript_open_directory" : "electron_unparented";
       diagnosticLog("official-runtime", "dialog_hidden_parent_detached", {
@@ -1399,6 +1525,7 @@ function maybeHandleComputerUseAuthWriteNoop(channel, args) {
 
   const status = readComputerUseInstallerStatusForDiagnostics();
   if (typeof status.installerInstalled !== "boolean" || status.installerInstalled !== desiredEnabled) return false;
+  recordRuntimeCompatibilityHit("gateway.runtime.ipc.computer-use-auth");
 
   /**
    * 官方 write 会无条件调用 install/uninstall。OpenCodex runner 是临时签名进程，macOS 授权启动
@@ -1536,6 +1663,7 @@ function rememberRequestRoute(channel, payload, clientId) {
   if (!clientId) return;
   const requestId = requestRouteIdFromIncoming(channel, payload);
   if (requestId) {
+    recordRuntimeCompatibilityHit("gateway.runtime.ipc.request-route");
     storeBoundedRequestRoute(
       requestRoutes,
       requestRouteSummaries,
@@ -1633,6 +1761,7 @@ let threadListEventSyncScheduled = false;
 function runThreadListInvalidation(logEvent, details = {}) {
   let recipientCount = 0;
   try {
+    recordRuntimeCompatibilityHit("gateway.runtime.ipc.thread-list-invalidation");
     if (wsHub) {
       recipientCount = wsHub.broadcast(threadListInvalidationEnvelope(), { suppressDiagnostic: true });
     }
@@ -1711,12 +1840,14 @@ function routeOfficialWebContentsSend(
    * 官方代码以为自己在给 Electron renderer 发消息。
    * gateway 需要把这些 webContents.send 拦下来，并转换成浏览器 WebSocket 消息。
    */
+  recordRuntimeCompatibilityHit("gateway.runtime.electron.web-contents-send");
   let routedArgs = args;
   let payload = payloadFromArgs(routedArgs);
   if (channel === MESSAGE_FOR_VIEW_CHANNEL) {
     // 每个隐藏窗口都对应独立的官方 preload 接收器，不能让辅助窗口的新传输清空主窗口状态。
     const chunked = officialChunkedMessageReceiverFor(sourceWebContents).receive(payload);
     if (chunked.type !== "passthrough") {
+      recordRuntimeCompatibilityHit("gateway.runtime.ipc.chunked-message");
       acknowledgeOfficialChunkSoon(chunked.acknowledgement, sourceWebContents);
       // 分块未完整前不能让 renderer 看到协议外壳；完成后再按原始消息参与 requestId 路由。
       if (chunked.type === "pending") return true;
@@ -1741,6 +1872,7 @@ function routeOfficialWebContentsSend(
   const requestSummary = requestId ? requestRouteSummaries.get(requestId) : null;
   const compactedPayload = compactOfficialAppCatalogPayload(channel, payload, requestSummary);
   if (compactedPayload !== payload && routedArgs.length === 1) {
+    recordRuntimeCompatibilityHit("gateway.runtime.ipc.app-catalog-compaction");
     payload = compactedPayload;
     routedArgs = [payload];
   }
@@ -1819,7 +1951,9 @@ function routeOfficialWebContentsSend(
 function shouldSuppressHiddenRendererSend(channel, args) {
   const payload = payloadFromArgs(args);
   // 浏览器代理的消息已经通过 WS 转发，继续送进隐藏 renderer 会造成重复消费。
-  return channel === MESSAGE_FOR_VIEW_CHANNEL && payload && typeof payload === "object";
+  const shouldSuppress = channel === MESSAGE_FOR_VIEW_CHANNEL && payload && typeof payload === "object";
+  if (shouldSuppress) recordRuntimeCompatibilityHit("gateway.runtime.ipc.hidden-renderer-suppression");
+  return shouldSuppress;
 }
 
 const OFFICIAL_WEB_CONTENTS_MAX_LISTENERS = 64;
@@ -1930,6 +2064,7 @@ function installBrowserWindowHooks() {
       x: -32000,
       y: -32000,
     });
+    recordRuntimeCompatibilityHit("gateway.runtime.electron.browser-window");
     registerOfficialWindow(win);
     return win;
   }
@@ -1964,6 +2099,7 @@ function patchOfficialAppSingleton() {
   app.__opencodexOfficialGatewaySingletonPatched = true;
   const originalRequestSingleInstanceLock = app.requestSingleInstanceLock.bind(app);
   app.requestSingleInstanceLock = (...args) => {
+    recordRuntimeCompatibilityHit("gateway.runtime.electron.single-instance");
     try {
       originalRequestSingleInstanceLock(...args);
     } catch {}
@@ -1977,6 +2113,7 @@ function createOfficialIpcEvent(context = {}) {
   if (!sender || sender.isDestroyed()) {
     throw new Error("Official BrowserWindow is not ready yet");
   }
+  recordRuntimeCompatibilityHit("gateway.runtime.electron.ipc-event");
   // 模拟 Electron IpcMainInvokeEvent 的关键字段，保证官方 handler 能按桌面端路径执行。
   return {
     sender,
@@ -2057,6 +2194,7 @@ async function connectOfficialAppHostPort(port, context = {}) {
   for (const listener of [...listeners]) {
     await listener(event);
   }
+  recordRuntimeCompatibilityHit("gateway.runtime.app-host.relay");
   return true;
 }
 
@@ -2202,6 +2340,12 @@ function officialBundleStatus() {
 function buildGatewayStatus() {
   const listenUrl = `http://${HOST}:${PORT}`;
   const localUrl = `http://127.0.0.1:${PORT}`;
+  let compatibility = null;
+  try {
+    compatibility = runtimeCompatibility?.summary?.() || null;
+  } catch {
+    // 诊断汇总失败不能让 Launcher 探活接口失效。
+  }
   return {
     ok: true,
     gateway: {
@@ -2232,6 +2376,7 @@ function buildGatewayStatus() {
     officialElectronModule: officialElectronModuleHookStatus(),
     officialNotification: officialNotificationHookStatus(),
     officialTray: hiddenTrayHookStatus(),
+    compatibility: compatibility || null,
     i18n: getI18nSnapshot(),
     workspaceRoots: workspaceRootsFromEnv(),
   };
@@ -2291,6 +2436,7 @@ async function initialSidebarBootstrapForRenderer() {
     }
     const effectiveBootstrap = bootstrap || lastInitialSidebarBootstrap;
     if (effectiveBootstrap) {
+      recordRuntimeCompatibilityHit("gateway.runtime.ipc.initial-sidebar-bootstrap");
       // 只从 Web 首屏侧栏已知条目订阅，避免 observer 读取或跟踪用户不可见的 thread。
       officialLiveObserver.observeSidebarBootstrap(effectiveBootstrap);
     }
@@ -2314,24 +2460,80 @@ function startOfficialRuntime(options = {}) {
    * - hook 必须先安装，才能捕获 bootstrap 注册的 IPC handler、官方 app-server 子进程，并隐藏官方 UI。
    */
   const { ensureOfficialBundle } = requireOfficialBundleProvider();
+  runtimeCompatibility = options.compatibilityService || null;
   appServerChildDecorator =
     typeof options.decorateAppServerChild === "function" ? options.decorateAppServerChild : null;
-  officialBundle = ensureOfficialBundle({ projectRoot: PROJECT_ROOT });
-  alignOfficialElectronEnvironment(officialBundle);
-  officialLiveObserver.start();
-  installAppServerSpawnHook(officialBundle);
-  installIpcMainHooks();
-  installBrowserWindowHooks();
-  installDialogHooks();
-  installRemoteFileManagerOpenHooks();
-  installOfficialNotificationHook(electron, {
-    publishNotification: (payload) => (wsHub ? wsHub.broadcast(payload, { suppressDiagnostic: true }) : 0),
+  officialBundle = ensureOfficialBundle({
+    projectRoot: PROJECT_ROOT,
+    compatibilityService: runtimeCompatibility,
   });
-  installOfficialTrayHook(electron);
-  patchOfficialAppSingleton();
+  installRunnerCompatibilityPoints();
+  runRuntimeCompatibilityCapability(
+    "gateway.runtime.environment.official-app",
+    () => alignOfficialElectronEnvironment(officialBundle),
+    "process-environment"
+  );
+  runRuntimeCompatibilityCapability(
+    "gateway.runtime.ipc.live-observer",
+    () => officialLiveObserver.start(),
+    "local-socket-observer"
+  );
+  runRuntimeCompatibilityCapability(
+    "gateway.runtime.process.app-server-launch",
+    () => installAppServerSpawnHook(officialBundle),
+    "child-process-wrapper"
+  );
+  runRuntimeCompatibilityCapability(
+    "gateway.runtime.electron.ipc-main",
+    installIpcMainHooks,
+    "electron-api-wrapper"
+  );
+  runRuntimeCompatibilityCapability(
+    "gateway.runtime.electron.browser-window",
+    installBrowserWindowHooks,
+    "electron-constructor-wrapper"
+  );
+  runRuntimeCompatibilityCapability(
+    "gateway.runtime.electron.dialog-open",
+    installDialogHooks,
+    "electron-api-wrapper"
+  );
+  runRuntimeCompatibilityCapability(
+    "gateway.runtime.process.remote-file-manager",
+    installRemoteFileManagerOpenHooks,
+    "child-process-wrapper"
+  );
+  runRuntimeCompatibilityCapability(
+    "gateway.runtime.electron.notification",
+    () => installOfficialNotificationHook(electron, {
+      publishNotification: (payload) => (wsHub ? wsHub.broadcast(payload, { suppressDiagnostic: true }) : 0),
+    }),
+    "electron-module-wrapper"
+  );
+  runRuntimeCompatibilityCapability(
+    "gateway.runtime.electron.tray",
+    () => installOfficialTrayHook(electron),
+    "electron-module-wrapper"
+  );
+  runRuntimeCompatibilityCapability(
+    "gateway.runtime.electron.single-instance",
+    patchOfficialAppSingleton,
+    "electron-api-wrapper"
+  );
 
   // 官方 bootstrap 负责注册 IPC handler、创建隐藏 BrowserWindow 和启动自己的 app-server 连接。
   require(officialBundle.bootstrapPath);
+  // 统一登记 Bootstrap 已暴露的固定执行路径；后续真正经过对应分支时再累计命中次数。
+  installRuntimeCompatibilityPoints(GATEWAY_BOOTSTRAP_COMPATIBILITY_POINTS);
+  validateInstalledRuntimeCompatibilityPoints();
+  try {
+    runtimeCompatibility?.persistNow?.();
+  } catch (error) {
+    // 报告目录不可写时仍允许官方 Runtime 正常启动，只记录一次启动期诊断。
+    diagnosticWarn("official-runtime", "compatibility_report_write_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function rejectPendingInternalResponses(error) {

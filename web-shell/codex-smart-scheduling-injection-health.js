@@ -19,6 +19,7 @@
   const locale = String(w.__CODEX_WEB_CONFIG__?.locale || document.documentElement.lang || "zh-CN");
   const isEnglish = locale.toLowerCase().startsWith("en");
   const clientId =
+    w.OpenCodexRuntimeCompatibility?.clientId ||
     w.crypto?.randomUUID?.() ||
     `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
   const fallback = {

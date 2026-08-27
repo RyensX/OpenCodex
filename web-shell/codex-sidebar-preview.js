@@ -40,6 +40,7 @@
         }
         marker.remove();
       }
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.late-module-preload");
     };
     const scheduleInstall = () => w.setTimeout(install, LATE_MODULE_PRELOAD_DELAY_MS);
     // load 后再留出一段主模块初始化窗口，避免低速 CPU 同时编译语言包和 React 首屏任务。
@@ -74,6 +75,7 @@
   function handoffIfOfficialReady() {
     const officialTarget = officialThreadRow(pendingThreadId);
     if (officialTarget) {
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.sidebar-preview-handoff");
       // 先移除覆盖层再委托点击，官方 React 仍是唯一负责导航和会话状态的实现。
       removePreview();
       w.requestAnimationFrame(() => {

@@ -64,6 +64,7 @@
     order: 40,
     activate(context) {
       if (context.scope !== "renderer") return null;
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.project-recent-sort");
 
       const persistedSnapshot =
         w.__CODEX_WEB_CONFIG__?.persistedAtomSnapshot &&

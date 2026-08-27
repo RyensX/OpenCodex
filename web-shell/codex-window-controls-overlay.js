@@ -711,5 +711,8 @@
   }
 
   installState.cleanup = installWindowControlsOverlaySafeArea() || null;
-
+  if (installState.cleanup) {
+    w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.window-controls-overlay");
+  }
+  w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.window-controls-overlay");
 })();

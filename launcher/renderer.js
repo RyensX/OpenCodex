@@ -208,6 +208,7 @@ function render(state) {
   const paths = state.paths || {};
   const settings = state.settings || {};
   const appInfo = state.app || {};
+  const compatibility = state.compatibility || {};
 
   renderStatus(state);
   renderUrls(state);
@@ -238,6 +239,15 @@ function render(state) {
   text("appServerMode", appServer.mode || t("common.unknown"));
   text("nodeVersion", gateway.nodeVersion || t("common.unknown"));
   text("electronVersion", gateway.electronVersion || t("common.unknown"));
+  const compatibilityStatusKey = compatibility.status
+    ? `launcher.compatibility.${compatibility.status}`
+    : "common.unknown";
+  const compatibilityIssueCount =
+    Number(compatibility.unavailableCount || 0) + Number(compatibility.degradedCount || 0);
+  text(
+    "compatibilityStatus",
+    `${t(compatibilityStatusKey)}${compatibilityIssueCount > 0 ? ` · ${compatibilityIssueCount}` : ""}`
+  );
 
   pathButton("configPath", runtime.configPath || paths.configPath, "common.notCreated");
   pathButton("logPath", paths.logPath, "common.notCreated");
@@ -315,6 +325,10 @@ document.addEventListener("click", async (event) => {
   }
   if (target.id === "openLogs") {
     await launcher.openLogs();
+    return;
+  }
+  if (target.id === "openRuntimeCompatibility") {
+    await launcher.openRuntimeCompatibility();
     return;
   }
   if (target.id === "githubLink") {

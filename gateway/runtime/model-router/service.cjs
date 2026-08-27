@@ -40,7 +40,13 @@ function setBoundedMapEntry(map, key, value, maxEntries) {
   return value;
 }
 
-function createSmartModelRouterService({ configStore, stateFilePath, classifierOptions = {}, injectionHealth = null }) {
+function createSmartModelRouterService({
+  configStore,
+  stateFilePath,
+  classifierOptions = {},
+  injectionHealth = null,
+  compatibilityService = null,
+}) {
   const stateStore = createAutoStateStore({ filePath: stateFilePath });
   const catalog = createModelCatalog();
   const historyByThread = new Map();
@@ -162,6 +168,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     },
     onAttached() {
       injectionHealth?.reportGateway("app-server-router");
+      compatibilityService?.recordHit("gateway.runtime.app-server.transport");
     },
   });
   virtualModel = createVirtualModelController({
@@ -171,6 +178,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     catalog,
     onAutoModelInjected() {
       injectionHealth?.reportGateway("auto-model-catalog");
+      compatibilityService?.recordHit("gateway.runtime.app-server.virtual-model");
     },
   });
   classifier = createClassifier({ transport, ...classifierOptions });
@@ -454,6 +462,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
       route = fallbackRoute();
     }
     rewriteTurn(message, route);
+    compatibilityService?.recordHit("gateway.runtime.app-server.turn-router");
     turnRouteStatus.select({
       requestKey: requestKey(message.id),
       threadId,
@@ -535,11 +544,15 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     if (!meta || !["thread/list", "thread/search", "thread/loaded/list"].includes(meta.method)) return message;
     const data = message?.result?.data;
     if (!Array.isArray(data)) return message;
+    const filteredData = data.filter((thread) => !transport.isInternalThreadId(thread?.id));
+    if (filteredData.length !== data.length) {
+      compatibilityService?.recordHit("gateway.runtime.app-server.internal-session");
+    }
     return {
       ...message,
       result: {
         ...message.result,
-        data: data.filter((thread) => !transport.isInternalThreadId(thread?.id)),
+        data: filteredData,
       },
     };
   }
@@ -548,6 +561,7 @@ function createSmartModelRouterService({ configStore, stateFilePath, classifierO
     if (!message?.method || !message.params) return;
     const threadId = String(message.params.threadId || message.params.thread?.id || "");
     if (!threadId || transport.isInternalThreadId(threadId)) return;
+    compatibilityService?.recordHit("gateway.runtime.app-server.history-context");
     if (message.method === "turn/started") {
       associateCachedTurn(threadId, String(message.params.turn?.id || message.params.turnId || ""));
     } else if (message.method === "item/completed") {

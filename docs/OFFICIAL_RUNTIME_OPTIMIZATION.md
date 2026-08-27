@@ -1,5 +1,7 @@
 # Official Runtime 优化现状与运行时迁移方案
 
+> 统一兼容骨架的实现、修改点目录和诊断协议见 [OFFICIAL_COMPATIBILITY_KERNEL.md](./OFFICIAL_COMPATIBILITY_KERNEL.md)。
+
 > 状态：讨论结论与后续实施设计
 > 整理日期：2026-08-13
 > 适用范围：OpenCodex 复用本机 Codex/ChatGPT Desktop 官方运行时时的隐藏 Gateway 进程

@@ -245,6 +245,7 @@
         return null;
       }
       document.__opencodexMobileKeyboardPluginInstalled = true;
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-keyboard");
 
       let focusBlockedUntilMs = 0;
       let lastManualFocusIntentAtMs = 0;

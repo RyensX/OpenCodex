@@ -1036,6 +1036,9 @@
           }
           if (!res.ok) throw new Error(t("web.auth.loadFailedHttp", { status: res.status }));
           const html = await res.text();
+          try {
+            sessionStorage.setItem("opencodex_legacy_document_replace_hit", "1");
+          } catch {}
           document.open();
           document.write(html);
           document.close();

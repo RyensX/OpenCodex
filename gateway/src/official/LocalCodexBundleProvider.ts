@@ -37,6 +37,7 @@ type LocalCodexBundleProviderOptions = {
   logger?: any;
   fileSystem?: any;
   env?: Record<string, string | undefined>;
+  compatibilityService?: any;
 };
 
 /**
@@ -70,6 +71,7 @@ class LocalCodexBundleProvider {
     this.autoScanUpgrade = this.env[OFFICIAL_AUTO_SCAN_UPGRADE_ENV] !== "0";
     this.logger = options.logger || new OfficialBundleLogger();
     this.fileSystem = fileSystem;
+    this.compatibilityService = options.compatibilityService || null;
     this.scanner = new CodexAsarScanner({
       configuredPath: options.appPathEnv || this.env.CODEX_DESKTOP_APP_PATH || "",
       defaultCandidates: options.appCandidates || null,
@@ -77,7 +79,10 @@ class LocalCodexBundleProvider {
     });
     this.sourceInfoReader = new CodexBundleSourceInfoReader({ logger: this.logger, archive, fileSystem });
     this.extractor = new AsarWebviewExtractor({ archive, fileSystem });
-    this.runtimeOptimizer = new OfficialRuntimeOptimizer({ fileSystem });
+    this.runtimeOptimizer = new OfficialRuntimeOptimizer({
+      fileSystem,
+      compatibilityService: this.compatibilityService,
+    });
     this.manifestFactory = new OfficialBundleManifestFactory();
     this.byteFormatter = new BundleByteFormatter();
   }
@@ -99,6 +104,7 @@ class LocalCodexBundleProvider {
 
     const layout = this.scanner.find({ cachedAsarPath: manifest?.sourceAsarPath });
     const sourceInfo = this.sourceInfoReader.read(layout);
+    this.synchronizeCompatibilityRuntime(sourceInfo);
     const reason = cache.refreshReason(manifest, sourceInfo);
 
     this.logSourceInfo({ sourceInfo, cache });
@@ -132,6 +138,8 @@ class LocalCodexBundleProvider {
     const sourceResourcesPath = manifest.sourceResourcesPath || path.dirname(sourceAsarPath);
     this.logger.info("自动扫描官方运行时更新已关闭，复用现有官方运行时缓存");
     this.logger.info(`缓存命中：${manifest.version || "unknown"} (build ${manifest.build || "unknown"})`);
+    this.synchronizeCompatibilityRuntime(manifest);
+    this.reportCachedOptimizationCompatibility(manifest.runtimeOptimizations);
     return {
       bundleDir: cache.bundleDir,
       webviewDir: cache.webviewDir,
@@ -170,6 +178,69 @@ class LocalCodexBundleProvider {
       this.logger.info(`缓存来源路径不同但 app.asar 文件身份一致，复用 ${manifest.sourceAsarPath}`);
     }
     this.logger.info(`缓存命中：${manifest.version} (build ${manifest.build})`);
+    this.reportCachedOptimizationCompatibility(manifest.runtimeOptimizations);
+  }
+
+  private synchronizeCompatibilityRuntime(source: any): void {
+    if (!this.compatibilityService?.setRuntimeIdentity) return;
+    const size = Number(source?.sourceAsarSize || 0);
+    const mtime = Math.trunc(Number(source?.sourceAsarMtimeMs || 0));
+    // 运行时身份只包含版本和文件身份摘要，不把官方安装路径写入远程诊断报告。
+    try {
+      this.compatibilityService.setRuntimeIdentity({
+        version: source?.version,
+        build: source?.build,
+        bundleHash: `asar-${size}-${mtime}`,
+      });
+    } catch {}
+  }
+
+  private reportCachedOptimizationCompatibility(runtimeOptimizations: any): void {
+    if (!this.compatibilityService || !runtimeOptimizations) return;
+    const groups = [
+      {
+        ids: ["static.cache.main.native-pet.factory"],
+        state: runtimeOptimizations.nativePetComposition,
+      },
+      {
+        ids: ["static.cache.main.native-pet.prewarm", "static.cache.main.native-pet.restore"],
+        state: runtimeOptimizations.nativePetPrewarm,
+      },
+      {
+        ids: ["static.cache.main.macos-push-registration"],
+        state: runtimeOptimizations.macPushRegistration,
+      },
+      {
+        ids: [
+          "static.cache.main.git-origin-resolver",
+          "static.cache.main.git-local-prefilter",
+          "static.cache.main.git-background-command",
+        ],
+        state: runtimeOptimizations.gitDiscovery,
+      },
+      {
+        ids: ["static.cache.main.worktree-shell-environment"],
+        state: runtimeOptimizations.worktreeShellEnvironment,
+      },
+    ];
+    for (const group of groups) {
+      for (const id of group.ids) {
+        try {
+          if (group.state === "unsupported-layout" || group.state === "not-present" || !group.state) {
+            this.compatibilityService.unsupportedPoint(id, {
+              locatorRevision: "official-main-cache-v1",
+              strategyId: "cached-manifest",
+              reason: group.state === "not-present" ? "Official capability is not present" : "Cached locator did not resolve",
+            });
+          } else {
+            this.compatibilityService.installPoint(id, {
+              locatorRevision: "official-main-cache-v1",
+              strategyId: "cached-manifest",
+            });
+          }
+        } catch {}
+      }
+    }
   }
 
   private refreshBundle({
@@ -235,8 +306,14 @@ class LocalCodexBundleProvider {
   }
 }
 
-function ensureOfficialBundle({ projectRoot }: { projectRoot: string }): EnsureOfficialBundleResult {
-  return new LocalCodexBundleProvider().ensure({ projectRoot });
+function ensureOfficialBundle({
+  projectRoot,
+  compatibilityService,
+}: {
+  projectRoot: string;
+  compatibilityService?: any;
+}): EnsureOfficialBundleResult {
+  return new LocalCodexBundleProvider({ compatibilityService }).ensure({ projectRoot });
 }
 
 module.exports = {

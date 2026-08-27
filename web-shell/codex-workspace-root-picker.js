@@ -341,4 +341,5 @@
     handleMessage,
     shouldHandleMessage,
   };
+  w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.workspace.root-picker");
 })();

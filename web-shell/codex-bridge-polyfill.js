@@ -86,6 +86,7 @@
   w.__opencodexPluginImageUrl = localPluginImageUrl;
 
   function installLocaleOverride() {
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.platform.desktop-globals");
     try {
       document.documentElement.lang = OPENCODEX_LOCALE;
     } catch {}
@@ -132,10 +133,12 @@
   }
 
   function handleTokenUsageAppHostData(data) {
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.protocol.token-usage");
     tokenUsageCapability?.handleAppHostData?.(data);
   }
 
   function handleTokenUsageGatewayPayload(payload) {
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.protocol.token-usage");
     tokenUsageCapability?.handleGatewayPayload?.(payload);
   }
 
@@ -293,6 +296,7 @@
     /** 把一个自定义 webview 元素包装成 iframe-backed shim。 */
     function installOnElement(element) {
       if (!element || element.__codexWebviewShimElement) return element;
+      globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.webview-shim");
       element.__codexWebviewShimElement = true;
       element.setAttribute("data-codex-webview-shim", "true");
       ensureWebviewStyles();
@@ -419,7 +423,9 @@
     artifacts: true,
   };
   const clientId =
-    w.crypto?.randomUUID?.() || `web-client-${Math.random().toString(36).slice(2)}`;
+    w.OpenCodexRuntimeCompatibility?.clientId ||
+    w.crypto?.randomUUID?.() ||
+    `web-client-${Math.random().toString(36).slice(2)}`;
   let ws = null;
   let wsReady = false;
   const wsReadyWaiters = new Set();
@@ -853,6 +859,7 @@
     if (!requestId) return false;
     const cacheKey = connectorLogoRequestCacheKeys.get(requestId);
     if (!cacheKey) return false;
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.protocol.connector-logo");
     connectorLogoRequestCacheKeys.delete(requestId);
 
     const waiterCount = connectorLogoInFlight.get(cacheKey)?.waitingRequestIds.length || 0;
@@ -1112,6 +1119,7 @@
   }
 
   function createGatewayAuthLogoutMenuItem(logoutItem) {
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.gateway-auth-menu");
     const officialLabel = officialLogoutLabelFromElement(logoutItem) || "退出登录";
     const item = logoutItem.cloneNode(true);
     item.dataset.codexWebGatewayAuthLogout = "true";
@@ -1612,7 +1620,9 @@
   function handleRemoteWorkspaceRootOption(payload) {
     const picker = w.OpenCodexWorkspaceRootPicker;
     if (!picker || typeof picker.handleMessage !== "function") return null;
-    return picker.handleMessage(payload);
+    const result = picker.handleMessage(payload);
+    if (result) globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.workspace.root-picker");
+    return result;
   }
 
   /** 把 ArrayBuffer 转成 base64；分块处理避免大文件触发调用栈上限。 */
@@ -1672,6 +1682,7 @@
 
   /** 使用浏览器原生 input[type=file] 实现官方 pick-files IPC 的选择动作。 */
   function openBrowserFilePicker(params) {
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.native.file-picker");
     // 浏览器同一时刻只能可靠承载一个原生文件面板；新请求先结束遗留会话，避免监听器和 Promise 累积。
     activeBrowserFilePickerCancel?.();
     return new Promise((resolve, reject) => {
@@ -1836,6 +1847,7 @@
   function handleIdeContextFetchMessage(payload) {
     if (!payload || typeof payload !== "object") return false;
     if (payload.type !== "fetch" || payload.url !== "vscode://codex/ide-context") return false;
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.native.ide-context");
     const requestId = String(payload.requestId || "");
     let params = {};
     try {
@@ -1862,6 +1874,7 @@
     }
     const requestId = String(payload.requestId || "");
     if (!requestId) return false;
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.network.statsig");
     let request = {};
     try {
       request = payload.body ? JSON.parse(payload.body) : {};
@@ -1887,6 +1900,7 @@
     if (!isTelemetryRegisterUrl(payload.url)) return false;
     const requestId = String(payload.requestId || "");
     if (!requestId) return false;
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.network.telemetry");
     emitFetchSuccess(requestId, {});
     return true;
   }
@@ -2122,6 +2136,7 @@
       return true;
     }
     if (message.type !== "opencodex:notification") return false;
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.native.notification");
 
     const notificationId = typeof message.notificationId === "string" ? message.notificationId : "";
     if (!notificationId || !("Notification" in w)) return true;
@@ -2313,6 +2328,7 @@
       if (event.source !== w) return;
       const data = event.data;
       if (!data || typeof data !== "object" || data.type !== "connect-app-host") return;
+      globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.app-host-port");
       const port = data.port || (event.ports && event.ports[0]);
       if (!port || typeof port.postMessage !== "function" || typeof port.start !== "function") {
         clientDiagnostic("app-host-connect-missing-port", {
@@ -2444,6 +2460,8 @@
   }
 
   async function invokeGatewayImmediate(channel, ipcArgs, payload) {
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.ipc-transport");
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.desktop-api");
     const diagnosticSummary = CLIENT_DIAGNOSTICS_ENABLED ? ipcDiagnosticSummary(channel, payload) : {};
     const invokeStartedAtMs = CLIENT_DIAGNOSTICS_ENABLED ? Date.now() : 0;
     const suppressRoutineDiagnostic =
@@ -2674,6 +2692,7 @@
 
   /** 所有 terminal-* 消息统一进入 session 队列。 */
   function enqueueTerminalMessage(payload) {
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.native.terminal");
     const sessionId = terminalSessionId(payload);
     if (payload && typeof payload === "object" && payload.type === "terminal-write") {
       return enqueueTerminalWrite(payload);
@@ -2683,6 +2702,7 @@
 
   /** Electron shell.openExternal 的浏览器实现。 */
   function openExternal(url) {
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.native.external-open");
     const newWindow = w.open(url, "_blank", "noopener,noreferrer");
     if (newWindow) return true;
     return true;
@@ -2753,6 +2773,7 @@
     const rawSrc = element.getAttribute("src") || element.src || "";
     const rewritten = appFsUrlToGatewayUrl(rawSrc);
     if (!rewritten || element.getAttribute("src") === rewritten) return;
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.app-fs-image");
     element.setAttribute("data-codex-web-app-fs-src", rawSrc);
     element.setAttribute("src", rewritten);
   }
@@ -3064,6 +3085,7 @@
     target.sendMessageFromView = async (payload) =>
       Promise.resolve().then(() => {
         if (payload && typeof payload === "object" && payload.type === "persisted-atom-sync-request") {
+          globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.persisted-atom");
           // 官方 renderer 首屏会很早请求 persisted atom；这里先本地回包，避免 WS 未连接导致回包丢失。
           emitPersistedAtomSync();
           void invoke("codex_desktop:message-from-view", payload).catch((error) => {
@@ -3072,17 +3094,20 @@
           return true;
         }
         if (payload && typeof payload === "object" && payload.type === "persisted-atom-update" && payload.key) {
+          globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.persisted-atom");
           // 更新先写本页快照并广播，后续再交给官方 main 按 Desktop 原逻辑落盘。
           const value = setPersistedAtomSnapshotValue(payload.key, payload.value, !!payload.deleted);
           emitPersistedAtomUpdated(payload.key, value, !!payload.deleted);
           return invoke("codex_desktop:message-from-view", payload);
         }
         if (payload && typeof payload === "object" && payload.type === "shared-object-set") {
+          globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.shared-object");
           // shared-object 的本地快照先同步更新，再交给 gateway 持久化。
           const value = setSharedObjectSnapshotValue(payload.key, payload.value);
           dispatch("shared-object-updated", { ...payload, value });
         }
         if (payload && typeof payload === "object" && payload.type === "shared-object-subscribe" && payload.key) {
+          globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.shared-object");
           emitSharedObjectSnapshotValue(payload.key);
         }
         if (payload && typeof payload === "object" && payload.type === "open-in-browser" && payload.url) {
@@ -3226,6 +3251,7 @@
 
   /** 浏览器直连 Statsig/遥测在受限网络下会刷 console error；Web 侧用本地默认值兜底。 */
   function buildStatsigInitializeResponse() {
+    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.feature-gates");
     const feature_gates = {};
     const dynamic_configs = {
       [STATSIG_DEFAULT_FEATURES_CONFIG]: {
@@ -3640,5 +3666,27 @@
 
   // 已连接 socket 保持后台业务语义；只有断线重试暂停，回到前台后再按原退避策略恢复。
   document.addEventListener("visibilitychange", handleReconnectVisibilityChange);
+  w.OpenCodexRuntimeCompatibility?.reportMany?.([
+    "web.runtime.platform.desktop-globals",
+    "web.runtime.bridge.desktop-api",
+    "web.runtime.bridge.ipc-transport",
+    "web.runtime.bridge.app-host-port",
+    "web.runtime.bridge.persisted-atom",
+    "web.runtime.bridge.shared-object",
+    "web.runtime.bridge.initial-sidebar",
+    "web.runtime.bridge.feature-gates",
+    "web.runtime.network.statsig",
+    "web.runtime.network.telemetry",
+    "web.runtime.protocol.connector-logo",
+    "web.runtime.dom.webview-shim",
+    "web.runtime.native.file-picker",
+    "web.runtime.native.ide-context",
+    "web.runtime.native.notification",
+    "web.runtime.native.terminal",
+    "web.runtime.native.external-open",
+    "web.runtime.dom.app-fs-image",
+    "web.runtime.dom.gateway-auth-menu",
+    "web.runtime.protocol.token-usage",
+  ]);
   connect();
 })();

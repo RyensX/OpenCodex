@@ -112,6 +112,17 @@ test("launcher and dev runner wire restart supervision without background pollin
   assert.match(launcherSource, /timedOut = true/);
   assert.match(launcherSource, /mainWindow\.on\("hide", stopStatusPolling\)/);
   assert.match(launcherSource, /mainWindow\.on\("minimize", stopStatusPolling\)/);
+  // 兼容报告失败只能影响诊断状态，不能把已经成功的 Runner 误判成启动失败。
+  assert.match(launcherSource, /function writeRunnerCompatibilityReportSafely/);
+  assert.match(
+    launcherSource,
+    /gatewayState\.officialRuntime = officialRuntime;\s+writeRunnerCompatibilityReportSafely\(paths, officialRuntime\)/
+  );
+  // 调试页沿用主入口的 localhost 域，才能复用现有认证 Cookie。
+  assert.match(
+    launcherSource,
+    /ipcMain\.handle\("launcher:open-runtime-compatibility", \(\) => \{\s+const openUrl = openOpenCodexUrl\(\)/
+  );
   // 隐藏 Electron 只承载本地 IPC；Chromium GCM/后台同步必须关闭，避免周期网络唤醒。
   assert.match(officialRunnerSource, /appendSwitch\("disable-background-networking"\)/);
 

@@ -30,6 +30,7 @@ const {
 } = require("../dist/official/OfficialRuntimeEntryResolver.js");
 const { __test: layoutTest } = require("../runner/official-layout.cjs");
 const { MANIFEST_SCHEMA_VERSION } = require("../dist/official/constants.js");
+const { createCompatibilityService } = require("../runtime/compatibility/service.cjs");
 
 function temporaryDirectory(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-desktop-compat-"));
@@ -431,7 +432,7 @@ test("runtime optimizer reports a partially recognized native pet chunk", (t) =>
   const result = optimizer.optimize(bundleDir);
   const optimized = fs.readFileSync(mainPath, "utf8");
 
-  // 已识别部分仍安全改写，但 manifest 必须明确告警，不能把混合新旧布局误报为全部成功。
+  // 保持旧行为：已识别部分仍安全改写，但骨架和 manifest 必须明确报告当前处于降级状态。
   assert.deepEqual(result, {
     nativePetComposition: "unsupported-layout",
     nativePetPrewarm: "unsupported-layout",
@@ -441,6 +442,31 @@ test("runtime optimizer reports a partially recognized native pet chunk", (t) =>
   });
   assert.equal((optimized.match(/OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`/g) || []).length, 2);
   assert.match(optimized, /function Changed\(\{platform:p=process\.platform\}/);
+});
+
+test("compatibility capability preserves official main optimization bytes", (t) => {
+  const baselineDir = temporaryDirectory(t);
+  const migratedDir = temporaryDirectory(t);
+  const relativePath = path.join(".vite", "build", "main-equivalent.js");
+  const source =
+    "function PetFactory({devAppPath:e,platform:t=process.platform}={}){" +
+    "if(t!==`darwin`)return null;return{log:`Native pet material attachment completed`}}" +
+    "class Pet{async prewarm(e){if(this.window!=null||this.openingWindowPromise!=null||this.isAppQuitting)return;this.open(e)}}";
+  writeFile(path.join(baselineDir, relativePath), source);
+  writeFile(path.join(migratedDir, relativePath), source);
+
+  const fileSystem = new OfficialBundleFileSystem();
+  const baselineResult = new OfficialRuntimeOptimizer({ fileSystem }).optimize(baselineDir);
+  const compatibilityService = createCompatibilityService();
+  const migratedResult = new OfficialRuntimeOptimizer({ fileSystem, compatibilityService }).optimize(migratedDir);
+
+  assert.deepEqual(migratedResult, baselineResult);
+  assert.equal(
+    fs.readFileSync(path.join(migratedDir, relativePath), "utf8"),
+    fs.readFileSync(path.join(baselineDir, relativePath), "utf8")
+  );
+  assert.equal(compatibilityService.registry.point("static.cache.main.native-pet.factory").status, "healthy");
+  compatibilityService.dispose();
 });
 
 test("runtime optimizer is idempotent for an already optimized cache", (t) => {

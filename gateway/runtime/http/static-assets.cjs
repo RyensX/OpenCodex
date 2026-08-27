@@ -54,6 +54,11 @@ const OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH = "/codex-token-usage-capability.js"
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH = "/codex-window-controls-overlay.css";
 const OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH = "/codex-window-controls-overlay.js";
 const OPENCODEX_RUNTIME_BOOTSTRAP_PATH = "/opencodex-runtime-bootstrap.js";
+const OPENCODEX_RUNTIME_COMPATIBILITY_PATH = "/codex-runtime-compatibility.js";
+const RUNTIME_COMPATIBILITY_PAGE_PATH = "/opencodex/runtime-compatibility";
+const RUNTIME_COMPATIBILITY_SETTINGS_PATH = "/settings/developer/runtime-compatibility";
+const RUNTIME_COMPATIBILITY_SCRIPT_PATH = "/opencodex/runtime-compatibility.js";
+const RUNTIME_COMPATIBILITY_STYLE_PATH = "/opencodex/runtime-compatibility.css";
 const OPENCODEX_SIDEBAR_PREVIEW_PATH = "/codex-sidebar-preview.js";
 const OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH = "/codex-offscreen-animation-guard.js";
 const CODEX_BRIDGE_POLYFILL_PATH = "/codex-bridge-polyfill.js";
@@ -201,6 +206,10 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [PWA_MANIFEST_PATH, path.join(WEB_SHELL_DIR, "manifest.webmanifest")],
   [OPENCODEX_PLUGIN_SYSTEM_PATH, path.join(WEB_SHELL_DIR, "opencodex-plugin-system.js")],
   [
+    OPENCODEX_RUNTIME_COMPATIBILITY_PATH,
+    path.join(WEB_SHELL_DIR, "codex-runtime-compatibility.js"),
+  ],
+  [
     OPENCODEX_GATEWAY_PLUGIN_SWITCHES_PATH,
     path.join(WEB_SHELL_DIR, "opencodex-gateway-plugin-switches.js"),
   ],
@@ -234,8 +243,17 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [CODEX_TOOLTIP_DISMISS_GUARD_PATH, path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js")],
 ]);
 
+// 兼容性页面本身不携带状态，但仍只在服务端认证门之后提供，避免暴露开发入口形状。
+const PROTECTED_WEB_SHELL_STATIC_FILES = new Map([
+  [RUNTIME_COMPATIBILITY_PAGE_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.html")],
+  [RUNTIME_COMPATIBILITY_SETTINGS_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.html")],
+  [RUNTIME_COMPATIBILITY_SCRIPT_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.js")],
+  [RUNTIME_COMPATIBILITY_STYLE_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.css")],
+]);
+
 // 静态资源层把官方 renderer/web-shell 的路径差异统一隐藏起来，server 只需要按 URL 取文件。
 function createStaticAssetService({
+  compatibilityService,
   getI18nSnapshot,
   getOfficialBundle,
   patchedAssetCacheMaxBytes = PATCHED_ASSET_CACHE_MAX_BYTES,
@@ -250,6 +268,7 @@ function createStaticAssetService({
   let hasWarnedApplicationMenuPatchMiss = false;
   let hasWarnedPluginSummaryImagePatchMiss = false;
   let hasWarnedPatchWorkerFailure = false;
+  const failedCompatibilityPoints = new Set();
   let officialAssetFileNamesCache = null;
   const patchedAssetCache = new Map();
   const patchedAssetBuildPromises = new Map();
@@ -272,6 +291,124 @@ function createStaticAssetService({
       "/official-patched/",
     ])
   );
+
+  function compatibilityCapability(id, implementation, strategyId) {
+    if (!compatibilityService) return implementation;
+    try {
+      return compatibilityService.bindCapability(id, implementation, {
+        locatorRevision: "renderer-cache-v1",
+        strategyId,
+        // 骨架自身不可用时仍执行原转换函数，保证接入前后的输出字节完全一致。
+        fallback: implementation,
+        verify: () => typeof implementation === "function",
+      });
+    } catch {
+      return implementation;
+    }
+  }
+
+  function installCompatibilityPoint(id, strategyId) {
+    try {
+      compatibilityService?.installPoint(id, {
+        locatorRevision: "renderer-cache-v1",
+        strategyId,
+      });
+    } catch {}
+  }
+
+  function hitCompatibilityPoint(id) {
+    try {
+      compatibilityService?.recordHit(id);
+    } catch {
+      // 命中统计失败不影响 HTML 或资源响应。
+    }
+  }
+
+  function failCompatibilityPoint(id, reason) {
+    if (failedCompatibilityPoints.has(id)) return;
+    failedCompatibilityPoints.add(id);
+    try {
+      compatibilityService?.failPoint(id, new Error(reason), {
+        locatorRevision: "renderer-cache-v1",
+        strategyId: "compressed-js",
+        fallbackReason: "Official renderer behavior",
+      });
+    } catch {}
+  }
+
+  const patchHtmlLangCompatible = compatibilityCapability(
+    "static.cache.renderer.html.lang",
+    patchHtmlLang,
+    "html-attribute"
+  );
+  const patchHtmlViewportCompatible = compatibilityCapability(
+    "static.cache.renderer.html.viewport",
+    patchHtmlViewport,
+    "html-meta"
+  );
+  const patchHtmlIconsCompatible = compatibilityCapability(
+    "static.cache.renderer.html.icon-pwa",
+    patchHtmlIcons,
+    "html-link"
+  );
+  const patchHtmlAssetPathsCompatible = compatibilityCapability(
+    "static.cache.renderer.html.asset-path-map",
+    patchHtmlAssetPaths,
+    "html-url-map"
+  );
+  const patchHtmlFontPreloadsCompatible = compatibilityCapability(
+    "static.cache.renderer.html.font-preload",
+    patchHtmlFontPreloads,
+    "html-link-filter"
+  );
+  const patchOfficialAssetUrlsCompatible = compatibilityCapability(
+    "static.cache.renderer.asset-namespace",
+    patchOfficialAssetUrls,
+    "patched-namespace"
+  );
+  const patchOfficialCspUnsafeEvalCompatible = compatibilityCapability(
+    "static.cache.renderer.csp.unsafe-eval",
+    patchOfficialCspUnsafeEval,
+    "csp-source"
+  );
+  const patchOfficialCspManifestSrcCompatible = compatibilityCapability(
+    "static.cache.renderer.csp.manifest-src",
+    patchOfficialCspManifestSrc,
+    "csp-directive"
+  );
+  const patchHistorySignalsCompatible = compatibilityCapability(
+    "static.cache.renderer.history-turn-signals",
+    patchAppServerManagerSignalsChunk,
+    "compressed-js"
+  );
+  const patchApplicationMenuCompatible = compatibilityCapability(
+    "static.cache.renderer.application-menu",
+    patchApplicationMenuCapabilityCheck,
+    "compressed-js"
+  );
+  const patchRequestSchedulingCompatible = compatibilityCapability(
+    "static.cache.renderer.app-server-request-scheduling",
+    patchAppServerRequestScheduling,
+    "compressed-js"
+  );
+  const patchPluginImageCompatible = compatibilityCapability(
+    "static.cache.renderer.plugin-image-lazy-load",
+    patchPluginSummaryImageInlining,
+    "compressed-js"
+  );
+  const patchOpenInFolderLocaleCompatible = compatibilityCapability(
+    "static.cache.renderer.open-in-folder-locale",
+    patchOpenInFolderLocaleMessage,
+    "locale-literal"
+  );
+  for (const [id, strategyId] of [
+    ["static.cache.renderer.html.runtime-bootstrap", "html-bootstrap"],
+    ["static.cache.renderer.html.startup-preload", "html-preload"],
+    ["static.cache.renderer.html.sidebar-preview", "html-preview"],
+    ["static.cache.renderer.html.loading-animation", "html-style"],
+  ]) {
+    installCompatibilityPoint(id, strategyId);
+  }
 
   function matchedPatchedOfficialPrefix(reqPath) {
     return patchedOfficialPrefixes.find((prefix) => reqPath.startsWith(prefix)) || "";
@@ -557,6 +694,7 @@ ${pluginGatewayStateBootstrapScript()}
   function runtimeBootstrapFileGroups(entries) {
     return {
       beforePlugins: [
+        WEB_SHELL_STATIC_FILES.get(OPENCODEX_RUNTIME_COMPATIBILITY_PATH),
         WEB_SHELL_STATIC_FILES.get(OPENCODEX_SIDEBAR_PREVIEW_PATH),
         WEB_SHELL_STATIC_FILES.get(OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH),
         WEB_SHELL_STATIC_FILES.get(OPENCODEX_PLUGIN_SYSTEM_PATH),
@@ -781,34 +919,16 @@ ${pluginGatewayStateBootstrapScript()}
     let html = rawHtml;
     const i18n = currentI18n();
     // 官方 HTML 是 Electron renderer 用的，浏览器里需要补 locale、移动端 viewport 和站点图标。
-    html = patchHtmlLang(html, i18n.locale);
-    html = html.replace(
-      /<meta([^>]*\bname=["']viewport["'][^>]*)>/i,
-      '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />'
-    );
-    const iconLinks = [
-      '<link rel="icon" type="image/png" sizes="192x192" href="/assets/pwa-icon-192.png" />',
-      '<link rel="apple-touch-icon" href="/assets/pwa-icon-192.png" />',
-    ].join("\n    ");
-    if (!/<link[^>]+\brel=["'][^"']*icon/i.test(html)) {
-      html = html.replace(/<title>/i, `${iconLinks}\n    <title>`);
-    }
-    // 官方产物里的相对路径统一映射到 /official/，避免和 web-shell 自己的 /assets 冲突。
-    html = html.replace(/(src|href)=["']\/(?!(?:official|assets)\/)([^"'#?]+)["']/g, '$1="/official/$2"');
-    html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
-    html = html.replace(/<link\b[^>]*>/gi, (tag) => {
-      const isFontPreload =
-        /\brel=["'][^"']*\bpreload\b[^"']*["']/i.test(tag) &&
-        /\bas=["']font["']/i.test(tag);
-      /**
-       * 官方主 CSS 由运行时动态加载；实测 Chromium 无法复用 HTML 阶段的字体预载，
-       * 无论凭据模式为何都会再发一次 CSS 字体请求。移除这类预载，让字体按真实使用只加载一次。
-       */
-      return isFontPreload ? "" : tag;
-    });
+    html = patchHtmlLangCompatible(html, i18n.locale);
+    html = patchHtmlViewportCompatible(html);
+    html = patchHtmlIconsCompatible(html);
+    html = patchHtmlAssetPathsCompatible(html);
+    html = patchHtmlFontPreloadsCompatible(html);
     const startupPreloads = startupAssetPreloads(html);
     const lateModuleHrefs = lateStartupModuleHrefs(i18n.locale);
     const previewMarkup = sidebarPreviewMarkup(options.sidebarPreview, i18n.locale);
+    if (startupPreloads) hitCompatibilityPoint("static.cache.renderer.html.startup-preload");
+    if (previewMarkup) hitCompatibilityPoint("static.cache.renderer.html.sidebar-preview");
     const useRuntimeBundle = canBundleRuntimeBootstrap();
     const runtimeScripts = useRuntimeBundle
       ? [
@@ -819,6 +939,7 @@ ${pluginGatewayStateBootstrapScript()}
         ]
       : [
           '<script src="/codex-web-config.js"></script>',
+          `<script src="${OPENCODEX_RUNTIME_COMPATIBILITY_PATH}"></script>`,
           `<script src="${OPENCODEX_SIDEBAR_PREVIEW_PATH}"></script>`,
           `<script src="${OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH}"></script>`,
           `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
@@ -858,6 +979,8 @@ ${pluginGatewayStateBootstrapScript()}
     ].join("\n    ");
     if (/<head[^>]*>/i.test(html)) {
       html = html.replace(/<head([^>]*)>/i, `<head$1>\n    ${base}`);
+      hitCompatibilityPoint("static.cache.renderer.html.runtime-bootstrap");
+      hitCompatibilityPoint("static.cache.renderer.html.loading-animation");
     }
     if (previewMarkup && /<body[^>]*>/i.test(html)) {
       // aside 与 #root 保持相邻，加载期 CSS 才能把官方 Logo 居中到主内容区域。
@@ -877,13 +1000,18 @@ ${pluginGatewayStateBootstrapScript()}
 
   /** desktop HTML 的 CSP 会拦截浏览器里部分依赖的 Function/eval 探测，需要在 gateway 层放开。 */
   function patchOfficialCspForWeb(rawHtml) {
+    const html = patchOfficialCspUnsafeEvalCompatible(rawHtml);
+    return patchOfficialCspManifestSrcCompatible(html);
+  }
+
+  function patchOfficialCspUnsafeEval(rawHtml) {
     let html = rawHtml;
     if (!html.includes("&#39;unsafe-eval&#39;") && !html.includes("'unsafe-eval'")) {
       html = html
         .replace("&#39;wasm-unsafe-eval&#39;", "&#39;wasm-unsafe-eval&#39; &#39;unsafe-eval&#39;")
         .replace("'wasm-unsafe-eval'", "'wasm-unsafe-eval' 'unsafe-eval'");
     }
-    return patchOfficialCspManifestSrc(html);
+    return html;
   }
 
   function patchOfficialCspManifestSrc(rawHtml) {
@@ -901,7 +1029,7 @@ ${pluginGatewayStateBootstrapScript()}
   }
 
   function patchOfficialHtmlForWeb(rawHtml) {
-    return patchOfficialCspForWeb(patchOfficialAssetUrls(rawHtml));
+    return patchOfficialCspForWeb(patchOfficialAssetUrlsCompatible(rawHtml));
   }
 
   function locateOfficialIndex() {
@@ -972,6 +1100,42 @@ ${pluginGatewayStateBootstrapScript()}
       html = html.replace(/<html([^>]*)>/i, `<html$1 lang="${locale}">`);
     }
     return html;
+  }
+
+  function patchHtmlViewport(rawHtml) {
+    return rawHtml.replace(
+      /<meta([^>]*\bname=["']viewport["'][^>]*)>/i,
+      '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />'
+    );
+  }
+
+  function patchHtmlIcons(rawHtml) {
+    if (/<link[^>]+\brel=["'][^"']*icon/i.test(rawHtml)) return rawHtml;
+    const iconLinks = [
+      '<link rel="icon" type="image/png" sizes="192x192" href="/assets/pwa-icon-192.png" />',
+      '<link rel="apple-touch-icon" href="/assets/pwa-icon-192.png" />',
+    ].join("\n    ");
+    return rawHtml.replace(/<title>/i, `${iconLinks}\n    <title>`);
+  }
+
+  function patchHtmlAssetPaths(rawHtml) {
+    // 官方产物里的相对路径统一映射到 /official/，避免和 web-shell 自己的 /assets 冲突。
+    return rawHtml
+      .replace(/(src|href)=["']\/(?!(?:official|assets)\/)([^"'#?]+)["']/g, '$1="/official/$2"')
+      .replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
+  }
+
+  function patchHtmlFontPreloads(rawHtml) {
+    return rawHtml.replace(/<link\b[^>]*>/gi, (tag) => {
+      const isFontPreload =
+        /\brel=["'][^"']*\bpreload\b[^"']*["']/i.test(tag) &&
+        /\bas=["']font["']/i.test(tag);
+      /**
+       * 官方主 CSS 由运行时动态加载；Chromium 无法复用 HTML 阶段的字体预载，
+       * 因此让字体跟随真实 CSS 使用加载，避免同一资源请求两次。
+       */
+      return isFontPreload ? "" : tag;
+    });
   }
 
   function webShellBootstrapScript(i18n) {
@@ -1073,6 +1237,7 @@ ${pluginGatewayStateBootstrapScript()}
   /** 判断是否应该回退到 SPA shell；刷新 /local/:id 这类官方前端路由时不能返回 404。 */
   function isAppShellRoute(req, pathname) {
     if (req.method !== "GET" && req.method !== "HEAD") return false;
+    if (PROTECTED_WEB_SHELL_STATIC_FILES.has(pathname)) return false;
     if (pathname.startsWith("/api/") || pathname === "/ws") return false;
     if (pathname === "/" || pathname === "") return true;
     if (path.extname(pathname)) return false;
@@ -1102,6 +1267,10 @@ ${pluginGatewayStateBootstrapScript()}
     if (!historyTurnShape.test(source)) {
       if (!hasWarnedHistoryPatchMiss) {
         hasWarnedHistoryPatchMiss = true;
+        failCompatibilityPoint(
+          "static.cache.renderer.history-turn-signals",
+          "Official history turn layout did not match"
+        );
         console.warn("[gateway] app-server-manager history patch skipped: current bundle shape did not match");
       }
       return source;
@@ -1204,6 +1373,10 @@ ${pluginGatewayStateBootstrapScript()}
       !hasWarnedApplicationMenuPatchMiss
     ) {
       hasWarnedApplicationMenuPatchMiss = true;
+      failCompatibilityPoint(
+        "static.cache.renderer.application-menu",
+        "Official application menu layout did not match"
+      );
       console.warn("[gateway] application menu patch skipped: current bundle shape did not match");
     }
     return patched;
@@ -1220,6 +1393,10 @@ ${pluginGatewayStateBootstrapScript()}
     const sendMatch = source.match(APP_SERVER_REQUEST_CLIENT_SEND_RE);
     const backgroundMatch = source.match(APP_SERVER_BACKGROUND_METHODS_RE);
     if (!hasFields || !sendMatch || !backgroundMatch) {
+      failCompatibilityPoint(
+        "static.cache.renderer.app-server-request-scheduling",
+        "Official App Server request layout did not match"
+      );
       console.warn("[gateway] app-server request scheduling patch skipped: current bundle shape did not match");
       return source;
     }
@@ -1272,6 +1449,10 @@ ${pluginGatewayStateBootstrapScript()}
       !hasWarnedPluginSummaryImagePatchMiss
     ) {
       hasWarnedPluginSummaryImagePatchMiss = true;
+      failCompatibilityPoint(
+        "static.cache.renderer.plugin-image-lazy-load",
+        "Official plugin image layout did not match"
+      );
       console.warn("[gateway] plugin summary image lazy-load patch skipped: current bundle shape did not match");
     }
     return patched;
@@ -1298,13 +1479,13 @@ ${pluginGatewayStateBootstrapScript()}
     // 绝大多数官方 chunk 已在候选检查中直接返回；只有命中的少量资源才进行 UTF-8 文本改写。
     const source = data.toString("utf-8");
     let patched = isHistorySignalsChunk
-      ? patchAppServerManagerSignalsChunk(source)
+      ? patchHistorySignalsCompatible(source)
       : source;
-    patched = patchApplicationMenuCapabilityCheck(patched);
-    patched = patchAppServerRequestScheduling(patched);
+    patched = patchApplicationMenuCompatible(patched);
+    patched = patchRequestSchedulingCompatible(patched);
     if (!loopback) {
-      patched = patchPluginSummaryImageInlining(patched);
-      patched = patchOpenInFolderLocaleMessage(patched, options.downloadMessage || downloadFileMessage());
+      patched = patchPluginImageCompatible(patched);
+      patched = patchOpenInFolderLocaleCompatible(patched, options.downloadMessage || downloadFileMessage());
     }
     // 保留原 Buffer 身份，让缓存层能区分 content-hash 源文件与动态改写后的响应体。
     return patched === source ? data : Buffer.from(patched, "utf-8");
@@ -1333,6 +1514,10 @@ ${pluginGatewayStateBootstrapScript()}
       return locateOfficialAsset(rel);
     }
     return null;
+  }
+
+  function protectedStaticFile(reqPath) {
+    return PROTECTED_WEB_SHELL_STATIC_FILES.get(reqPath) || null;
   }
 
   /** 静态资源缓存策略：hash asset 长缓存，入口 HTML/no-store 保持可更新。 */
@@ -1540,6 +1725,7 @@ ${pluginGatewayStateBootstrapScript()}
     isPublicStaticPath,
     patchOfficialAssetData: patchOfficialAsset,
     prewarmRendererAssets,
+    protectedStaticFile,
     serveFile,
     servePluginLoader,
     serveRendererIndex,

@@ -128,6 +128,7 @@
       if (!nextRoot || nextRoot === root || typeof w.IntersectionObserver !== "function") return false;
       teardown();
       root = nextRoot;
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.offscreen-animation");
       const observer = new w.IntersectionObserver(
         (entries) => {
           // disconnect 后可能仍有排队回调；旧 observer 不得改写新容器里的节点。
@@ -206,4 +207,8 @@
   }
 
   refreshRoots();
+  if (regionGuards.some((guard) => guard.hasRoot())) {
+    w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.offscreen-animation");
+  }
+  w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.offscreen-animation");
 })();

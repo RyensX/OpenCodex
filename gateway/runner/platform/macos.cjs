@@ -114,7 +114,7 @@ function signRunnerExecutable(executablePath) {
   });
 }
 
-async function createMacRunner({ layout, runtimeDir, logger }) {
+async function createMacRunner({ layout, runtimeDir, logger, runCompatibility = (_id, operation) => operation() }) {
   const workDir = path.join(runtimeDir, "official-electron-runner");
   const runnerAppPath = path.join(workDir, RUNNER_APP_NAME);
   const contentsDir = path.join(runnerAppPath, "Contents");
@@ -133,15 +133,34 @@ async function createMacRunner({ layout, runtimeDir, logger }) {
   fs.copyFileSync(layout.executablePath, runnerExecutablePath);
   fs.chmodSync(runnerExecutablePath, 0o755);
   ensureFrameworksCopy({ layout, runnerFrameworksDir, markerPath: frameworksMarkerPath, logger });
-  fs.writeFileSync(path.join(contentsDir, "Info.plist"), runnerInfoPlist(), "utf8");
-  fs.writeFileSync(path.join(contentsDir, "PkgInfo"), "APPL????", "utf8");
-  await writeGatewayAsar({ runnerResourcesDir, workDir });
-  signRunnerExecutable(runnerExecutablePath);
+  runCompatibility(
+    "static.cache.runner.macos-background-bundle",
+    () => {
+      fs.writeFileSync(path.join(contentsDir, "Info.plist"), runnerInfoPlist(), "utf8");
+      fs.writeFileSync(path.join(contentsDir, "PkgInfo"), "APPL????", "utf8");
+    },
+    "macos-bundle-metadata"
+  );
+  await runCompatibility(
+    "static.cache.runner.gateway-asar",
+    () => writeGatewayAsar({ runnerResourcesDir, workDir }),
+    "asar-package"
+  );
+  runCompatibility(
+    "static.cache.runner.macos-entry-signature",
+    () => signRunnerExecutable(runnerExecutablePath),
+    "codesign-ad-hoc"
+  );
 
   logLine(logger, `prepared official Electron runner: app=${runnerAppPath}`);
   logLine(logger, `official Electron source: app=${layout.appRoot} asar=${layout.asarPath}`);
 
   return {
+    compatibilityPoints: [
+      "static.cache.runner.macos-background-bundle",
+      "static.cache.runner.macos-entry-signature",
+      "static.cache.runner.gateway-asar",
+    ],
     executablePath: runnerExecutablePath,
     runnerAppPath,
     officialAppPath: layout.appRoot,

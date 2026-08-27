@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("openCodexLauncher", {
   restart: () => ipcRenderer.invoke("launcher:restart"),
   openUrl: () => ipcRenderer.invoke("launcher:open-url"),
   openLogs: () => ipcRenderer.invoke("launcher:open-logs"),
+  openRuntimeCompatibility: () => ipcRenderer.invoke("launcher:open-runtime-compatibility"),
   openGitHub: () => ipcRenderer.invoke("launcher:open-github"),
   openAuthor: () => ipcRenderer.invoke("launcher:open-author"),
   // 更新入口不接收渲染进程传参，由主进程打开已校验的 latest release 链接。

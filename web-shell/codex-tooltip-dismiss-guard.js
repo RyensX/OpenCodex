@@ -137,6 +137,7 @@
         if (nodeHasTooltip(node)) {
           tooltipPresent = !!document.querySelector(TOOLTIP_SELECTOR);
           if (tooltipPresent) {
+            w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.tooltip-dismiss");
             stopTooltipObservation();
             scheduleDismissCheck();
           }
@@ -189,5 +190,5 @@
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") dispatchOfficialTooltipDismiss();
   });
-
+  w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.tooltip-dismiss");
 })();

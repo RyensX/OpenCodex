@@ -53,6 +53,7 @@ const { openFileTargetFromIpc } = require("./ipc/open-file-context.cjs");
 const { createPickedFilesService } = require("./ipc/picked-files.cjs");
 const { OPENCODEX_RUNTIME_BOOTSTRAP_PATH, createStaticAssetService } = require("./http/static-assets.cjs");
 const { handleOpenCodexPluginApi } = require("./http/plugin-config.cjs");
+const { handleRuntimeCompatibilityApi } = require("./http/runtime-compatibility.cjs");
 const { createHistoryPreviewService } = require("./history-preview.cjs");
 const { createWsHub } = require("./ipc/ws-hub.cjs");
 const { workspaceRootsFromIpcPayload } = require("./ipc/workspace-root-context.cjs");
@@ -60,6 +61,7 @@ const { createWorkspaceRootsService } = require("./ipc/workspace-roots.cjs");
 const { diagnosticError, diagnosticLog, diagnosticWarn, sanitizeDiagnosticValue, shortId } = require("./core/diagnostics.cjs");
 const { markGatewaySilentQuit } = require("./lifecycle/quit-confirmation-suppressor.cjs");
 const { createGatewayPluginService } = require("./plugins/service.cjs");
+const { createCompatibilityService } = require("./compatibility/service.cjs");
 const {
   GATEWAY_RESTART_EXIT_CODE,
   isGatewayRestartSupported,
@@ -328,6 +330,7 @@ function installShutdownHandlers(
   localFiles,
   pickedFiles,
   pluginService,
+  compatibilityService,
   historyPreview,
   hiddenRuntimeGcmSockets
 ) {
@@ -342,6 +345,9 @@ function installShutdownHandlers(
     if (historyPreview && typeof historyPreview.dispose === "function") historyPreview.dispose();
     if (pluginService && typeof pluginService.dispose === "function") {
       pluginService.dispose(new Error("gateway shutting down"));
+    }
+    if (compatibilityService && typeof compatibilityService.dispose === "function") {
+      compatibilityService.dispose();
     }
     rejectPendingInternalResponses(new Error("gateway shutting down"));
     // GCM check-in 响应被有意挂起；先销毁这些本机 socket，避免 http.Server.close 等待到强退超时。
@@ -402,6 +408,7 @@ async function listen(server) {
 }
 
 function createRequestHandler({
+  compatibilityService,
   historyPreview,
   hiddenRuntimeGcmSockets = new Set(),
   localFiles,
@@ -531,7 +538,18 @@ function createRequestHandler({
       return handleTokenUsageRequest(req, res, url);
     }
 
+    if (await handleRuntimeCompatibilityApi(req, res, url, compatibilityService)) return;
+
     if (await handleOpenCodexPluginApi(req, res, url, pluginService)) return;
+
+    const protectedStaticFile = staticAssets.protectedStaticFile?.(pathname);
+    if (
+      protectedStaticFile &&
+      (req.method === "GET" || req.method === "HEAD") &&
+      exists(protectedStaticFile)
+    ) {
+      return staticAssets.serveFile(req, res, protectedStaticFile, 200, pathname);
+    }
 
     if (pathname === "/api/local-file/download-path" && req.method === "POST") {
       // 侧栏文件树右键下载入口：文件直接下发，目录先临时压缩再返回短期 token。
@@ -554,7 +572,15 @@ function createRequestHandler({
     }
 
     if (pathname === "/api/ipc/invoke" && req.method === "POST") {
-      return handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots, pluginService);
+      return handleIpcInvoke(
+        req,
+        res,
+        localFiles,
+        pickedFiles,
+        workspaceRoots,
+        pluginService,
+        compatibilityService
+      );
     }
 
     if (pathname === "/api/client-log" && req.method === "POST") {
@@ -599,7 +625,15 @@ function invalidIpcInvokeError(message) {
   return error;
 }
 
-async function executeIpcInvoke(parsed, req, localFiles, pickedFiles, workspaceRoots, pluginService) {
+async function executeIpcInvoke(
+  parsed,
+  req,
+  localFiles,
+  pickedFiles,
+  workspaceRoots,
+  pluginService,
+  compatibilityService = null
+) {
   const channel = typeof parsed.channel === "string" ? parsed.channel : "";
   // channel 是官方 IPC 的唯一路由键，缺失时不能继续调用隐藏 runtime。
   if (!channel) throw invalidIpcInvokeError("Invalid IPC channel");
@@ -612,6 +646,12 @@ async function executeIpcInvoke(parsed, req, localFiles, pickedFiles, workspaceR
   const isLoopbackBrowserHost = isLoopbackHostHeader(req.headers.host);
   const openFileTarget = openFileTargetFromIpc(channel, payload);
   const ipcWorkspaceRoots = workspaceRootsFromIpcPayload(channel, payload);
+  try {
+    if (openFileTarget) compatibilityService?.recordHit("gateway.runtime.ipc.open-file-context");
+    if (ipcWorkspaceRoots.length > 0) compatibilityService?.recordHit("gateway.runtime.ipc.workspace-context");
+  } catch {
+    // IPC 上下文提取已经完成，命中统计失败不能改变后续官方调用。
+  }
   const startedAtMs = Date.now();
   const diagnosticBase = {
     ...ipcPayloadSummary(payload),
@@ -697,7 +737,15 @@ async function executeIpcInvoke(parsed, req, localFiles, pickedFiles, workspaceR
   }
 }
 
-async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots, pluginService) {
+async function handleIpcInvoke(
+  req,
+  res,
+  localFiles,
+  pickedFiles,
+  workspaceRoots,
+  pluginService,
+  compatibilityService = null
+) {
   /**
    * HTTP 是旧页面和 WS 尚未就绪时的兼容通道；两种传输最终复用同一套官方 IPC 执行逻辑。
    */
@@ -718,7 +766,15 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
   }
 
   try {
-    const value = await executeIpcInvoke(parsed, req, localFiles, pickedFiles, workspaceRoots, pluginService);
+    const value = await executeIpcInvoke(
+      parsed,
+      req,
+      localFiles,
+      pickedFiles,
+      workspaceRoots,
+      pluginService,
+      compatibilityService
+    );
     return sendJson(res, 200, { ok: true, value });
   } catch (error) {
     const { response, status } = ipcInvokeErrorResponse(error);
@@ -726,11 +782,28 @@ async function handleIpcInvoke(req, res, localFiles, pickedFiles, workspaceRoots
   }
 }
 
-async function handleWsIpcInvoke(request, req, clientId, localFiles, pickedFiles, workspaceRoots, pluginService) {
+async function handleWsIpcInvoke(
+  request,
+  req,
+  clientId,
+  localFiles,
+  pickedFiles,
+  workspaceRoots,
+  pluginService,
+  compatibilityService = null
+) {
   // clientId 只信任已完成 hello 的 socket 映射，忽略浏览器帧里可能伪造的同名字段。
   const parsed = request && typeof request === "object" ? { ...request, clientId } : {};
   try {
-    const value = await executeIpcInvoke(parsed, req, localFiles, pickedFiles, workspaceRoots, pluginService);
+    const value = await executeIpcInvoke(
+      parsed,
+      req,
+      localFiles,
+      pickedFiles,
+      workspaceRoots,
+      pluginService,
+      compatibilityService
+    );
     return { ok: true, value };
   } catch (error) {
     const { response, status } = ipcInvokeErrorResponse(error);
@@ -745,17 +818,45 @@ async function createGateway() {
    * 2. 启动官方 hidden runtime 并完成 IPC hook。
    * 3. 创建本地文件服务、静态资源服务和 HTTP server。
    * 4. 把 WebSocket hub 注入 runtime，用于官方异步回包转发。
-   */
+  */
   ensureDir(REPORTS_DIR);
+  let compatibilityService = null;
+  try {
+    compatibilityService = createCompatibilityService({
+      runtimeDir: RUNTIME_DIR,
+      reportsDir: REPORTS_DIR,
+      getRuntimeIdentity() {
+        const bundle = getOfficialBundle();
+        return { version: bundle?.version, build: bundle?.build };
+      },
+    });
+  } catch (error) {
+    // 兼容骨架是旁路控制面，初始化失败不能阻断原 Gateway 启动链路。
+    diagnosticWarn("gateway", "compatibility_service_unavailable", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
   // 插件配置和路由服务必须先创建，才能在官方 bootstrap 拉起 App Server 的瞬间装饰其 stdio。
   const pluginService = createGatewayPluginService({
+    compatibilityService,
     getRuntimeIdentity() {
       const bundle = getOfficialBundle();
       return { version: bundle?.version, build: bundle?.build };
     },
   });
   // 先启动官方 runtime，确保后续 health/IPC 路由能看到官方 handler 注册状态。
-  await startOfficialRuntime({ decorateAppServerChild: pluginService.modelRouter.decorateAppServerChild });
+  try {
+    await startOfficialRuntime({
+      compatibilityService,
+      decorateAppServerChild: pluginService.modelRouter.decorateAppServerChild,
+    });
+  } catch (error) {
+    // 官方 Bootstrap 失败时 HTTP 页面尚不可用，必须同步落盘供 Launcher 离线查看。
+    try {
+      compatibilityService?.persistNow?.();
+    } catch {}
+    throw error;
+  }
 
   const historyPreview = createHistoryPreviewService({ transport: pluginService.modelRouter.transport });
   // 预热不延迟网关监听；首个导航若更早到达，会在自己的 700ms 预算内复用这次读取。
@@ -763,7 +864,7 @@ async function createGateway() {
   const workspaceRoots = createWorkspaceRootsService();
   const localFiles = createLocalFileService({ getWorkspaceRoots: workspaceRoots.workspaceRoots });
   const pickedFiles = createPickedFilesService();
-  const staticAssets = createStaticAssetService({ getI18nSnapshot, getOfficialBundle });
+  const staticAssets = createStaticAssetService({ compatibilityService, getI18nSnapshot, getOfficialBundle });
   // 与 request handler 和退出流程共享同一个集合，确保挂起的本机 GCM socket 可被精确回收。
   const hiddenRuntimeGcmSockets = new Set();
   try {
@@ -776,6 +877,7 @@ async function createGateway() {
   }
   let requestRestart = () => false;
   const requestHandler = createRequestHandler({
+    compatibilityService,
     historyPreview,
     hiddenRuntimeGcmSockets,
     localFiles,
@@ -807,7 +909,8 @@ async function createGateway() {
         localFiles,
         pickedFiles,
         workspaceRoots,
-        pluginService
+        pluginService,
+        compatibilityService
       );
     },
     handleNotificationEvent: handleOfficialNotificationEvent,
@@ -827,6 +930,7 @@ async function createGateway() {
     localFiles,
     pickedFiles,
     pluginService,
+    compatibilityService,
     historyPreview,
     hiddenRuntimeGcmSockets
   );
@@ -837,7 +941,16 @@ async function createGateway() {
   diagnosticLog("gateway", "health_endpoint", { url: `http://${HOST}:${PORT}/api/health` });
   diagnosticLog("gateway", "unknown_ipc_log", { path: path.relative(PROJECT_ROOT, UNKNOWN_IPC_PATH) });
 
-  return { historyPreview, localFiles, pluginService, server, staticAssets, workspaceRoots, wsHub: webSocketHub };
+  return {
+    compatibilityService,
+    historyPreview,
+    localFiles,
+    pluginService,
+    server,
+    staticAssets,
+    workspaceRoots,
+    wsHub: webSocketHub,
+  };
 }
 
 module.exports = {

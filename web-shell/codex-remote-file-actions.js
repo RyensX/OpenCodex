@@ -689,6 +689,7 @@
       return false;
     }
     content.appendChild(createStandalonePathDownloadMenuItem(session.context));
+    w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.remote-file-menu");
     state.injectedPathDownloadItems += 1;
     clearPendingPathMenuSession("injected");
     return true;

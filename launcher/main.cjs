@@ -6,6 +6,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { prepareOfficialElectronRuntime } = require("../gateway/runner/index.cjs");
+const { createCompatibilityService } = require("../gateway/runtime/compatibility/service.cjs");
 const {
   createInitialLatestReleaseState,
   fetchLatestReleaseState,
@@ -67,6 +68,7 @@ const gatewayState = {
   lastError: "",
   startedAt: null,
   officialRuntime: null,
+  compatibilityReportCache: null,
 };
 
 function ensureDir(dirPath) {
@@ -119,6 +121,7 @@ function runtimePaths() {
     logsDir,
     officialBundleDir,
     configPath: path.join(runtimeDir, "config.yaml"),
+    compatibilityReportPath: path.join(runtimeDir, "compatibility-report.json"),
     settingsPath: path.join(userDataDir, "launcher-settings.json"),
     logPath: path.join(logsDir, "gateway.log"),
     gatewayScriptPath: path.join(APP_ROOT, "gateway", "main.cjs"),
@@ -132,6 +135,104 @@ function ensureRuntimeLayout(paths) {
   ensureDir(paths.cacheDir);
   ensureDir(paths.logsDir);
   ensureDir(paths.officialBundleDir);
+}
+
+function writeRunnerCompatibilityReport(paths, officialRuntime, error = null) {
+  const service = createCompatibilityService({ runtimeDir: paths.runtimeDir, reportsDir: paths.reportsDir });
+  try {
+    const applicable = new Set(
+      officialRuntime?.compatibilityPoints ||
+        (process.platform === "darwin"
+          ? [
+              "static.cache.runner.macos-background-bundle",
+              "static.cache.runner.macos-entry-signature",
+              "static.cache.runner.gateway-asar",
+            ]
+          : [
+              "static.cache.runner.portable-layout",
+              "static.cache.runner.gateway-asar",
+              ...(process.platform === "win32" ? ["static.cache.runner.windows-asar-integrity"] : []),
+            ])
+    );
+    let asarStat = null;
+    try {
+      asarStat = officialRuntime?.officialAsarPath ? fs.statSync(officialRuntime.officialAsarPath) : null;
+    } catch {}
+    service.setRuntimeIdentity({
+      version: "unknown",
+      build: "unknown",
+      bundleHash: asarStat ? `asar-${asarStat.size}-${Math.trunc(asarStat.mtimeMs)}` : "runner-bootstrap",
+    });
+    for (const id of [
+      "static.cache.runner.macos-background-bundle",
+      "static.cache.runner.macos-entry-signature",
+      "static.cache.runner.portable-layout",
+      "static.cache.runner.gateway-asar",
+      "static.cache.runner.windows-asar-integrity",
+    ]) {
+      if (!applicable.has(id)) {
+        service.disablePoint(id, "Not applicable on the current platform");
+      } else if (error) {
+        service.failPoint(id, error, {
+          locatorRevision: "runner-cache-v1",
+          strategyId: "launcher-bootstrap",
+          fallback: false,
+        });
+      } else {
+        service.installPoint(id, {
+          locatorRevision: "runner-cache-v1",
+          strategyId: "launcher-bootstrap",
+        });
+      }
+    }
+  } finally {
+    service.dispose();
+  }
+  gatewayState.compatibilityReportCache = null;
+}
+
+function writeRunnerCompatibilityReportSafely(paths, officialRuntime, error = null) {
+  try {
+    writeRunnerCompatibilityReport(paths, officialRuntime, error);
+    return true;
+  } catch (reportError) {
+    // 兼容报告属于诊断旁路，任何初始化或落盘异常都不能改变 Runner 的启动结果。
+    try {
+      appendLog(
+        `[launcher] compatibility report unavailable: ${reportError instanceof Error ? reportError.message : String(reportError)}\n`
+      );
+    } catch {}
+    return false;
+  } finally {
+    gatewayState.compatibilityReportCache = null;
+  }
+}
+
+function offlineCompatibilitySummary(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    const cached = gatewayState.compatibilityReportCache;
+    if (cached?.filePath === filePath && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return cached.value;
+    }
+    const report = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const value = {
+      status: report.status,
+      generatedAt: report.generatedAt,
+      pointCount: Array.isArray(report.points) ? report.points.length : 0,
+      unavailableCount: Array.isArray(report.points)
+        ? report.points.filter((point) => point.status === "unavailable").length
+        : 0,
+      degradedCount: Array.isArray(report.points)
+        ? report.points.filter((point) => point.status === "degraded").length
+        : 0,
+      offline: true,
+    };
+    gatewayState.compatibilityReportCache = { filePath, mtimeMs: stat.mtimeMs, size: stat.size, value };
+    return value;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeHostMode(value) {
@@ -471,6 +572,10 @@ async function ensurePortSetting(paths, settings) {
 function buildState() {
   const i18n = currentGatewayI18n();
   const latestRelease = gatewayState.latestRelease || {};
+  let compatibility = gatewayState.status?.compatibility || null;
+  if (!compatibility && gatewayState.paths?.compatibilityReportPath) {
+    compatibility = offlineCompatibilitySummary(gatewayState.paths.compatibilityReportPath);
+  }
   return {
     running: !!gatewayState.child && !gatewayState.child.killed,
     pid: gatewayState.child ? gatewayState.child.pid : null,
@@ -503,6 +608,7 @@ function buildState() {
       error: latestRelease.error || "",
     },
     externalPlugins: externalPluginStatus((gatewayState.settings || defaultSettings()).pluginDirs),
+    compatibility,
     status: gatewayState.status,
     lastError: gatewayState.lastError,
     startedAt: gatewayState.startedAt,
@@ -717,7 +823,9 @@ async function startGatewayOnce() {
       logger: appendLog,
     });
     gatewayState.officialRuntime = officialRuntime;
+    writeRunnerCompatibilityReportSafely(paths, officialRuntime);
   } catch (error) {
+    writeRunnerCompatibilityReportSafely(paths, null, error);
     gatewayState.lastError = error instanceof Error ? error.message : String(error);
     appendLog(`[launcher] official Electron runtime prepare failed: ${gatewayState.lastError}\n`, { urgent: true });
     broadcastState();
@@ -740,6 +848,8 @@ async function startGatewayOnce() {
   const childEnv = {
     ...process.env,
     OPENCODEX_GATEWAY_ENTRY: paths.gatewayScriptPath,
+    // Runner 在 Gateway 启动前已经完成构建，把成功点作为只含固定 ID 的回执交给统一兼容骨架。
+    OPENCODEX_RUNNER_COMPATIBILITY_POINTS: JSON.stringify(officialRuntime.compatibilityPoints || []),
     [PREFERRED_LANGUAGES_ENV]: preferredLanguagesEnvValue(),
     // runner 的 Info.plist 已经用 LSBackgroundOnly 隐藏；该标记让业务入口不要再调用 Dock API。
     OPENCODEX_GATEWAY_AGENT_MODE: "1",
@@ -1101,6 +1211,14 @@ ipcMain.handle("launcher:open-logs", async () => {
   await flushGatewayLog();
   if (gatewayState.paths) revealPath(gatewayState.paths.logPath);
   return buildState();
+});
+ipcMain.handle("launcher:open-runtime-compatibility", () => {
+  const openUrl = openOpenCodexUrl();
+  if (gatewayState.status?.ok && openUrl) {
+    // 与主入口统一使用 localhost，复用浏览器已有的认证 Cookie。
+    return shell.openExternal(`${openUrl}/settings/developer/runtime-compatibility`);
+  }
+  return gatewayState.paths ? revealPath(gatewayState.paths.compatibilityReportPath) : false;
 });
 ipcMain.handle("launcher:open-github", () => {
   // GitHub 入口不接收渲染进程传参，固定打开项目主页，减少外链面。

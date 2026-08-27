@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>OpenCodex Runtime Compatibility</title>
+    <link rel="stylesheet" href="/opencodex/runtime-compatibility.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">OpenCodex Developer Diagnostics</p>
+          <h1>官方运行时兼容性</h1>
+          <p id="runtimeIdentity" class="muted">正在读取运行时状态…</p>
+        </div>
+        <div class="actions">
+          <button id="refreshButton" type="button">刷新</button>
+          <button id="backButton" type="button" class="secondary">返回</button>
+        </div>
+      </header>
+
+      <section id="summaryCards" class="summary-grid" aria-live="polite"></section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <h2>功能组</h2>
+            <p class="muted">必需修改点按组原子判定；可选点失败时显示降级。</p>
+          </div>
+        </div>
+        <div id="featureList" class="feature-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading filters">
+          <div>
+            <h2>修改点</h2>
+            <p class="muted">定位、应用、验证和实际命中分别记录。</p>
+          </div>
+          <label>
+            <span>类型</span>
+            <select id="categoryFilter">
+              <option value="">全部</option>
+              <option value="web.runtime">Web 运行时</option>
+              <option value="gateway.runtime">Gateway 运行时</option>
+              <option value="static.cache">静态缓存</option>
+            </select>
+          </label>
+          <label>
+            <span>状态</span>
+            <select id="statusFilter">
+              <option value="">全部</option>
+              <option value="unavailable">不可用</option>
+              <option value="degraded">降级</option>
+              <option value="pending">待检测</option>
+              <option value="ready">已就绪</option>
+              <option value="healthy">已命中</option>
+              <option value="disabled">已关闭</option>
+            </select>
+          </label>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>修改点</th>
+                <th>总状态</th>
+                <th>定位</th>
+                <th>应用</th>
+                <th>验证</th>
+                <th>命中</th>
+              </tr>
+            </thead>
+            <tbody id="pointRows"></tbody>
+          </table>
+        </div>
+        <p id="emptyState" class="empty" hidden>没有符合筛选条件的修改点。</p>
+      </section>
+
+      <p id="errorBanner" class="error" hidden></p>
+    </main>
+    <script src="/opencodex/runtime-compatibility.js"></script>
+  </body>
+</html>

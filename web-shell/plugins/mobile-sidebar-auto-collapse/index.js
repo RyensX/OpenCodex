@@ -161,6 +161,7 @@
     activate(context) {
       if (context.scope !== "renderer" || !document || document.__opencodexMobileSidebarPluginInstalled) return null;
       document.__opencodexMobileSidebarPluginInstalled = true;
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-sidebar");
 
       let collapseTimer = null;
       const isEnabled = () => context.plugin.isEnabled();
