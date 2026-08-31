@@ -111,15 +111,25 @@
   function renderSummary(snapshot) {
     const container = byId("summaryCards");
     container.replaceChildren();
-    const counts = summaryCounts(snapshot.points || []);
+    const points = snapshot.points || [];
+    const counts = summaryCounts(points);
+    const percentage = (value) => points.length > 0 ? `${Math.round((value / points.length) * 100)}%` : "0%";
     const cards = [
-      ["总体", overallLabels[snapshot.status] || snapshot.status],
-      ["已命中", counts.healthy],
-      ["已就绪", counts.ready],
-      ["降级 / 不可用", counts.degraded + counts.unavailable],
-      ["待检测", counts.pending],
+      {
+        label: "总体",
+        value: overallLabels[snapshot.status] || snapshot.status,
+        detail: `共 ${points.length} 个修改点${counts.disabled > 0 ? ` · 已关闭 ${counts.disabled}` : ""}`,
+      },
+      { label: "已命中", value: counts.healthy, detail: `占全部 ${percentage(counts.healthy)}` },
+      { label: "已就绪", value: counts.ready, detail: "已安装，尚未实际命中" },
+      {
+        label: "异常",
+        value: counts.degraded + counts.unavailable,
+        detail: `降级 ${counts.degraded} · 不可用 ${counts.unavailable}`,
+      },
+      { label: "待检测", value: counts.pending, detail: `占全部 ${percentage(counts.pending)}` },
     ];
-    for (const [index, [label, value]] of cards.entries()) {
+    for (const [index, item] of cards.entries()) {
       const card = document.createElement("article");
       card.className = "summary-card";
       if (index === 0) {
@@ -128,10 +138,13 @@
       }
       const caption = document.createElement("span");
       caption.className = "muted";
-      caption.textContent = label;
+      caption.textContent = item.label;
       const strong = document.createElement("strong");
-      strong.textContent = String(value);
-      card.append(caption, strong);
+      strong.textContent = String(item.value);
+      const detail = document.createElement("span");
+      detail.className = "summary-card-detail muted";
+      detail.textContent = item.detail;
+      card.append(caption, strong, detail);
       container.append(card);
     }
   }
