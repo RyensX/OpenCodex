@@ -119,9 +119,13 @@
       ["降级 / 不可用", counts.degraded + counts.unavailable],
       ["待检测", counts.pending],
     ];
-    for (const [label, value] of cards) {
+    for (const [index, [label, value]] of cards.entries()) {
       const card = document.createElement("article");
       card.className = "summary-card";
+      if (index === 0) {
+        card.classList.add("summary-card--overall");
+        card.dataset.status = snapshot.status;
+      }
       const caption = document.createElement("span");
       caption.className = "muted";
       caption.textContent = label;
@@ -256,34 +260,52 @@
     const feature = group.feature;
     const row = document.createElement("tr");
     row.className = "feature-group-row";
+    row.dataset.status = feature.status;
     const cell = document.createElement("td");
     cell.colSpan = 6;
-    const article = document.createElement("article");
-    article.className = "feature-group";
-    const head = document.createElement("div");
-    head.className = "feature-head";
+    const section = document.createElement("section");
+    section.className = "feature-group";
+    const main = document.createElement("div");
+    main.className = "feature-main";
     const identity = document.createElement("div");
     identity.className = "feature-identity";
-    const code = document.createElement("code");
-    code.textContent = feature.id;
     const title = document.createElement("h3");
     title.textContent = feature.description;
-    identity.append(code, title);
-    head.append(identity, badge(feature.status));
-    const details = document.createElement("p");
-    details.className = "feature-details muted";
-    const composition = group.independent
-      ? `独立 ${group.entries.length}`
-      : `必需 ${feature.required.length} · 可选 ${feature.optional.length}`;
-    details.textContent = `${composition} · 当前显示 ${visibleCount}/${group.entries.length} · 回退：${feature.fallback || "无"}`;
-    article.append(head, details);
+    const code = document.createElement("code");
+    code.textContent = feature.id;
+    identity.append(title, code);
+
+    const overview = document.createElement("div");
+    overview.className = "feature-overview";
+    overview.append(badge(feature.status));
+    const counts = document.createElement("span");
+    counts.className = "feature-counts";
+    counts.textContent = group.independent
+      ? `${group.entries.length} 个独立点`
+      : `${feature.required.length} 个必需 · ${feature.optional.length} 个可选`;
+    overview.append(counts);
+    main.append(identity, overview);
+
+    const details = document.createElement("div");
+    details.className = "feature-details";
+    const fallbackLabel = document.createElement("span");
+    fallbackLabel.className = "feature-details-label";
+    fallbackLabel.textContent = "回退策略";
+    const fallback = document.createElement("span");
+    fallback.className = "feature-fallback";
+    fallback.textContent = feature.fallback || "无";
+    const visible = document.createElement("span");
+    visible.className = "feature-visible muted";
+    visible.textContent = `显示 ${visibleCount} / ${group.entries.length}`;
+    details.append(fallbackLabel, fallback, visible);
+    section.append(main, details);
     if (!feature.enabled && feature.disabledReason) {
       const disabledReason = document.createElement("p");
-      disabledReason.className = "point-reason";
+      disabledReason.className = "feature-disabled-reason point-reason";
       disabledReason.textContent = feature.disabledReason;
-      article.append(disabledReason);
+      section.append(disabledReason);
     }
-    cell.append(article);
+    cell.append(section);
     row.append(cell);
     return row;
   }

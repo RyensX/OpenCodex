@@ -28,27 +28,29 @@
             <h2>修改点</h2>
             <p class="muted">按功能组查看定位、应用、验证和实际命中；未归组的基础修改点单独列出。</p>
           </div>
-          <label>
-            <span>类型</span>
-            <select id="categoryFilter">
-              <option value="">全部</option>
-              <option value="web.runtime">Web 运行时</option>
-              <option value="gateway.runtime">Gateway 运行时</option>
-              <option value="static.cache">静态缓存</option>
-            </select>
-          </label>
-          <label>
-            <span>状态</span>
-            <select id="statusFilter">
-              <option value="">全部</option>
-              <option value="unavailable">不可用</option>
-              <option value="degraded">降级</option>
-              <option value="pending">待检测</option>
-              <option value="ready">已就绪</option>
-              <option value="healthy">已命中</option>
-              <option value="disabled">已关闭</option>
-            </select>
-          </label>
+          <div class="filter-controls" role="group" aria-label="修改点筛选">
+            <label>
+              <span>类型</span>
+              <select id="categoryFilter">
+                <option value="">全部</option>
+                <option value="web.runtime">Web 运行时</option>
+                <option value="gateway.runtime">Gateway 运行时</option>
+                <option value="static.cache">静态缓存</option>
+              </select>
+            </label>
+            <label>
+              <span>状态</span>
+              <select id="statusFilter">
+                <option value="">全部</option>
+                <option value="unavailable">不可用</option>
+                <option value="degraded">降级</option>
+                <option value="pending">待检测</option>
+                <option value="ready">已就绪</option>
+                <option value="healthy">已命中</option>
+                <option value="disabled">已关闭</option>
+              </select>
+            </label>
+          </div>
         </div>
         <div class="table-wrap">
           <table id="pointsTable">
