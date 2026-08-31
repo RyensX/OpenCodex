@@ -1031,6 +1031,112 @@ test("inline token usage shares the assistant action group visibility", () => {
   assert.match(source, /height: 0\.75rem;[\s\S]*width: 0\.75rem;/);
 });
 
+test("inline token usage resolves current official history and thread keys", () => {
+  const source = fs.readFileSync(TOKEN_USAGE_INLINE_PLUGIN, "utf-8");
+
+  function functionDeclaration(name) {
+    const start = source.indexOf(`function ${name}(`);
+    assert.notEqual(start, -1, `missing ${name}`);
+    const bodyStart = source.indexOf("{", start);
+    let depth = 0;
+    for (let index = bodyStart; index < source.length; index += 1) {
+      if (source[index] === "{") depth += 1;
+      if (source[index] !== "}") continue;
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index + 1);
+    }
+    throw new Error(`unterminated ${name}`);
+  }
+
+  const threadId = "01a055d3-f290-7cf3-8076-5bfff5c23249";
+  const turnId = "01a05628-ec86-7e91-b107-a8051613816e";
+  const activeThread = {
+    getAttribute(name) {
+      return name === "data-app-action-sidebar-thread-id" ? `local:${threadId}` : null;
+    },
+  };
+  const document = {
+    querySelector(selector) {
+      assert.equal(
+        selector,
+        '[data-app-action-sidebar-thread-row][data-app-action-sidebar-thread-active="true"]'
+      );
+      return activeThread;
+    },
+  };
+  const w = { location: { pathname: "/" } };
+  const { idsForElement } = new Function(
+    "w",
+    "document",
+    `const HISTORY_TURN_KEY_PREFIX = "history-content:turn:";
+     const LOCAL_THREAD_KEY_PREFIX = "local:";
+     ${functionDeclaration("decodePathSegment")}
+     ${functionDeclaration("currentThreadId")}
+     ${functionDeclaration("turnIdFromSearchKey")}
+     ${functionDeclaration("idsForElement")}
+     return { idsForElement };`
+  )(w, document);
+  const turnElement = {
+    getAttribute(name) {
+      if (name === "data-content-search-turn-key") return `history-content:turn:${turnId}`;
+      return null;
+    },
+  };
+  const element = {
+    closest(selector) {
+      if (selector === "[data-content-search-turn-key]") return turnElement;
+      return null;
+    },
+  };
+
+  assert.deepEqual(idsForElement(element), {
+    key: `${threadId}\0${turnId}`,
+    threadId,
+    turnId,
+  });
+
+  const legacyThreadId = "01a01899-beec-7513-8602-78156664392a";
+  const legacyTurnId = "01a01922-0ee2-7820-8425-728f2a9d9a3c";
+  w.location.pathname = `/local/${legacyThreadId}`;
+  const legacyTurnElement = {
+    getAttribute(name) {
+      return name === "data-turn-key" ? legacyTurnId : null;
+    },
+  };
+  const legacyElement = {
+    closest(selector) {
+      return selector === "[data-turn-key]" ? legacyTurnElement : null;
+    },
+  };
+  // 旧版原始 ID 与显式路由必须保持原有行为，不能被新版前缀适配改写。
+  assert.deepEqual(idsForElement(legacyElement), {
+    key: `${legacyThreadId}\0${legacyTurnId}`,
+    threadId: legacyThreadId,
+    turnId: legacyTurnId,
+  });
+});
+
+test("inline token usage reports a hit only after a connected badge is rendered", () => {
+  const source = fs.readFileSync(TOKEN_USAGE_INLINE_PLUGIN, "utf-8");
+  const activationStart = source.indexOf("    activate(context) {");
+  const observationStart = source.indexOf("      const observedRows =", activationStart);
+  const renderStart = source.indexOf("      const renderUsage =", observationStart);
+  const requestStart = source.indexOf("      const requestUsageForRow =", renderStart);
+  assert.notEqual(activationStart, -1);
+  assert.notEqual(observationStart, -1);
+  assert.notEqual(renderStart, -1);
+  assert.notEqual(requestStart, -1);
+
+  const activation = source.slice(activationStart, observationStart);
+  const render = source.slice(renderStart, requestStart);
+  assert.match(activation, /OpenCodexRuntimeCompatibility\?\.installed\?\.\("web\.runtime\.dom\.token-usage-inline"\)/);
+  assert.doesNotMatch(activation, /OpenCodexRuntimeCompatibility\?\.active/);
+  assert.match(
+    render,
+    /renderUsageContent\(badge, usage\);[\s\S]*if \(!badge\.isConnected\) return;[\s\S]*OpenCodexRuntimeCompatibility\?\.active/
+  );
+});
+
 test("web shell exposes only the smart router gateway switch before authentication", () => {
   const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
 

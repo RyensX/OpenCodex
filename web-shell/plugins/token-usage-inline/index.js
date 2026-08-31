@@ -9,6 +9,8 @@
   const MAX_REQUESTED_KEYS = 600;
   const MAX_PENDING_SCAN_ROOTS = 64;
   const DIAGNOSTIC_KEY = "__OpenCodexTokenUsageInline";
+  const HISTORY_TURN_KEY_PREFIX = "history-content:turn:";
+  const LOCAL_THREAD_KEY_PREFIX = "local:";
 
   // 只暴露计数型诊断，方便确认“没显示”时区分没扫到 DOM、没取到数据还是没渲染。
   const diagnostics = {
@@ -57,7 +59,24 @@
       const match = pattern.exec(pathname);
       if (match?.[1]) return decodePathSegment(match[1]);
     }
+    const activeThread = document.querySelector?.(
+      '[data-app-action-sidebar-thread-row][data-app-action-sidebar-thread-active="true"]'
+    );
+    const activeThreadKey = String(activeThread?.getAttribute("data-app-action-sidebar-thread-id") || "");
+    // 新版官方浏览器路由长期停留在根路径，只能从当前激活的本地会话项恢复真实 threadId。
+    if (activeThreadKey.startsWith(LOCAL_THREAD_KEY_PREFIX)) {
+      return decodePathSegment(activeThreadKey.slice(LOCAL_THREAD_KEY_PREFIX.length));
+    }
     return null;
+  }
+
+  function turnIdFromSearchKey(value) {
+    let turnId = decodePathSegment(String(value || "").trim());
+    // 官方历史时间线把真实 UUID 包装为 history-content:turn:<id>，后端 session 仍使用原始 turnId。
+    if (turnId?.startsWith(HISTORY_TURN_KEY_PREFIX)) {
+      turnId = turnId.slice(HISTORY_TURN_KEY_PREFIX.length);
+    }
+    return turnId;
   }
 
   function actionRowLooksLikeAssistantActions(row) {
@@ -122,11 +141,11 @@
   }
 
   function idsForElement(element) {
-    // 当前官方虚拟列表实际渲染 data-turn-key；content-search key 只在搜索适配器里使用。
+    // 新旧官方时间线分别使用 data-content-search-turn-key / data-turn-key，两种结构都保留兼容。
     const turnElement = element?.closest("[data-turn-key]") || element?.closest("[data-content-search-turn-key]");
     const rawTurnId =
       turnElement?.getAttribute("data-turn-key") || turnElement?.getAttribute("data-content-search-turn-key") || "";
-    const turnId = decodePathSegment(rawTurnId.trim());
+    const turnId = turnIdFromSearchKey(rawTurnId);
     const threadId =
       turnElement?.getAttribute("data-opencodex-thread-id") ||
       element?.closest("[data-opencodex-thread-id]")?.getAttribute("data-opencodex-thread-id") ||
@@ -139,7 +158,7 @@
     ) {
       return null;
     }
-    // 官方根路径可能不暴露 threadId；这种情况下先按 turnId 懒查，后端会从 session 文件解析 threadId。
+    // 无法从路由或激活会话项恢复 threadId 时，仍按 turnId 懒查，保留旧版和特殊页面的回退能力。
     return { key: `${threadId || "__unknown_thread__"}\0${turnId}`, threadId: threadId || null, turnId };
   }
 
@@ -249,7 +268,7 @@
         return null;
       }
       document.__opencodexTokenUsageInlineInstalled = true;
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.token-usage-inline");
+      w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.token-usage-inline");
 
       const observedRows = new Set();
       const pendingScanRoots = new Set();
@@ -349,8 +368,11 @@
           insertUsageBadge(row, forkButton, badge);
         }
         renderUsageContent(badge, usage);
+        // 只有真实徽标已经挂入当前页面，才能把“就绪”提升为“已命中”。
+        if (!badge.isConnected) return;
         diagnostics.lastRenderText = usageCompactText(usage);
         diagnostics.rendered += 1;
+        w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.token-usage-inline");
       };
 
       const requestUsageForRow = (row, providedIds) => {

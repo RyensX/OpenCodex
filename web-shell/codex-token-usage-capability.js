@@ -264,6 +264,8 @@
       tokenUsageState.turnKeys.set(value.turnId, key);
       pruneTokenUsageThreadCache(value.threadId);
       pruneTokenUsageCache();
+      // 无论数据来自实时协议还是 session API，只有成功归一化并缓存后才算实际命中。
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.protocol.token-usage");
       for (const subscriber of Array.from(tokenUsageState.subscribers)) {
         try {
           subscriber(value);

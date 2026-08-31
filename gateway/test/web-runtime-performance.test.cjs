@@ -1642,9 +1642,16 @@ test("browser Statsig defaults preserve the official new-worktree capability", (
 });
 
 test("token usage passive parsing bounds wide and cyclic payload traversal", () => {
+  const compatibilityHits = [];
   const window = {
     clearTimeout,
     location: { origin: "http://127.0.0.1", pathname: "/" },
+    OpenCodexRuntimeCompatibility: {
+      active(id) {
+        compatibilityHits.push(id);
+      },
+      installed() {},
+    },
     setTimeout,
   };
   window.window = window;
@@ -1674,6 +1681,7 @@ test("token usage passive parsing bounds wide and cyclic payload traversal", () 
   // 无 token 线索的超宽消息只能读取固定预算内的数组项，循环引用也不能重复展开。
   assert.ok(passiveArrayReads > 0);
   assert.ok(passiveArrayReads <= 80, `passive scan read ${passiveArrayReads} array items`);
+  assert.deepEqual(compatibilityHits, []);
 
   let topLevelArrayReads = 0;
   const topLevelWide = new Proxy(Array.from({ length: 50_000 }, () => "ordinary"), {
@@ -1698,6 +1706,16 @@ test("token usage passive parsing bounds wide and cyclic payload traversal", () 
   // 命中 token 线索后的完整解析也必须在统一树扫描预算内停止，不能先展开整个数组。
   assert.ok(treeArrayReads > 0);
   assert.ok(treeArrayReads <= 2_000, `tree scan read ${treeArrayReads} array items`);
+
+  capability.handleGatewayPayload({
+    payload: {
+      info: { last_token_usage: { cached_input_tokens: 8, input_tokens: 10, output_tokens: 2 } },
+      threadId: "thread-1",
+      turnId: "turn-1",
+      type: "token_count",
+    },
+  });
+  assert.deepEqual(compatibilityHits, ["web.runtime.protocol.token-usage"]);
   release();
 });
 
@@ -1833,6 +1851,22 @@ test("whole-document observer filters stay scoped to their feature mounts", () =
   assert.match(TOKEN_USAGE_INLINE_SOURCE, /if \(!intersectionObserver\) requestUsageForRow\(row, ids\)/);
   assert.match(TOKEN_USAGE_INLINE_SOURCE, /MAX_PENDING_SCAN_ROOTS = 64/);
   assert.match(TOKEN_USAGE_INLINE_SOURCE, /if \(removedNodes\) scheduleScanFlush\(\)/);
+  assert.doesNotMatch(
+    sourceSection(
+      BRIDGE_SOURCE,
+      "  function handleTokenUsageAppHostData",
+      "\n\n  const smartSchedulingBridgeStats"
+    ),
+    /OpenCodexRuntimeCompatibility\?\.active/
+  );
+  assert.match(
+    sourceSection(
+      TOKEN_USAGE_CAPABILITY_SOURCE,
+      "    function setTokenUsageCacheEntry",
+      "\n\n    function setTokenUsageNegativeCache"
+    ),
+    /OpenCodexRuntimeCompatibility\?\.active\?\.\("web\.runtime\.protocol\.token-usage"\)/
+  );
   assert.doesNotMatch(
     sourceSection(TOKEN_USAGE_INLINE_SOURCE, "      const observeRow =", "\n\n      const pruneObservedRows"),
     /intersectionObserver\.observe\(row\);\s*}\s*\/\/[^\n]*\n\s*requestUsageForRow/

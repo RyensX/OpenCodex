@@ -133,12 +133,10 @@
   }
 
   function handleTokenUsageAppHostData(data) {
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.protocol.token-usage");
     tokenUsageCapability?.handleAppHostData?.(data);
   }
 
   function handleTokenUsageGatewayPayload(payload) {
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.protocol.token-usage");
     tokenUsageCapability?.handleGatewayPayload?.(payload);
   }
 
