@@ -64,7 +64,9 @@
     order: 40,
     activate(context) {
       if (context.scope !== "renderer") return null;
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.project-recent-sort");
+      const adapterHost = w.__OpenCodexAdapterHost;
+      if (!adapterHost?.hooks?.around) return null;
+      w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.plugin.project-recent-sort");
 
       const persistedSnapshot =
         w.__CODEX_WEB_CONFIG__?.persistedAtomSnapshot &&
@@ -140,52 +142,50 @@
 
       function patchBridge(bridge) {
         if (!bridge || typeof bridge !== "object") return false;
-        const patch = {
-          bridge,
-          originalBootstrap: null,
-          originalSend: null,
-          wrappedBootstrap: null,
-          wrappedSend: null,
-        };
+        const disposers = [];
 
         if (typeof bridge.sendMessageFromView === "function") {
-          patch.originalSend = bridge.sendMessageFromView;
-          patch.wrappedSend = function (...args) {
-            const payload = args[0];
-            // 在官方 atom 广播到达前先更新模式，确保紧随其后的项目顺序读取使用正确语义。
-            updateSidebarPreference(payload);
-            if (usesRecentProjectSort() && isProjectOrderFetch(payload)) {
-              emitProjectOrderFetchResponse(payload.requestId);
-              return Promise.resolve(true);
-            }
-            return patch.originalSend.apply(this, args);
-          };
-          bridge.sendMessageFromView = patch.wrappedSend;
+          const key = {};
+          disposers.push(adapterHost.hooks.around({
+            key,
+            target: bridge,
+            property: "sendMessageFromView",
+            handle(_thisValue, args, proceed) {
+              const payload = args[0];
+              // 在官方 atom 广播到达前先更新模式，确保紧随其后的项目顺序读取使用正确语义。
+              updateSidebarPreference(payload);
+              if (usesRecentProjectSort() && isProjectOrderFetch(payload)) {
+                emitProjectOrderFetchResponse(payload.requestId);
+                w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.project-recent-sort");
+                return Promise.resolve(true);
+              }
+              return proceed(args);
+            },
+          }));
         }
 
         if (typeof bridge.getInitialSidebarBootstrap === "function") {
-          patch.originalBootstrap = bridge.getInitialSidebarBootstrap;
-          patch.wrappedBootstrap = function (...args) {
-            const bootstrap = patch.originalBootstrap.apply(this, args);
-            return usesRecentProjectSort() ? cloneBootstrapWithRecentProjectOrder(bootstrap) : bootstrap;
-          };
-          bridge.getInitialSidebarBootstrap = patch.wrappedBootstrap;
+          const key = {};
+          disposers.push(adapterHost.hooks.around({
+            key,
+            target: bridge,
+            property: "getInitialSidebarBootstrap",
+            handle(_thisValue, args, proceed) {
+              const bootstrap = proceed(args);
+              if (!usesRecentProjectSort()) return bootstrap;
+              w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.project-recent-sort");
+              return cloneBootstrapWithRecentProjectOrder(bootstrap);
+            },
+          }));
         }
 
-        if (!patch.originalSend && !patch.originalBootstrap) return false;
-        bridgePatches.push(patch);
+        if (disposers.length === 0) return false;
+        bridgePatches.push(...disposers);
         return true;
       }
 
       function restoreBridges() {
-        for (const patch of bridgePatches.splice(0)) {
-          if (patch.originalSend && patch.bridge.sendMessageFromView === patch.wrappedSend) {
-            patch.bridge.sendMessageFromView = patch.originalSend;
-          }
-          if (patch.originalBootstrap && patch.bridge.getInitialSidebarBootstrap === patch.wrappedBootstrap) {
-            patch.bridge.getInitialSidebarBootstrap = patch.originalBootstrap;
-          }
-        }
+        for (const dispose of bridgePatches.splice(0).reverse()) dispose();
       }
 
       function installBridgePatches() {

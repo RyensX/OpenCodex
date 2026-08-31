@@ -7,7 +7,9 @@ const { pluginManifestFile, readPluginManifest } = require("../plugins/manifest.
 const EXTERNAL_PLUGIN_DIRS_ENV = "OPENCODEX_PLUGIN_DIRS";
 const OPENCODEX_PLUGIN_URL_PREFIX = "/opencodex-plugins/";
 const WEB_SHELL_PLUGINS_DIR = path.join(WEB_SHELL_DIR, "plugins");
-const PLUGIN_ENTRY_FILE = "index.js";
+const LEGACY_PLUGIN_ENTRY_FILE = "index.js";
+const SERVED_PLUGIN_ENTRY_FILE = "entry.mjs";
+const PLUGIN_SDK_VERSION = "2.0.0";
 const PLUGIN_I18N_FILES = {
   [ZH_CN]: "i18.zh.json",
   [EN_US]: "i18.en.json",
@@ -15,6 +17,7 @@ const PLUGIN_I18N_FILES = {
 const SAFE_PLUGIN_DIR_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_PLUGIN_SOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const warnedExternalPluginRoots = new Set();
+const warnedPluginDiagnostics = new Set();
 
 function isSafePluginDirName(name) {
   return SAFE_PLUGIN_DIR_NAME.test(String(name || ""));
@@ -37,6 +40,12 @@ function warnExternalPluginRootOnce(reason, rootDir) {
   if (warnedExternalPluginRoots.has(key)) return;
   warnedExternalPluginRoots.add(key);
   console.warn(`[gateway] external plugin directory skipped: ${reason}`, rootDir);
+}
+
+function warnPluginOnce(key, message) {
+  if (warnedPluginDiagnostics.has(key)) return;
+  warnedPluginDiagnostics.add(key);
+  console.warn(message);
 }
 
 function splitExternalPluginDirs(raw, structured = false) {
@@ -106,8 +115,27 @@ function pluginDir(root, dirName) {
   return path.join(root.rootDir, dirName);
 }
 
-function pluginEntryFile(root, dirName) {
-  return path.join(pluginDir(root, dirName), PLUGIN_ENTRY_FILE);
+function pluginEntryFileFromManifest(pluginDirectory, manifest) {
+  if (manifest?.apiVersion !== 2 || !manifest.entry || !pluginSdkRangeCompatible(manifest.sdkVersion)) return null;
+  const normalizedEntry = String(manifest.entry).replace(/\\/g, "/");
+  if (
+    normalizedEntry.startsWith("/") ||
+    normalizedEntry.split("/").some((part) => !part || part === "." || part === "..") ||
+    !normalizedEntry.endsWith(".mjs")
+  ) {
+    return null;
+  }
+  const candidate = path.resolve(pluginDirectory, normalizedEntry);
+  return isWithinRoot(candidate, pluginDirectory) ? candidate : null;
+}
+
+function pluginSdkRangeCompatible(range) {
+  const normalized = String(range || "").trim().replace(/\s+/g, " ");
+  if (!normalized) return false;
+  // v2 首版只承诺同一主版本兼容；支持文档中给出的常用精确值和范围写法。
+  if (/^(?:\^|~)?2(?:\.0(?:\.0)?)?(?:\.x)?$/i.test(normalized)) return true;
+  if (/^2\.x(?:\.x)?$/i.test(normalized)) return true;
+  return /^>=\s*2(?:\.0(?:\.0)?)?\s+<\s*3(?:\.0(?:\.0)?)?$/.test(normalized);
 }
 
 function pluginI18nFile(entry, locale) {
@@ -149,27 +177,45 @@ function listPluginEntriesInRoot(root) {
     .filter((entry) => entry.isDirectory() && isSafePluginDirName(entry.name))
     .map((entry) => {
       const pluginDirectory = pluginDir(root, entry.name);
-      const entryFile = pluginEntryFile(root, entry.name);
       const manifestFile = pluginManifestFile(pluginDirectory);
-      const hasEntryFile = exists(entryFile) && isWithinRoot(entryFile, root.rootDir);
+      const legacyEntryFile = path.join(pluginDirectory, LEGACY_PLUGIN_ENTRY_FILE);
       const hasManifestFile = exists(manifestFile) && isWithinRoot(manifestFile, root.rootDir);
-      // 新插件可以只有声明式 manifest；旧插件仍然只需要 index.js，二者都不存在时才跳过目录。
-      if (!hasEntryFile && !hasManifestFile) return null;
+      if (!hasManifestFile) {
+        if (exists(legacyEntryFile)) {
+          warnPluginOnce(`${pluginDirectory}:missing-manifest`, `[gateway] legacy plugin rejected: ${entry.name}; apiVersion 2 manifest is required`);
+        }
+        return null;
+      }
       const pluginEntry = {
         name: entry.name,
         sourceId: root.sourceId,
         pluginDir: pluginDirectory,
         rootDir: root.rootDir,
-        entryFile: hasEntryFile ? entryFile : null,
-        manifestFile: hasManifestFile ? manifestFile : null,
+        entryFile: null,
+        manifestFile,
         i18nFiles: [],
-        urlPath: hasEntryFile ? `${root.sourceId}/${entry.name}/${PLUGIN_ENTRY_FILE}` : "",
+        urlPath: "",
       };
-      const manifest = hasManifestFile ? readPluginManifest(pluginEntry, manifestFile) : null;
-      // 纯 manifest 插件若声明无效，没有任何可加载内容，不能出现在目录中。
-      if (!hasEntryFile && !manifest) return null;
+      const manifest = readPluginManifest(pluginEntry, manifestFile);
+      if (!manifest) return null;
+      if (exists(legacyEntryFile)) {
+        // 即使同时提供 manifest，也绝不回退执行旧入口，避免新旧插件实现双重激活。
+        warnPluginOnce(`${pluginDirectory}:legacy-entry`, `[gateway] legacy plugin entry ignored: ${entry.name}/${LEGACY_PLUGIN_ENTRY_FILE}`);
+      }
+      const entryFile = pluginEntryFileFromManifest(pluginDirectory, manifest);
+      const hasEntryFile = !!entryFile && exists(entryFile) && isWithinRoot(entryFile, pluginDirectory);
+      if (manifest.entry && !hasEntryFile) {
+        const reason = manifest.apiVersion !== 2
+          ? "apiVersion 2 is required"
+          : !pluginSdkRangeCompatible(manifest.sdkVersion)
+            ? `incompatible sdkVersion ${manifest.sdkVersion || "<empty>"}; host is ${PLUGIN_SDK_VERSION}`
+            : "invalid or missing ESM entry";
+        warnPluginOnce(`${pluginDirectory}:entry:${reason}`, `[gateway] plugin module skipped: ${entry.name}; ${reason}`);
+      }
+      pluginEntry.entryFile = hasEntryFile ? entryFile : null;
+      pluginEntry.urlPath = hasEntryFile ? `${root.sourceId}/${entry.name}/${SERVED_PLUGIN_ENTRY_FILE}` : "";
       const i18nFiles = pluginI18nFiles(pluginEntry).filter((file) => exists(file) && isWithinRoot(file, root.rootDir));
-      const versionFiles = [hasEntryFile ? entryFile : null, hasManifestFile ? manifestFile : null, ...i18nFiles].filter(Boolean);
+      const versionFiles = [hasEntryFile ? entryFile : null, manifestFile, ...i18nFiles].filter(Boolean);
       return {
         ...pluginEntry,
         i18nFiles,
@@ -183,7 +229,18 @@ function listPluginEntriesInRoot(root) {
 
 function listPluginEntries() {
   // 内置插件始终先加载，外部插件按环境变量里的根目录顺序追加。
-  return pluginRoots().flatMap(listPluginEntriesInRoot);
+  const result = [];
+  const manifestIds = new Set();
+  for (const entry of pluginRoots().flatMap(listPluginEntriesInRoot)) {
+    const manifestId = String(entry.manifest?.id || "");
+    if (manifestIds.has(manifestId)) {
+      warnPluginOnce(`${entry.pluginDir}:duplicate-id`, `[gateway] plugin skipped: duplicate manifest id ${manifestId}`);
+      continue;
+    }
+    manifestIds.add(manifestId);
+    result.push(entry);
+  }
+  return result;
 }
 
 function listPluginManifests() {
@@ -196,10 +253,10 @@ function pluginEntryFileFromRequestPath(reqPath) {
   if (!String(reqPath || "").startsWith(OPENCODEX_PLUGIN_URL_PREFIX)) return null;
   const rel = String(reqPath).slice(OPENCODEX_PLUGIN_URL_PREFIX.length);
   const parts = rel.split("/");
-  // 插件公开资源目前只暴露目录入口 index.js，避免 URL 拼接读到任意插件内文件。
+  // URL 始终使用网关生成的固定 entry.mjs，不暴露 manifest 中的真实相对路径。
   if (
     parts.length !== 3 ||
-    parts[2] !== PLUGIN_ENTRY_FILE ||
+    parts[2] !== SERVED_PLUGIN_ENTRY_FILE ||
     !isSafePluginSourceId(parts[0]) ||
     !isSafePluginDirName(parts[1])
   ) {
@@ -274,5 +331,6 @@ module.exports = {
   listPluginManifests,
   pluginEntryFileFromRequestPath,
   pluginMessagesForLocale,
+  pluginSdkRangeCompatible,
   withPluginI18nMessages,
 };

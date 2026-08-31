@@ -1,0 +1,12 @@
+{
+  "id": "opencodex.ios-fix",
+  "name": "iOS fix",
+  "label": "iOS兼容修复",
+  "labelKey": "plugin.iosFix.label",
+  "desc": "修复iOS下视口高度、底部遮挡和软键盘重复避让等兼容问题。",
+  "descKey": "plugin.iosFix.desc",
+  "enableStorageKey": "iosCompatibilityFix.v2",
+  "defaultEnabled": "ios-webkit",
+  "surface": "renderer",
+  "order": 15
+}

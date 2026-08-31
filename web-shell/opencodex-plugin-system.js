@@ -93,6 +93,14 @@
   }
 
   function pluginDefaultEnabled(plugin) {
+    if (plugin?.defaultEnabledPolicy === "ios-webkit") {
+      const nav = w.navigator || {};
+      const ua = String(nav.userAgent || "");
+      const platform = String(nav.platform || "");
+      const touchPoints = Number(nav.maxTouchPoints || 0);
+      const appleTouch = /iP(?:hone|ad|od)/i.test(ua) || (platform === "MacIntel" && touchPoints > 1);
+      return appleTouch && /WebKit/i.test(ua) && !/Android/i.test(ua);
+    }
     // defaultEnabled 是插件总开关的默认值；未声明时保持向后兼容，默认启用。
     return hasOwn(plugin, "defaultEnabled") ? plugin.defaultEnabled !== false : true;
   }
@@ -112,6 +120,7 @@
       id: String(plugin.id),
       builtin: plugin.builtin === true,
       defaultEnabled: pluginDefaultEnabled(plugin),
+      defaultEnabledPolicy: String(plugin.defaultEnabledPolicy || ""),
       desc: pluginDescription(plugin),
       descKey: String(plugin.descKey || ""),
       enableStorageKey: String(plugin.enableStorageKey || `plugin.${plugin.id}.enabled`),

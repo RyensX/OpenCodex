@@ -1,251 +1,111 @@
-# OpenCodex 插件
+# OpenCodex 插件 v2
 
 **中文** | [English](PLUGINS_EN.md)
 
-OpenCodex 支持把插件目录放进内置或外部插件根目录后自动发现、加载并在设置页生成插件开关。当前插件系统用于承载 OpenCodex 自有增强能力，例如移动端软键盘优化和移动端侧栏优化。
+OpenCodex 只执行 `apiVersion: 2` 的 ESM 插件。旧式 `index.js` 不再加载；即使目录里同时存在新 manifest 和 `index.js`，Gateway 也只会忽略旧入口并输出诊断。
 
-> 当前插件以可信同页脚本方式运行，没有沙箱隔离。插件可以访问 `window`、`document` 和页面运行时对象，所以只应放入你信任的插件文件。
+插件仍按可信代码运行，没有 Worker/iframe 沙箱。架构边界由宿主 SDK、强类型对象引用和 Provider 隔离保证，不应把它理解为恶意代码安全隔离。
 
-## 插件目录
-
-内置插件放在：
-
-```text
-web-shell/plugins/<plugin-name>/index.js
-```
-
-gateway 会在请求 `/opencodex-plugin-loader.js` 时扫描插件根目录，并加载符合安全目录名规则的 `<plugin-name>/index.js`。刷新页面即可重新扫描插件目录。
-
-有效目录名示例：
-
-```text
-my-plugin
-mobile-helper.v1
-```
-
-插件文件会通过以下 URL 加载：
-
-```text
-/opencodex-plugins/builtin/<plugin-name>/index.js
-```
-
-## 外部插件目录
-
-通过环境变量 `OPENCODEX_PLUGIN_DIRS` 可以追加外部插件根目录。外部根目录和内置目录使用相同结构：
+## 目录与 manifest
 
 ```text
 /path/to/plugins/
   my-plugin/
-    index.js
+    plugin.json
+    dist/index.mjs
     i18.zh.json
     i18.en.json
 ```
 
-多个外部根目录可以用系统路径分隔符传入，也可以使用 JSON 数组：
+```json
+{
+  "id": "example.my-plugin",
+  "apiVersion": 2,
+  "entry": "dist/index.mjs",
+  "sdkVersion": "^2.0.0",
+  "name": "My plugin",
+  "label": "示例插件",
+  "desc": "通过虚拟修改骨架扩展 OpenCodex。",
+  "defaultEnabled": true,
+  "order": 900
+}
+```
+
+- `entry` 必须是插件目录内的相对 `.mjs` 文件，不能包含 `..` 或绝对路径。
+- `sdkVersion` 必须兼容宿主 v2；当前支持 `2.0.0`、`^2.0.0`、`2.x` 和 `>=2 <3`。
+- 外部根目录通过 `OPENCODEX_PLUGIN_DIRS` 配置，可使用系统路径分隔符或 JSON 数组。
+- Gateway 先读取 manifest 和 i18n，使认证页设置能立即显示；ESM 随后以增量批次注册修改点。
+
+## ESM 工厂
+
+```ts
+import type { OpenCodexPluginFactory } from "@opencodex/plugin-sdk";
+
+export default ((sdk) => {
+  const group = sdk.groups.register({
+    id: "example.message-tools",
+    name: "消息工具",
+    description: "示例插件的开发者分类组。",
+    order: 900,
+  });
+  const locator = sdk.view.locators.css(
+    "locator.example-message-actions",
+    '[data-app-action="message-actions"]',
+  );
+
+  sdk.points.register({
+    id: "example.message-tools.hello",
+    description: "在消息操作区追加文本",
+    group,
+    contributions: [sdk.adapters.semanticView.mount({
+      locator,
+      placement: sdk.view.placements.append,
+      content: sdk.view.ui.text("Hello"),
+    })],
+  });
+}) satisfies OpenCodexPluginFactory;
+```
+
+Loader 会给每个插件创建独立 SDK 作用域，并在工厂成功返回后原子提交。工厂抛错、依赖形成环、引用不是 SDK 对象、ID 重复或使用当前宿主不支持的终端适配器时，整批注册失败，不留下半批次状态。
+
+完整可类型检查的示例位于 `examples/plugin-v2-hello`，公开类型位于 `sdk/plugin-v2`。示例检查命令：
 
 ```bash
-OPENCODEX_PLUGIN_DIRS="/path/to/plugins:/another/plugins"
-OPENCODEX_PLUGIN_DIRS='["/path/to/plugins", "/another/plugins"]'
+pnpm exec tsc -p examples/plugin-v2-hello/tsconfig.json
+pnpm exec esbuild examples/plugin-v2-hello/src/index.ts \
+  --bundle --format=esm --platform=browser \
+  --outfile=examples/plugin-v2-hello/dist/index.mjs
 ```
 
-外部插件 URL 会带独立 source 段，例如：
+## 强类型注册模型
+
+- `sdk.groups.register()` 返回 `PointGroupRef`。分类组只负责开发者查看，不参与启用、回退或依赖决策。
+- `sdk.adapters.*` 暴露宿主创建的适配器引用。修改点优先使用高级语义适配器，没有合适语义时可使用当前宿主支持的底层适配器。
+- `sdk.adapters.compose()` 创建高级适配器；`dependencies` 必须传 `AdapterRef` 对象，不能写字符串 ID。
+- `sdk.points.register()` 只接受 `PointGroupRef` 和由适配器 API 创建的 Contribution。
+- `sdk.view.locators.css()` 返回 Locator 对象；修改点不会收到真实 DOM。选择器只保存在 Provider 私有映射中。
+- `sdk.view.ui` 创建虚拟节点。Provider 负责真实节点、监听器、重挂载和清理。
+
+浏览器宿主当前可执行声明式 `RuntimeView` / `SemanticView`、`RuntimeHook` 和 `ProtocolPipeline.observe` Contribution，并统一共享 DOM Observer、全局事件、函数 Wrapper 和协议解码。跨宿主的静态资源、进程和 Runner 适配器仍会出现在完整目录中，但浏览器插件若把它们展开为终端声明，会在提交阶段以“宿主不提供该适配器”明确失败。
+
+## 设置、开关与生命周期
+
+manifest 会先注册到原有设置系统。插件提交后，宿主为它补充 `activate`：
+
+- 只有插件开关启用且进入 `renderer` scope 时才激活修改点。
+- 关闭插件会逆序销毁挂载、监听和共享资源引用。
+- 重新开启会重新定位和挂载，不复用已失效的真实节点。
+- 同一插件重复提交会被拒绝，避免新旧实现同时运行。
+
+开关仍保存在 `opencodex_web_settings_v1`，默认键为 `plugin.<plugin-id>.enabled`。语言文件先加载中文，再用当前语言覆盖同名 key。
+
+## 禁止的旧契约
+
+以下入口不再受支持：
 
 ```text
-/opencodex-plugins/external-1/<plugin-name>/index.js
+<plugin>/index.js
+window.OpenCodexPluginSystem.registerPlugin({ activate() { /* 直接改 DOM */ } })
 ```
 
-## 加载时机
-
-插件系统分为注册和激活两个阶段：
-
-1. 登录页会加载插件系统和插件 loader，所以插件 JS 会在认证前完成 `registerPlugin()` 注册，设置页也能显示插件开关。
-2. 认证通过并加载 Codex renderer 后，`codex-bridge-polyfill.js` 会调用 `activate("renderer", capabilities)`，插件的 `activate(context)` 才会执行，插件功能才真正生效。
-
-## 最小插件
-
-```js
-(function () {
-  const pluginSystem = window.OpenCodexPluginSystem || window.__OpenCodexPluginSystem;
-  if (!pluginSystem || typeof pluginSystem.registerPlugin !== "function") return;
-
-  pluginSystem.registerPlugin({
-    id: "example.hello",
-    name: "Hello plugin",
-    labelKey: "plugin.exampleHello.label",
-    label: "示例插件",
-    descKey: "plugin.exampleHello.desc",
-    desc: "这段描述会显示在插件标题下面；为空时不显示。",
-    defaultEnabled: true,
-    order: 100,
-    activate(context) {
-      if (context.scope !== "renderer") return null;
-      if (!context.plugin.isEnabled()) return null;
-
-      console.log("[example.hello] activated");
-
-      return () => {
-        console.log("[example.hello] disposed");
-      };
-    },
-  });
-})();
-```
-
-## registerPlugin 字段
-
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `id` | 是 | 插件唯一 ID。建议使用反向域名或命名空间，例如 `opencodex.mobile-keyboard-optimization`。 |
-| `name` | 否 | 插件内部名称。 |
-| `label` | 否 | 设置页插件开关标题。未提供时回退到 `name` 或 `id`。 |
-| `labelKey` | 否 | 设置页插件开关标题的 i18 key，优先从插件自己的 i18 文件解析。 |
-| `desc` | 否 | 设置页标题下方描述。为空时不显示描述。 |
-| `descKey` | 否 | 设置页插件描述的 i18 key，优先从插件自己的 i18 文件解析。 |
-| `defaultEnabled` | 否 | 插件总开关默认值。未声明时默认 `true`。 |
-| `enableStorageKey` | 否 | 插件总开关在本地设置里的字段名。未声明时使用 `plugin.<id>.enabled`。 |
-| `builtin` | 否 | 是否内置插件。当前主要用于元信息标记。 |
-| `order` | 否 | 设置页排序值，数字越小越靠前。 |
-| `settings` | 否 | 插件自定义设置声明。当前设置页只自动渲染插件总开关，该字段暂作扩展预留。 |
-| `activate(context)` | 否 | 插件激活函数。启用状态下进入对应 scope 时调用。可返回 dispose 函数。 |
-
-## 插件 i18n
-
-插件文案不要写进宿主 locale。插件目录内可放置语言文件：
-
-```text
-i18.zh.json
-i18.en.json
-```
-
-示例：
-
-```json
-{
-  "plugin.exampleHello.label": "示例插件",
-  "plugin.exampleHello.desc": "这段描述会显示在插件标题下面。"
-}
-```
-
-宿主会先读取中文默认文件，再按当前语言叠加对应语言文件。插件 JS 里继续使用 `labelKey` / `descKey`，并保留 `label` / `desc` 作为缺失 i18 文案时的兜底。
-
-## 开关存储
-
-插件开关保存在浏览器 `localStorage`：
-
-```text
-opencodex_web_settings_v1
-```
-
-如果插件没有配置 `enableStorageKey`，默认字段名是：
-
-```text
-plugin.<plugin-id>.enabled
-```
-
-示例：
-
-```json
-{
-  "plugin.example.hello.enabled": true
-}
-```
-
-如果需要兼容旧设置名，可以显式指定：
-
-```js
-pluginSystem.registerPlugin({
-  id: "example.legacy",
-  label: "兼容旧设置",
-  enableStorageKey: "legacyPluginEnabled",
-});
-```
-
-## PluginContext
-
-`activate(context)` 当前可以使用以下能力：
-
-| 能力 | 说明 |
-| --- | --- |
-| `context.scope` | 当前激活范围。目前 renderer 使用 `"renderer"`。 |
-| `context.capabilities` | 宿主传入的原始能力对象。 |
-| `context.events.on(name, handler)` | 监听插件事件，返回取消监听函数。 |
-| `context.events.emit(name, payload)` | 发出插件事件。 |
-| `context.plugin.id` | 当前插件 ID。 |
-| `context.plugin.isEnabled()` | 读取当前插件总开关状态。 |
-| `context.preferences.get(id)` | 读取设置值。 |
-| `context.preferences.set(id, value)` | 写入设置值。 |
-| `context.preferences.isEnabled(id)` | 按 `!== false` 判断设置是否启用。 |
-| `context.preferences.load()` | 读取完整设置对象。 |
-| `context.preferences.save(next)` | 保存完整设置对象。 |
-| `context.preferences.defaults()` | 获取当前默认设置对象。 |
-| `context.settings.list(options)` | 读取插件设置声明。 |
-| `context.settings.register(setting)` | 动态注册插件设置声明。当前 UI 暂未自动渲染这些子设置。 |
-| `context.platform.isMobile()` | 判断当前环境是否更像移动端输入设备。 |
-| `context.capabilities.tokenUsage` | 按 `threadId + turnId` 读取归一化后的回复 token 用量。 |
-
-### tokenUsage capability
-
-`tokenUsage` 是 bridge 挂载的专用能力，具体逻辑位于 `codex-token-usage-capability.js`，用于插件按需读取 AI 回复的 token 消耗。它不会向插件暴露原始 gateway、app-host 消息或 session 正文。只有插件调用 `acquireConsumer` 后，bridge 才会监听/解析相关数据；`getForTurn` 在运行期缓存未命中时才会读取对应回复的 session token 记录。运行期缓存会按全局和会话维度裁剪，不会无限增长。
-
-```js
-const release = context.capabilities.tokenUsage.acquireConsumer("example.token-usage");
-const disposeUpdate = context.capabilities.tokenUsage.onUpdate((usage) => {
-  console.log(usage.threadId, usage.turnId, usage.inputTokens, usage.outputTokens, usage.cacheHitRate);
-});
-
-context.capabilities.tokenUsage
-  .getForTurn({ threadId, turnId })
-  .then((usage) => {
-    // usage 可能为 null，表示当前没有可安全关联到该回复的数据。
-  });
-```
-
-返回值字段：
-
-| 字段 | 说明 |
-| --- | --- |
-| `threadId` | 会话 ID。 |
-| `turnId` | 回复对应的 turn ID。 |
-| `inputTokens` | 输入 token 数；未知时为 `null`。 |
-| `outputTokens` | 输出 token 数；未知时为 `null`。 |
-| `cachedInputTokens` | 命中缓存的输入 token 数；未知时为 `null`。 |
-| `cacheHitRate` | `cachedInputTokens / inputTokens`；无法计算时为 `null`。 |
-| `updatedAt` | bridge 归一化该记录的时间戳。 |
-| `source` | 数据来源标记，例如 `app-host`、`gateway` 或 `session-api`。 |
-
-## 当前事件
-
-| 事件 | 来源 | 说明 |
-| --- | --- | --- |
-| `plugin:enabled-changed` | 插件系统 | 插件总开关变化时触发。 |
-| `preference:changed` | 插件系统 | 设置值变化时触发。 |
-| `ipc:invoke` | bridge polyfill | renderer 调用 gateway IPC 前触发。 |
-| `view:message` | bridge polyfill | renderer 处理 view message 时触发。 |
-
-示例：
-
-```js
-activate(context) {
-  const dispose = context.events.on("plugin:enabled-changed", (payload) => {
-    if (payload.id === context.plugin.id) {
-      console.log("enabled:", payload.enabled);
-    }
-  });
-
-  return dispose;
-}
-```
-
-## 生命周期
-
-- 插件注册后，如果当前 scope 已经激活并且插件开关为启用，插件会立即执行 `activate(context)`。
-- 插件关闭时，插件系统会调用 `activate()` 返回的 dispose 函数。
-- 插件再次打开时，插件系统会重新调用 `activate(context)`。
-- 同一个 scope 只会激活一次，避免重复安装监听器。
-
-## 当前限制
-
-- 插件是普通 `<script>`，没有沙箱和权限隔离。
-- 插件可以直接访问 DOM，但这也意味着插件需要自己承担兼容性和安全风险。
-- 设置页目前只自动渲染每个插件的总开关，插件子设置声明还没有完整 UI。
-- 插件描述暂不接入主项目 i18n，建议插件自己提供最终展示文案。
+内置增强的真实 DOM、Bridge 和协议实现已移入 `web-shell/internal/providers`，`web-shell/plugins` 只保留设置 manifest 与 i18n。外部插件也应只通过 v2 SDK 声明修改点。

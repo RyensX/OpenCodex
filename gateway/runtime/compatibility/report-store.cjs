@@ -15,6 +15,70 @@ function historyFileName(snapshot) {
   return `compatibility-${safeFilePart(runtime.version)}-${safeFilePart(runtime.build)}-${safeFilePart(runtime.bundleHash)}.json`;
 }
 
+function normalizeCompatibilityReportForRead(value) {
+  if (!value || typeof value !== "object") return null;
+  if (Number(value.schemaVersion) !== 1) return value;
+  const legacyAdapter = Object.freeze({
+    id: "adapter.legacy-report",
+    name: "旧报告执行策略",
+    description: "Schema v1 没有强类型适配器链，仅保留原始诊断状态供只读查看。",
+    kind: "terminal",
+    dependencies: [],
+  });
+  const groupDefinitions = [
+    ["legacy-web-runtime", "Web 运行时"],
+    ["legacy-gateway-runtime", "Gateway 运行时"],
+    ["legacy-static-cache", "静态缓存"],
+  ];
+  const groupForPoint = (point) => {
+    const id = String(point?.id || "");
+    if (id.startsWith("web.runtime.")) return "legacy-web-runtime";
+    if (id.startsWith("gateway.runtime.")) return "legacy-gateway-runtime";
+    return "legacy-static-cache";
+  };
+  const points = (Array.isArray(value.points) ? value.points : []).map((point) => ({
+    ...point,
+    groupId: groupForPoint(point),
+    directAdapterIds: [legacyAdapter.id],
+    adapterChainIds: [legacyAdapter.id],
+  }));
+  const groups = groupDefinitions.map(([id, name], index) => {
+    const members = points.filter((point) => point.groupId === id);
+    const statuses = members.map((point) => point.status);
+    const status = statuses.length > 0 && statuses.every((item) => item === "disabled")
+      ? "disabled"
+      : statuses.includes("unavailable")
+        ? "unavailable"
+        : statuses.includes("degraded") || statuses.includes("disabled")
+          ? "degraded"
+          : statuses.includes("pending")
+            ? "pending"
+            : statuses.includes("ready")
+              ? "ready"
+              : statuses.includes("healthy")
+                ? "healthy"
+                : "pending";
+    return {
+      id,
+      name,
+      description: "从 Schema v1 分类字段生成的只读兼容分组。",
+      order: 900 + index,
+      status,
+      pointIds: members.map((point) => point.id),
+    };
+  });
+  // 归一化只发生在读取边界，不会把旧报告重新写回或参与当前运行时决策。
+  return {
+    ...value,
+    schemaVersion: 2,
+    sourceSchemaVersion: 1,
+    readOnly: true,
+    points,
+    groups,
+    adapterTypes: [legacyAdapter],
+  };
+}
+
 function createCompatibilityReportStore({
   filePath,
   historyDir,
@@ -80,7 +144,7 @@ function createCompatibilityReportStore({
 
   function read() {
     try {
-      return JSON.parse(fileSystem.readFileSync(filePath, "utf8"));
+      return normalizeCompatibilityReportForRead(JSON.parse(fileSystem.readFileSync(filePath, "utf8")));
     } catch {
       return null;
     }
@@ -98,5 +162,6 @@ module.exports = {
   DEFAULT_HISTORY_LIMIT,
   createCompatibilityReportStore,
   historyFileName,
+  normalizeCompatibilityReportForRead,
   safeFilePart,
 };

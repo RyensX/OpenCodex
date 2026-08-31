@@ -3,8 +3,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const {
-  FEATURE_DEFINITIONS,
+  ADAPTER_DEFINITIONS,
   POINT_DEFINITIONS,
+  POINT_GROUP_DEFINITIONS,
   registerCompatibilityCatalog,
 } = require("../runtime/compatibility/catalog.cjs");
 const {
@@ -23,8 +24,31 @@ function createClock() {
   };
 }
 
+const preparedRegistries = new WeakSet();
+
+function prepareTestCatalog(registry) {
+  if (preparedRegistries.has(registry)) return;
+  registry.registerGroup({ id: "test-group", name: "测试组", description: "测试修改点分组", order: 1 });
+  registry.registerAdapterType({
+    id: "adapter.test",
+    name: "测试适配器",
+    description: "测试修改点使用的适配器",
+    kind: "terminal",
+    dependencies: [],
+  });
+  preparedRegistries.add(registry);
+}
+
 function registerTestPoint(registry, id = "gateway.runtime.test.point") {
-  registry.registerPoint({ id, description: "测试修改点", owner: "test" });
+  prepareTestCatalog(registry);
+  registry.registerPoint({
+    id,
+    description: "测试修改点",
+    owner: "test",
+    groupId: "test-group",
+    directAdapterIds: ["adapter.test"],
+    adapterChainIds: ["adapter.test"],
+  });
   return id;
 }
 
@@ -33,7 +57,7 @@ function resolveTestPoint(registry, id, options = {}) {
   const handle = registry
     .beginResolution(id, {
       locatorRevision: options.locatorRevision || "locator-v1",
-      strategyId: options.strategyId || "test-strategy",
+      adapterId: "adapter.test",
       expectedCandidates: options.expectedCandidates || 1,
     })
     .resolve({
@@ -61,27 +85,19 @@ function sourceFiles(directory) {
   });
 }
 
-test("compatibility catalog declares three stable point categories without duplicate ids", () => {
+test("compatibility catalog declares groups and adapter chains for every stable point", () => {
   assert.equal(POINT_DEFINITIONS.length, 102);
-  assert.equal(FEATURE_DEFINITIONS.length, 6);
+  assert.equal(POINT_GROUP_DEFINITIONS.length, 17);
+  assert.equal(ADAPTER_DEFINITIONS.length, 23);
   assert.equal(new Set(POINT_DEFINITIONS.map((point) => point.id)).size, POINT_DEFINITIONS.length);
-  assert.deepEqual(
-    POINT_DEFINITIONS.reduce((counts, point) => {
-      const category = point.id.split(".").slice(0, 2).join(".");
-      counts[category] = (counts[category] || 0) + 1;
-      return counts;
-    }, {}),
-    {
-      "web.runtime": 36,
-      "gateway.runtime": 36,
-      "static.cache": 30,
-    }
-  );
+  assert.equal(POINT_DEFINITIONS.every((point) => point.groupId && point.adapterChainIds.length > 0), true);
 
   const registry = registerCompatibilityCatalog(createCompatibilityRegistry());
   const snapshot = registry.snapshot();
+  assert.equal(snapshot.schemaVersion, 2);
   assert.equal(snapshot.points.length, 102);
-  assert.equal(snapshot.features.length, 6);
+  assert.equal(snapshot.groups.length, 17);
+  assert.equal(snapshot.adapterTypes.length, 23);
   assert.equal(snapshot.status, "pending");
 });
 
@@ -93,7 +109,11 @@ test("every catalog point is wired into production code outside the catalog", ()
     ...sourceFiles(path.join(projectRoot, "gateway", "src")),
     ...sourceFiles(path.join(projectRoot, "launcher")),
     ...sourceFiles(path.join(projectRoot, "web-shell")),
-  ].filter((file) => !file.endsWith(path.join("compatibility", "catalog.cjs")));
+  ].filter((file) => {
+    if (file.endsWith(path.join("compatibility", "catalog.cjs"))) return false;
+    // 强类型目录本身当然包含全部 ID；这里必须只检查真实 Provider/执行路径，避免测试自证。
+    return !file.includes(`${path.sep}src${path.sep}modification${path.sep}`);
+  });
   const source = files.map((file) => fs.readFileSync(file, "utf8")).join("\n");
   const missing = POINT_DEFINITIONS.filter((point) => !source.includes(point.id)).map((point) => point.id);
   assert.deepEqual(missing, []);
@@ -150,7 +170,7 @@ test("strict resolution refuses missing, ambiguous and weak candidates", () => {
 
   assert.equal(
     registry
-      .beginResolution(missingId, { locatorRevision: "v1", strategyId: "regex-v1" })
+      .beginResolution(missingId, { locatorRevision: "v1", adapterId: "adapter.test" })
       .resolve({ candidateCount: 0, constraintsPassed: true }),
     null
   );
@@ -158,7 +178,7 @@ test("strict resolution refuses missing, ambiguous and weak candidates", () => {
 
   assert.equal(
     registry
-      .beginResolution(ambiguousId, { locatorRevision: "v1", strategyId: "regex-v1" })
+      .beginResolution(ambiguousId, { locatorRevision: "v1", adapterId: "adapter.test" })
       .resolve({ candidateCount: 2, constraintsPassed: true }),
     null
   );
@@ -166,7 +186,7 @@ test("strict resolution refuses missing, ambiguous and weak candidates", () => {
 
   assert.equal(
     registry
-      .beginResolution(weakId, { locatorRevision: "v1", strategyId: "regex-v1" })
+      .beginResolution(weakId, { locatorRevision: "v1", adapterId: "adapter.test" })
       .resolve({ candidateCount: 1, constraintsPassed: false }),
     null
   );
@@ -194,39 +214,30 @@ test("patch handle becomes stale before applying when the located target changes
   assert.equal(registry.point(id).status, "unavailable");
 });
 
-test("feature state is atomic across required points and degrades for optional failures", () => {
+test("display groups derive status without changing point lifecycle", () => {
   const registry = createCompatibilityRegistry();
-  const requiredA = registerTestPoint(registry, "gateway.runtime.feature.required-a");
-  const requiredB = registerTestPoint(registry, "web.runtime.feature.required-b");
-  const optional = registerTestPoint(registry, "static.cache.feature.optional");
-  registry.registerFeature({
-    id: "feature.test-atomic",
-    description: "测试原子功能",
-    fallback: "官方逻辑",
-    required: [requiredA, requiredB],
-    optional: [optional],
-  });
+  const first = registerTestPoint(registry, "gateway.runtime.group.first");
+  const second = registerTestPoint(registry, "web.runtime.group.second");
 
-  for (const id of [requiredA, requiredB]) {
+  for (const id of [first, second]) {
     const { handle } = resolveTestPoint(registry, id);
     handle.apply();
     handle.verify();
   }
-  assert.equal(registry.feature("feature.test-atomic").status, "ready");
-  assert.equal(registry.feature("feature.test-atomic").canActivate, true);
+  let snapshot = registry.snapshot();
+  assert.equal(snapshot.groups.find((group) => group.id === "test-group").status, "ready");
+  assert.equal(snapshot.status, "ready");
 
-  registry
-    .beginResolution(optional, { locatorRevision: "v1", strategyId: "test" })
-    .ambiguous({ candidateCount: 2, reason: "multiple candidates" });
-  assert.equal(registry.feature("feature.test-atomic").status, "degraded");
-  assert.equal(registry.feature("feature.test-atomic").canActivate, true);
+  registry.useFallback(first, "使用官方实现");
+  snapshot = registry.snapshot();
+  assert.equal(snapshot.groups.find((group) => group.id === "test-group").status, "degraded");
+  assert.equal(snapshot.status, "degraded");
 
-  registry.useFallback(requiredA, "使用官方实现");
-  assert.equal(registry.feature("feature.test-atomic").status, "degraded");
-  registry.disablePoint(requiredB, "配置关闭");
-  assert.equal(registry.feature("feature.test-atomic").status, "unavailable");
-  registry.setFeatureEnabled("feature.test-atomic", false, "插件关闭");
-  assert.equal(registry.feature("feature.test-atomic").status, "disabled");
+  registry.setPointsEnabled([first, second], false, "插件关闭");
+  snapshot = registry.snapshot();
+  assert.equal(snapshot.groups.find((group) => group.id === "test-group").status, "disabled");
+  assert.equal(snapshot.points.every((point) => point.status === "disabled"), true);
+  assert.equal(snapshot.status, "disabled");
 });
 
 test("runtime identity changes reset point state and invalidate old handles", () => {
@@ -275,7 +286,7 @@ test("compatibility snapshot redacts paths and access tokens from failure reason
   const registry = createCompatibilityRegistry();
   const id = registerTestPoint(registry, "gateway.runtime.test.redaction");
   registry
-    .beginResolution(id, { locatorRevision: "v1", strategyId: "test" })
+    .beginResolution(id, { locatorRevision: "v1", adapterId: "adapter.test" })
     .fail(new Error("failed at /Users/alice/project/private.js?token=secret-value"));
 
   const reason = registry.point(id).location.reason;

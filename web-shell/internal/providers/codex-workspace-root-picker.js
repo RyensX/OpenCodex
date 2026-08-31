@@ -1,6 +1,8 @@
 (function () {
   const w = window;
   if (w.__codexWorkspaceRootPickerInstalled) return;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.events?.observe) return;
   w.__codexWorkspaceRootPickerInstalled = true;
 
   // 这个模块只负责“远端浏览器输入路径”的交互，真正的 Electron/官方 IPC 仍由 bridge 转发。
@@ -242,7 +244,7 @@
         // 弹窗关闭时必须清理全局 keydown 监听和单例状态，避免下次打开失焦。
         dialogState.focusInput = null;
         dialogState.promise = null;
-        w.removeEventListener("keydown", onKeyDown, true);
+        disposeKeydown?.();
         try {
           backdrop.remove();
         } catch {}
@@ -259,6 +261,8 @@
           cancel();
         }
       }
+
+      let disposeKeydown = null;
 
       panel.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -281,7 +285,7 @@
       backdrop.appendChild(panel);
       document.body.appendChild(backdrop);
       dialogState.focusInput = () => input.focus();
-      w.addEventListener("keydown", onKeyDown, true);
+      disposeKeydown = adapterHost.events.observe({ key: {}, target: w, type: "keydown", capture: true, callback: onKeyDown });
       w.requestAnimationFrame(() => input.focus());
     });
 

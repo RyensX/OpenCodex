@@ -1,6 +1,8 @@
 (function () {
   const w = window;
   if (w.__codexRemoteFileActionsInstalled) return;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
   w.__codexRemoteFileActionsInstalled = true;
 
   const DOWNLOAD_PATH_API = "/api/local-file/download-path";
@@ -28,7 +30,7 @@
     workspaceRootCaptures: 0,
   };
   let pendingPathMenuSession = null;
-  let pendingMenuObserver = null;
+  let disposePendingMenuObservation = null;
   let pendingMenuObserverExpiryTimer = 0;
   let nextPathMenuSessionId = 1;
   const workspaceRootByRelativePath = new Map();
@@ -304,11 +306,11 @@
 
   function installWorkspaceRootCapture() {
     if (!w.__codexRemoteFileActionsPluginEventListener) {
-      w.addEventListener("opencodex:plugin-event", (event) => {
+      adapterHost.events.observe({ key: {}, target: w, type: "opencodex:plugin-event", callback: (event) => {
         const detail = event && event.detail;
         if (!detail || detail.eventName !== "ipc:invoke") return;
         rememberWorkspaceRootFromCandidate(detail.payload);
-      });
+      } });
       w.__codexRemoteFileActionsPluginEventListener = true;
     }
   }
@@ -429,7 +431,8 @@
     pendingPathMenuSession = null;
     state.pendingPathMenuSession = false;
     state.lastMenuSessionClearReason = reason || "";
-    pendingMenuObserver?.disconnect();
+    disposePendingMenuObservation?.();
+    disposePendingMenuObservation = null;
     if (pendingMenuObserverExpiryTimer) w.clearTimeout(pendingMenuObserverExpiryTimer);
     pendingMenuObserverExpiryTimer = 0;
   }
@@ -742,13 +745,13 @@
   }
 
   function observePendingPathMenu(session) {
-    if (!session || typeof MutationObserver !== "function") return;
-    pendingMenuObserver ||= new MutationObserver(handlePendingMenuMutations);
-    pendingMenuObserver.disconnect();
-    pendingMenuObserver.observe(document.documentElement, {
-      characterData: true,
-      childList: true,
-      subtree: true,
+    if (!session) return;
+    disposePendingMenuObservation?.();
+    disposePendingMenuObservation = adapterHost.dom.observe({
+      key: {},
+      root: document.documentElement,
+      options: { characterData: true, childList: true, subtree: true },
+      callback: handlePendingMenuMutations,
     });
     if (pendingMenuObserverExpiryTimer) w.clearTimeout(pendingMenuObserverExpiryTimer);
     // 右键菜单只会紧随 contextmenu 挂载；超时后主动停观察，不能让一次未命中的菜单留下永久监听。
@@ -760,43 +763,49 @@
   function installMenuObserver() {
     if (!document || !shouldEnableRemoteFileActions()) return;
     const start = () => {
-      document.addEventListener(
-        "contextmenu",
-        (event) => {
+      adapterHost.events.observe({
+        key: {},
+        target: document,
+        type: "contextmenu",
+        capture: true,
+        callback(event) {
           const session = createPendingPathMenuSession(event);
           if (session) {
             observePendingPathMenu(session);
             schedulePendingMenuScans();
           }
         },
-        true
-      );
-      document.addEventListener(
-        "pointerdown",
-        (event) => {
+      });
+      adapterHost.events.observe({
+        key: {},
+        target: document,
+        type: "pointerdown",
+        capture: true,
+        callback(event) {
           // 普通点击会打开大量非文件树菜单，必须切断之前的文件树右键会话。
           if (event.button !== 2) clearPendingPathMenuSession("pointerdown");
         },
-        true
-      );
-      document.addEventListener(
-        "keydown",
-        (event) => {
+      });
+      adapterHost.events.observe({
+        key: {},
+        target: document,
+        type: "keydown",
+        capture: true,
+        callback(event) {
           // ContextMenu / Shift+F10 可能触发键盘右键菜单，等后续 contextmenu 事件重新建会话。
           if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) return;
           clearPendingPathMenuSession("keydown");
         },
-        true
-      );
+      });
     };
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", start, { once: true });
+      adapterHost.events.observe({ key: {}, target: document, type: "DOMContentLoaded", once: true, callback: start });
     } else {
       start();
     }
   }
 
-  w.addEventListener("message", handleGatewayMessage);
+  adapterHost.events.observe({ key: {}, target: w, type: "message", callback: handleGatewayMessage });
   installWorkspaceRootCapture();
   installMenuObserver();
 })();

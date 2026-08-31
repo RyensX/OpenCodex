@@ -55,24 +55,32 @@ function normalizePluginManifest(entry, value) {
   const id = String(value.id || "");
   if (!SAFE_PLUGIN_ID.test(id)) return null;
   const requestedFeature = typeof value.feature === "string" ? value.feature.trim() : "";
+  const apiVersion = Number(value.apiVersion) === 2 ? 2 : 1;
+  // 保留请求的入口字符串用于输出明确诊断；是否可执行由插件资源层连同 apiVersion/sdkVersion 一起判定。
+  const entryModule = typeof value.entry === "string" ? value.entry.trim() : "";
   const feature = authorizedCoreFeature(entry, value);
   if (requestedFeature && isRegisteredCoreFeature(requestedFeature) && !feature) {
     // 已注册核心 feature 只接受代码内绑定的内置提供者，外部同名声明直接失效。
     console.warn(`[gateway] plugin core feature rejected: ${id} -> ${requestedFeature}`);
   }
   const order = Number(value.order);
+  const defaultEnabledPolicy = value.defaultEnabled === "ios-webkit" ? "ios-webkit" : "";
   const settings = (Array.isArray(value.settings) ? value.settings : [])
     .map(normalizeSetting)
     .filter(Boolean)
     .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
   return {
     id,
+    apiVersion,
+    entry: entryModule,
+    sdkVersion: typeof value.sdkVersion === "string" ? value.sdkVersion.trim() : "",
     name: String(value.name || id),
     label: String(value.label || value.name || id),
     labelKey: String(value.labelKey || ""),
     desc: String(value.desc || value.description || ""),
     descKey: String(value.descKey || ""),
-    defaultEnabled: value.defaultEnabled === true,
+    defaultEnabled: defaultEnabledPolicy ? false : value.defaultEnabled === true,
+    defaultEnabledPolicy,
     builtin: entry?.sourceId === "builtin",
     feature,
     persistence: feature && value.persistence === "gateway" ? "gateway" : "browser",

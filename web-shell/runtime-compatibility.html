@@ -26,16 +26,13 @@
         <div class="panel-heading filters">
           <div>
             <h2>修改点</h2>
-            <p class="muted">按功能组查看定位、应用、验证和实际命中；未归组的基础修改点单独列出。</p>
+            <p class="muted">每个修改点按开发者功能组归类；分组只用于查看，不影响启用、回退或执行决策。</p>
           </div>
           <div class="filter-controls" role="group" aria-label="修改点筛选">
             <label>
-              <span>类型</span>
-              <select id="categoryFilter">
+              <span>注入类型</span>
+              <select id="adapterFilter">
                 <option value="">全部</option>
-                <option value="web.runtime">Web 运行时</option>
-                <option value="gateway.runtime">Gateway 运行时</option>
-                <option value="static.cache">静态缓存</option>
               </select>
             </label>
             <label>
@@ -57,6 +54,9 @@
             <thead>
               <tr>
                 <th scope="col">修改点</th>
+                <th scope="col">
+                  <span class="column-heading">注入类别<button class="help-button" type="button" data-help="adapter" aria-label="查看注入类别说明">?</button></span>
+                </th>
                 <th scope="col">
                   <span class="column-heading">总状态<button class="help-button" type="button" data-help="overall" aria-label="查看总状态说明">?</button></span>
                 </th>

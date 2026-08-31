@@ -1,251 +1,106 @@
-# OpenCodex Plugins
+# OpenCodex Plugins v2
 
 [中文](PLUGINS.md) | **English**
 
-OpenCodex supports plugin directories that can be dropped into built-in or external plugin roots, discovered automatically, loaded automatically, and shown as plugin switches in Settings. The current plugin system hosts OpenCodex-owned enhancements such as mobile keyboard optimization and mobile sidebar optimization.
+OpenCodex executes only ESM plugins with `apiVersion: 2`. Legacy `index.js` entries are no longer loaded. If a directory contains both a v2 manifest and `index.js`, the gateway ignores the legacy entry and emits a diagnostic.
 
-> Plugins currently run as trusted same-page scripts without sandbox isolation. They can access `window`, `document`, and page runtime objects, so only place plugin files that you trust in the plugin directory.
+Plugins remain trusted code and are not isolated in a Worker or iframe. The host SDK, strongly typed object references, and Provider boundaries are architectural constraints, not a malicious-code sandbox.
 
-## Plugin Directory
-
-Built-in plugins live in:
-
-```text
-web-shell/plugins/<plugin-name>/index.js
-```
-
-The gateway scans plugin roots when `/opencodex-plugin-loader.js` is requested, then loads `<plugin-name>/index.js` entries whose directory names match the safe directory-name rule. Refresh the page to rescan plugin directories.
-
-Valid directory-name examples:
-
-```text
-my-plugin
-mobile-helper.v1
-```
-
-Plugin files are served from:
-
-```text
-/opencodex-plugins/builtin/<plugin-name>/index.js
-```
-
-## External Plugin Roots
-
-Use `OPENCODEX_PLUGIN_DIRS` to append external plugin roots. External roots use the same layout as the built-in root:
+## Directory and manifest
 
 ```text
 /path/to/plugins/
   my-plugin/
-    index.js
+    plugin.json
+    dist/index.mjs
     i18.zh.json
     i18.en.json
 ```
 
-Pass multiple external roots with the platform path delimiter or a JSON array:
+```json
+{
+  "id": "example.my-plugin",
+  "apiVersion": 2,
+  "entry": "dist/index.mjs",
+  "sdkVersion": "^2.0.0",
+  "name": "My plugin",
+  "label": "Example plugin",
+  "desc": "Extends OpenCodex through the virtual modification skeleton.",
+  "defaultEnabled": true,
+  "order": 900
+}
+```
+
+- `entry` must be a relative `.mjs` path inside the plugin directory. Absolute paths and `..` are rejected.
+- `sdkVersion` must support host v2. Accepted forms include `2.0.0`, `^2.0.0`, `2.x`, and `>=2 <3`.
+- Add external roots with `OPENCODEX_PLUGIN_DIRS`, using the platform path separator or a JSON array.
+- The gateway reads manifests and translations first so settings are available on the authentication page, then loads ESM contributions as an incremental batch.
+
+## ESM factory
+
+```ts
+import type { OpenCodexPluginFactory } from "@opencodex/plugin-sdk";
+
+export default ((sdk) => {
+  const group = sdk.groups.register({
+    id: "example.message-tools",
+    name: "Message tools",
+    description: "Developer-facing classification for this plugin.",
+    order: 900,
+  });
+  const locator = sdk.view.locators.css(
+    "locator.example-message-actions",
+    '[data-app-action="message-actions"]',
+  );
+
+  sdk.points.register({
+    id: "example.message-tools.hello",
+    description: "Append text to the message action area",
+    group,
+    contributions: [sdk.adapters.semanticView.mount({
+      locator,
+      placement: sdk.view.placements.append,
+      content: sdk.view.ui.text("Hello"),
+    })],
+  });
+}) satisfies OpenCodexPluginFactory;
+```
+
+The loader creates a scoped SDK for each plugin and commits only after the factory returns successfully. A thrown error, dependency cycle, forged reference, duplicate ID, or terminal adapter unavailable in the current host rejects the whole batch.
+
+The type-checked example is in `examples/plugin-v2-hello`; public types are in `sdk/plugin-v2`.
 
 ```bash
-OPENCODEX_PLUGIN_DIRS="/path/to/plugins:/another/plugins"
-OPENCODEX_PLUGIN_DIRS='["/path/to/plugins", "/another/plugins"]'
+pnpm exec tsc -p examples/plugin-v2-hello/tsconfig.json
+pnpm exec esbuild examples/plugin-v2-hello/src/index.ts \
+  --bundle --format=esm --platform=browser \
+  --outfile=examples/plugin-v2-hello/dist/index.mjs
 ```
 
-External plugin URLs include their own source segment, for example:
+## Strong registration model
+
+- `sdk.groups.register()` returns a `PointGroupRef`. Groups are display-only and never control activation, fallback, or dependencies.
+- `sdk.adapters.*` exposes host-created adapter references. Prefer semantic adapters; use a supported base adapter when no semantic abstraction fits.
+- `sdk.adapters.compose()` requires `AdapterRef` dependency objects, never string IDs.
+- `sdk.points.register()` accepts only SDK group references and adapter-created Contributions.
+- `sdk.view.locators.css()` returns an opaque Locator; the modification point never receives a real DOM node.
+- `sdk.view.ui` creates virtual nodes. The Provider owns real nodes, listeners, remounting, and cleanup.
+
+The browser host currently executes declarative `RuntimeView` / `SemanticView`, `RuntimeHook`, and `ProtocolPipeline.observe` Contributions while sharing DOM observers, global event listeners, function wrappers, and protocol decoding. Cross-host static-resource, process, and Runner adapters remain visible in the complete catalog; expanding one to a terminal declaration in a browser plugin fails explicitly at commit time.
+
+## Settings and lifecycle
+
+The manifest is registered with the existing settings system first. Once committed, the host activates the plugin only when it is enabled and the `renderer` scope is active. Disabling it disposes mounts, listeners, and shared-resource references in reverse order. Re-enabling performs fresh location and mounting.
+
+Preferences remain in `opencodex_web_settings_v1`, under `plugin.<plugin-id>.enabled` by default. Chinese translations are loaded as the fallback, then the active locale overrides matching keys.
+
+## Removed legacy contract
+
+These entry styles are no longer supported:
 
 ```text
-/opencodex-plugins/external-1/<plugin-name>/index.js
+<plugin>/index.js
+window.OpenCodexPluginSystem.registerPlugin({ activate() { /* direct DOM access */ } })
 ```
 
-## Load Timing
-
-The plugin system has two phases: registration and activation.
-
-1. The login page loads the plugin system and plugin loader, so plugin JS files run and call `registerPlugin()` before authentication. This allows Settings to show plugin switches before Codex is loaded.
-2. After authentication succeeds and the Codex renderer is loaded, `codex-bridge-polyfill.js` calls `activate("renderer", capabilities)`. Only then does the plugin's `activate(context)` function run and install its behavior.
-
-## Minimal Plugin
-
-```js
-(function () {
-  const pluginSystem = window.OpenCodexPluginSystem || window.__OpenCodexPluginSystem;
-  if (!pluginSystem || typeof pluginSystem.registerPlugin !== "function") return;
-
-  pluginSystem.registerPlugin({
-    id: "example.hello",
-    name: "Hello plugin",
-    labelKey: "plugin.exampleHello.label",
-    label: "Example plugin",
-    descKey: "plugin.exampleHello.desc",
-    desc: "This description appears below the plugin title; empty descriptions are hidden.",
-    defaultEnabled: true,
-    order: 100,
-    activate(context) {
-      if (context.scope !== "renderer") return null;
-      if (!context.plugin.isEnabled()) return null;
-
-      console.log("[example.hello] activated");
-
-      return () => {
-        console.log("[example.hello] disposed");
-      };
-    },
-  });
-})();
-```
-
-## registerPlugin Fields
-
-| Field | Required | Description |
-| --- | --- | --- |
-| `id` | Yes | Unique plugin ID. Prefer a namespace or reverse-domain style name, for example `opencodex.mobile-keyboard-optimization`. |
-| `name` | No | Internal plugin name. |
-| `label` | No | Plugin switch title in Settings. Falls back to `name` or `id`. |
-| `labelKey` | No | i18n key for the plugin switch title, resolved from the plugin's own i18n files first. |
-| `desc` | No | Description shown below the title in Settings. Empty descriptions are hidden. |
-| `descKey` | No | i18n key for the plugin description, resolved from the plugin's own i18n files first. |
-| `defaultEnabled` | No | Default value of the plugin's main switch. Defaults to `true` when omitted. |
-| `enableStorageKey` | No | Field name used for this plugin's main switch in local settings. Defaults to `plugin.<id>.enabled`. |
-| `builtin` | No | Marks a built-in plugin. Currently used mainly as metadata. |
-| `order` | No | Sort order in Settings. Smaller numbers appear first. |
-| `settings` | No | Custom plugin setting descriptors. The current Settings UI only auto-renders the plugin's main switch; this field is reserved for future expansion. |
-| `activate(context)` | No | Plugin activation function. Called for an active scope when the plugin is enabled. May return a dispose function. |
-
-## Plugin i18n
-
-Plugin copy should not be added to host locale files. A plugin directory can include language files:
-
-```text
-i18.zh.json
-i18.en.json
-```
-
-Example:
-
-```json
-{
-  "plugin.exampleHello.label": "Example plugin",
-  "plugin.exampleHello.desc": "This description appears below the plugin title."
-}
-```
-
-The host reads the Chinese default file first, then overlays the current language file. Plugin JavaScript keeps using `labelKey` / `descKey`, with `label` / `desc` as fallbacks when i18n text is missing.
-
-## Switch Storage
-
-Plugin switches are stored in browser `localStorage`:
-
-```text
-opencodex_web_settings_v1
-```
-
-If a plugin does not configure `enableStorageKey`, the default field name is:
-
-```text
-plugin.<plugin-id>.enabled
-```
-
-Example:
-
-```json
-{
-  "plugin.example.hello.enabled": true
-}
-```
-
-To preserve compatibility with an old setting name, configure it explicitly:
-
-```js
-pluginSystem.registerPlugin({
-  id: "example.legacy",
-  label: "Legacy-compatible setting",
-  enableStorageKey: "legacyPluginEnabled",
-});
-```
-
-## PluginContext
-
-`activate(context)` currently exposes these capabilities:
-
-| Capability | Description |
-| --- | --- |
-| `context.scope` | Current activation scope. The renderer currently uses `"renderer"`. |
-| `context.capabilities` | Raw capabilities object passed by the host. |
-| `context.events.on(name, handler)` | Listen for a plugin event. Returns an unsubscribe function. |
-| `context.events.emit(name, payload)` | Emit a plugin event. |
-| `context.plugin.id` | Current plugin ID. |
-| `context.plugin.isEnabled()` | Read the current plugin main-switch state. |
-| `context.preferences.get(id)` | Read a setting value. |
-| `context.preferences.set(id, value)` | Write a setting value. |
-| `context.preferences.isEnabled(id)` | Treat a setting as enabled when it is not `false`. |
-| `context.preferences.load()` | Read the full settings object. |
-| `context.preferences.save(next)` | Save the full settings object. |
-| `context.preferences.defaults()` | Get the current default settings object. |
-| `context.settings.list(options)` | Read plugin setting descriptors. |
-| `context.settings.register(setting)` | Register a plugin setting descriptor dynamically. The current UI does not auto-render these child settings yet. |
-| `context.platform.isMobile()` | Returns whether the environment looks like a mobile input device. |
-| `context.capabilities.tokenUsage` | Reads normalized reply token usage by `threadId + turnId`. |
-
-### tokenUsage capability
-
-`tokenUsage` is a dedicated capability mounted by the bridge, with the implementation kept in `codex-token-usage-capability.js`, for reading AI reply token usage on demand. It does not expose raw gateway, app-host messages, or session text to plugins. The bridge listens for and parses token data only after a plugin calls `acquireConsumer`; `getForTurn` reads the matching reply's session token record only on a runtime cache miss. Runtime caches are pruned globally and per thread so they do not grow without bounds.
-
-```js
-const release = context.capabilities.tokenUsage.acquireConsumer("example.token-usage");
-const disposeUpdate = context.capabilities.tokenUsage.onUpdate((usage) => {
-  console.log(usage.threadId, usage.turnId, usage.inputTokens, usage.outputTokens, usage.cacheHitRate);
-});
-
-context.capabilities.tokenUsage
-  .getForTurn({ threadId, turnId })
-  .then((usage) => {
-    // usage may be null when no data can be safely associated with this reply.
-  });
-```
-
-Returned fields:
-
-| Field | Description |
-| --- | --- |
-| `threadId` | Conversation ID. |
-| `turnId` | Turn ID for the reply. |
-| `inputTokens` | Input tokens, or `null` when unknown. |
-| `outputTokens` | Output tokens, or `null` when unknown. |
-| `cachedInputTokens` | Cached input tokens, or `null` when unknown. |
-| `cacheHitRate` | `cachedInputTokens / inputTokens`, or `null` when it cannot be computed. |
-| `updatedAt` | Timestamp when the bridge normalized the record. |
-| `source` | Data source marker, for example `app-host`, `gateway`, or `session-api`. |
-
-## Current Events
-
-| Event | Source | Description |
-| --- | --- | --- |
-| `plugin:enabled-changed` | Plugin system | Fired when a plugin main switch changes. |
-| `preference:changed` | Plugin system | Fired when a setting value changes. |
-| `ipc:invoke` | bridge polyfill | Fired before the renderer invokes gateway IPC. |
-| `view:message` | bridge polyfill | Fired when the renderer handles a view message. |
-
-Example:
-
-```js
-activate(context) {
-  const dispose = context.events.on("plugin:enabled-changed", (payload) => {
-    if (payload.id === context.plugin.id) {
-      console.log("enabled:", payload.enabled);
-    }
-  });
-
-  return dispose;
-}
-```
-
-## Lifecycle
-
-- After registration, if the current scope is already active and the plugin switch is enabled, the plugin runs `activate(context)` immediately.
-- When a plugin is disabled, the plugin system calls the dispose function returned by `activate()`.
-- When a plugin is enabled again, the plugin system calls `activate(context)` again.
-- A scope is activated only once to avoid duplicate listeners.
-
-## Current Limits
-
-- Plugins are normal `<script>` files, with no sandbox or permission isolation.
-- Plugins can access the DOM directly, which also means they are responsible for compatibility and security risks.
-- Settings currently auto-renders only the main switch for each plugin. Custom plugin setting descriptors do not have a complete UI yet.
-- Plugin descriptions are not wired into the main project i18n. Plugins should provide the final display copy themselves.
+Built-in DOM, Bridge, and protocol implementations now live under `web-shell/internal/providers`; `web-shell/plugins` contains settings manifests and translations only. External plugins should declare modifications exclusively through the v2 SDK.

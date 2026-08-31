@@ -1,6 +1,8 @@
 (function () {
   const w = window;
   if (w.__OpenCodexSmartModelRouterComposerInstalled) return;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
   w.__OpenCodexSmartModelRouterComposerInstalled = true;
 
   const TRIGGER_SELECTOR = '[data-codex-intelligence-trigger="true"]';
@@ -18,10 +20,13 @@
   let syncScheduled = false;
   let linkedMenuIds = new Set();
   let linkedMenus = new Set();
-  const triggerTextObserver = new MutationObserver(() => {
-    // 只监听实际模型触发器内的文字变化，正文流式 characterData 不再进入全页观察队列。
-    if (document.visibilityState !== "hidden") scheduleSync();
-  });
+  let triggerTextDisposers = [];
+  let compatibilityHitReported = false;
+
+  function stopTriggerTextObservation() {
+    for (const dispose of triggerTextDisposers.reverse()) dispose();
+    triggerTextDisposers = [];
+  }
 
   function visibleNode(root, selector) {
     return Array.from(root.querySelectorAll(selector)).find((node) => !node.closest('[aria-hidden="true"]')) || null;
@@ -63,7 +68,7 @@
   function syncComposer() {
     syncScheduled = false;
     if (document.visibilityState === "hidden") {
-      triggerTextObserver.disconnect();
+      stopTriggerTextObservation();
       return;
     }
     const activeMenus = new Set();
@@ -72,9 +77,21 @@
     const nextLinkedMenus = new Set();
 
     const triggers = Array.from(document.querySelectorAll(TRIGGER_SELECTOR));
-    triggerTextObserver.disconnect();
+    if (triggers.length > 0 && !compatibilityHitReported) {
+      compatibilityHitReported = true;
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.smart-router.composer");
+    }
+    stopTriggerTextObservation();
     for (const trigger of triggers) {
-      triggerTextObserver.observe(trigger, { characterData: true, childList: true, subtree: true });
+      triggerTextDisposers.push(adapterHost.dom.observe({
+        key: {},
+        root: trigger,
+        options: { characterData: true, childList: true, subtree: true },
+        callback() {
+          // 只监听实际模型触发器内的文字变化，正文流式 characterData 不再进入全页观察队列。
+          if (document.visibilityState !== "hidden") scheduleSync();
+        },
+      }));
       const menuId = trigger.getAttribute("aria-controls");
       if (menuId) nextLinkedMenuIds.add(menuId);
       const menu = linkedMenu(trigger);
@@ -143,33 +160,37 @@
     });
   }
 
-  const observer = new MutationObserver((records) => {
+  const handleMainMutations = (records) => {
     // 流式回答会持续修改正文文本；只有 Composer trigger 或菜单 portal 相关变化才需要重新标记。
     if (document.visibilityState === "hidden" || !mutationsTouchComposer(records)) return;
     scheduleSync();
-  });
-  let observerActive = false;
+  };
+  let disposeMainObservation = null;
   function startComposerObservation() {
-    if (observerActive || document.visibilityState === "hidden") return;
-    observer.observe(document.documentElement, MAIN_OBSERVER_OPTIONS);
-    observerActive = true;
+    if (disposeMainObservation || document.visibilityState === "hidden") return;
+    disposeMainObservation = adapterHost.dom.observe({
+      key: {},
+      root: document.documentElement,
+      options: MAIN_OBSERVER_OPTIONS,
+      callback: handleMainMutations,
+    });
   }
 
   function stopComposerObservation() {
-    if (observerActive) observer.disconnect();
-    observerActive = false;
+    disposeMainObservation?.();
+    disposeMainObservation = null;
     // trigger 内的文字观察同样只服务可见 UI，后台不保留任何 DOM observer。
-    triggerTextObserver.disconnect();
+    stopTriggerTextObservation();
   }
 
-  document.addEventListener("visibilitychange", () => {
+  adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: () => {
     if (document.visibilityState === "hidden") {
       stopComposerObservation();
       return;
     }
     startComposerObservation();
     scheduleSync();
-  });
+  } });
   startComposerObservation();
   scheduleSync();
   // observer 安装完成才代表 Composer 适配器已注入；回执请求保持旁路，不参与 DOM 同步。

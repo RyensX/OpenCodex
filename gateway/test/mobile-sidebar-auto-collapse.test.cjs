@@ -5,7 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const PLUGIN_SOURCE = fs.readFileSync(
-  path.resolve(__dirname, "..", "..", "web-shell", "plugins", "mobile-sidebar-auto-collapse", "index.js"),
+  path.resolve(__dirname, "..", "..", "web-shell", "internal", "providers", "mobile-sidebar-auto-collapse.js"),
   "utf-8"
 );
 
@@ -126,6 +126,16 @@ function createHarness(iconPath) {
   window.OpenCodexPluginSystem = {
     registerPlugin(plugin) {
       registeredPlugin = plugin;
+    },
+  };
+  window.__OpenCodexAdapterHost = {
+    events: {
+      observe({ type, capture = false, callback }) {
+        listeners.set(type, { capture, handler: callback });
+        return () => {
+          if (listeners.get(type)?.handler === callback) listeners.delete(type);
+        };
+      },
     },
   };
   window.window = window;

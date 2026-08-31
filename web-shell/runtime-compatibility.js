@@ -39,14 +39,22 @@
   const helpContent = {
     overall: {
       title: "总状态",
-      description: "综合定位、应用、验证、实际命中和回退结果。功能组会原子检查必需修改点；可选点失败时，功能组显示降级而不是直接不可用。",
+      description: "综合单个修改点的定位、应用、验证、实际命中和回退结果；分类组只负责展示，不参与总体状态计算。",
       statuses: [
         ["healthy", "已命中", "修改点已经就绪，并且对应代码路径在本次运行中至少实际执行过一次。"],
         ["ready", "已就绪", "定位、应用和验证已经完成，但对应路径尚未在本次运行中实际执行；这不代表失败。"],
         ["pending", "待检测", "定位、应用或验证仍未完成，当前还不能得出最终结论。"],
         ["degraded", "已降级", "修改点正在使用官方行为或其他回退方案；功能仍可继续，但增强能力可能不可用。"],
-        ["unavailable", "不可用", "定位、应用或验证失败，或者功能组中的必需修改点不可用。"],
-        ["disabled", "已关闭", "修改点或功能组被配置关闭，或不适用于当前平台和运行时。"],
+        ["unavailable", "不可用", "修改点的定位、应用或验证失败。"],
+        ["disabled", "已关闭", "修改点被配置关闭，或不适用于当前平台和运行时。"],
+      ],
+    },
+    adapter: {
+      title: "注入类别",
+      description: "按“修改点直接使用的高级适配器 → 最终接触真实环境的底层适配器”展示完整依赖链。",
+      statuses: [
+        ["composite", "高级适配器", "封装稳定语义并组合一个或多个底层适配器，修改点应优先使用。"],
+        ["terminal", "底层适配器", "提供通用定位、协议、Hook、静态资源、环境、进程或产物能力。"],
       ],
     },
     location: {
@@ -149,71 +157,52 @@
     }
   }
 
-  function statusFromIndependentPoints(points) {
-    const statuses = points.map((point) => point.status);
-    if (statuses.length === 0) return "pending";
-    if (statuses.every((status) => status === "disabled")) return "disabled";
-    if (statuses.includes("unavailable")) return "unavailable";
-    if (statuses.includes("degraded") || statuses.includes("disabled")) return "degraded";
-    if (statuses.includes("pending")) return "pending";
-    if (statuses.includes("ready")) return "ready";
-    return "healthy";
-  }
-
   function groupedPoints(snapshot) {
     const points = snapshot.points || [];
     const pointById = new Map(points.map((point) => [point.id, point]));
-    const assigned = new Set();
-    const groups = [];
-    for (const feature of snapshot.features || []) {
-      const entries = [];
-      for (const id of feature.required || []) {
-        const point = pointById.get(id);
-        if (!point) continue;
-        assigned.add(id);
-        entries.push({ point, role: "required" });
-      }
-      for (const id of feature.optional || []) {
-        const point = pointById.get(id);
-        if (!point) continue;
-        assigned.add(id);
-        entries.push({ point, role: "optional" });
-      }
-      groups.push({ feature, entries, independent: false });
-    }
-
-    const independentEntries = points
-      .filter((point) => !assigned.has(point.id))
-      .map((point) => ({ point, role: "independent" }));
-    if (independentEntries.length > 0) {
-      const independentPoints = independentEntries.map((entry) => entry.point);
-      groups.push({
-        independent: true,
-        feature: {
-          id: "feature.independent-points",
-          description: "基础与独立兼容修改点",
-          status: statusFromIndependentPoints(independentPoints),
-          fallback: "各修改点按自身策略独立回退",
-          required: [],
-          optional: [],
-        },
-        entries: independentEntries,
-      });
-    }
-    return groups;
+    return (snapshot.groups || []).map((group) => ({
+      group,
+      entries: (group.pointIds || []).map((id) => pointById.get(id)).filter(Boolean),
+    }));
   }
 
   function pointMatchesFilters(point) {
-    const category = byId("categoryFilter").value;
+    const adapter = byId("adapterFilter").value;
     const status = byId("statusFilter").value;
-    return (!category || point.category === category) && (!status || point.status === status);
+    return (!adapter || (point.adapterChainIds || []).includes(adapter)) && (!status || point.status === status);
   }
 
-  function pointRole(role) {
-    const label = document.createElement("span");
-    label.className = `point-role point-role--${role}`;
-    label.textContent = role === "required" ? "必需" : role === "optional" ? "可选" : "独立";
-    return label;
+  function populateAdapterFilter(snapshot) {
+    const select = byId("adapterFilter");
+    const selected = select.value;
+    const options = [new Option("全部", "")];
+    for (const adapter of snapshot.adapterTypes || []) {
+      options.push(new Option(adapter.name, adapter.id));
+    }
+    select.replaceChildren(...options);
+    if (options.some((option) => option.value === selected)) select.value = selected;
+  }
+
+  function adapterCell(point, adapterById) {
+    const cell = document.createElement("td");
+    const chain = document.createElement("div");
+    chain.className = "adapter-chain";
+    for (const [index, id] of (point.adapterChainIds || []).entries()) {
+      const adapter = adapterById.get(id);
+      if (index > 0) {
+        const arrow = document.createElement("span");
+        arrow.className = "adapter-chain-arrow";
+        arrow.textContent = "›";
+        chain.append(arrow);
+      }
+      const item = document.createElement("span");
+      item.className = `adapter-chain-item adapter-chain-item--${adapter?.kind || "unknown"}`;
+      item.textContent = adapter?.name || id;
+      item.title = adapter?.description || id;
+      chain.append(item);
+    }
+    cell.append(chain);
+    return cell;
   }
 
   function phaseCell(kind, status, textOverride = "") {
@@ -226,8 +215,7 @@
     return cell;
   }
 
-  function pointRow(entry) {
-    const point = entry.point;
+  function pointRow(point, adapterById) {
     const row = document.createElement("tr");
     row.className = "point-row";
     const identity = document.createElement("td");
@@ -235,7 +223,7 @@
     identityLine.className = "point-identity";
     const code = document.createElement("code");
     code.textContent = point.id;
-    identityLine.append(code, pointRole(entry.role));
+    identityLine.append(code);
     const description = document.createElement("div");
     description.className = "point-description";
     description.textContent = point.description;
@@ -260,6 +248,7 @@
       : phaseLabels.exercise[point.exercise?.status] || "未命中";
     row.append(
       identity,
+      adapterCell(point, adapterById),
       overall,
       phaseCell("location", point.location?.status),
       phaseCell("application", point.application?.status),
@@ -270,12 +259,12 @@
   }
 
   function groupHeader(group, visibleCount) {
-    const feature = group.feature;
+    const definition = group.group;
     const row = document.createElement("tr");
     row.className = "feature-group-row";
-    row.dataset.status = feature.status;
+    row.dataset.status = definition.status;
     const cell = document.createElement("td");
-    cell.colSpan = 6;
+    cell.colSpan = 7;
     const section = document.createElement("section");
     section.className = "feature-group";
     const main = document.createElement("div");
@@ -283,41 +272,33 @@
     const identity = document.createElement("div");
     identity.className = "feature-identity";
     const title = document.createElement("h3");
-    title.textContent = feature.description;
+    title.textContent = definition.name;
     const code = document.createElement("code");
-    code.textContent = feature.id;
-    identity.append(title, code);
+    code.textContent = definition.id;
+    const titleLine = document.createElement("div");
+    titleLine.className = "feature-title-line";
+    titleLine.append(title, code);
+    identity.append(titleLine);
 
     const overview = document.createElement("div");
     overview.className = "feature-overview";
-    overview.append(badge(feature.status));
+    overview.append(badge(definition.status));
     const counts = document.createElement("span");
     counts.className = "feature-counts";
-    counts.textContent = group.independent
-      ? `${group.entries.length} 个独立点`
-      : `${feature.required.length} 个必需 · ${feature.optional.length} 个可选`;
+    counts.textContent = `${group.entries.length} 个修改点`;
     overview.append(counts);
     main.append(identity, overview);
 
     const details = document.createElement("div");
     details.className = "feature-details";
-    const fallbackLabel = document.createElement("span");
-    fallbackLabel.className = "feature-details-label";
-    fallbackLabel.textContent = "回退策略";
-    const fallback = document.createElement("span");
-    fallback.className = "feature-fallback";
-    fallback.textContent = feature.fallback || "无";
+    const description = document.createElement("span");
+    description.className = "feature-description";
+    description.textContent = definition.description;
     const visible = document.createElement("span");
     visible.className = "feature-visible muted";
-    visible.textContent = `显示 ${visibleCount} / ${group.entries.length}`;
-    details.append(fallbackLabel, fallback, visible);
+    visible.textContent = visibleCount === group.entries.length ? "" : `筛选后显示 ${visibleCount} / ${group.entries.length}`;
+    details.append(description, visible);
     section.append(main, details);
-    if (!feature.enabled && feature.disabledReason) {
-      const disabledReason = document.createElement("p");
-      disabledReason.className = "feature-disabled-reason point-reason";
-      disabledReason.textContent = feature.disabledReason;
-      section.append(disabledReason);
-    }
     cell.append(section);
     row.append(cell);
     return row;
@@ -325,15 +306,16 @@
 
   function renderPoints(snapshot) {
     const table = byId("pointsTable");
+    const adapterById = new Map((snapshot.adapterTypes || []).map((adapter) => [adapter.id, adapter]));
     for (const body of Array.from(table.tBodies)) body.remove();
     let visiblePointCount = 0;
     for (const group of groupedPoints(snapshot)) {
-      const visibleEntries = group.entries.filter((entry) => pointMatchesFilters(entry.point));
+      const visibleEntries = group.entries.filter(pointMatchesFilters);
       if (visibleEntries.length === 0) continue;
       const body = document.createElement("tbody");
       body.className = "point-group";
       body.append(groupHeader(group, visibleEntries.length));
-      for (const entry of visibleEntries) body.append(pointRow(entry));
+      for (const point of visibleEntries) body.append(pointRow(point, adapterById));
       table.append(body);
       visiblePointCount += visibleEntries.length;
     }
@@ -345,7 +327,9 @@
     const runtime = snapshot.runtime || {};
     const generatedAt = new Date(snapshot.generatedAt);
     const reportTime = Number.isNaN(generatedAt.getTime()) ? "未知时间" : generatedAt.toLocaleString();
-    byId("runtimeIdentity").textContent = `Codex ${runtime.version || "unknown"} · build ${runtime.build || "unknown"} · 报告 ${reportTime}`;
+    const legacySuffix = snapshot.sourceSchemaVersion === 1 ? " · 旧版报告（只读）" : "";
+    byId("runtimeIdentity").textContent = `Codex ${runtime.version || "unknown"} · build ${runtime.build || "unknown"} · 报告 ${reportTime}${legacySuffix}`;
+    populateAdapterFilter(snapshot);
     renderSummary(snapshot);
     renderPoints(snapshot);
   }
@@ -419,8 +403,8 @@
 
   byId("refreshButton").addEventListener("click", () => void refresh());
   byId("backButton").addEventListener("click", () => history.length > 1 ? history.back() : location.assign("/"));
-  byId("categoryFilter").addEventListener("change", () => renderPoints(state.snapshot || { points: [], features: [] }));
-  byId("statusFilter").addEventListener("change", () => renderPoints(state.snapshot || { points: [], features: [] }));
+  byId("adapterFilter").addEventListener("change", () => renderPoints(state.snapshot || { points: [], groups: [], adapterTypes: [] }));
+  byId("statusFilter").addEventListener("change", () => renderPoints(state.snapshot || { points: [], groups: [], adapterTypes: [] }));
   document.addEventListener("click", (event) => {
     const trigger = event.target.closest?.("[data-help]");
     if (trigger) openHelp(trigger.dataset.help, trigger);

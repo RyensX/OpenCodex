@@ -1,0 +1,12 @@
+{
+  "id": "opencodex.mobile-sidebar-auto-collapse",
+  "name": "Mobile sidebar auto collapse",
+  "label": "移动端侧栏优化",
+  "labelKey": "plugin.mobileSidebarAutoCollapse.label",
+  "desc": "在移动端打开会话或新建会话后自动收起侧栏。",
+  "descKey": "plugin.mobileSidebarAutoCollapse.desc",
+  "enableStorageKey": "mobileSidebarAutoCollapse",
+  "defaultEnabled": true,
+  "surface": "renderer",
+  "order": 20
+}

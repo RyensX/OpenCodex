@@ -1,0 +1,12 @@
+{
+  "id": "opencodex.mobile-keyboard-optimization",
+  "name": "Mobile keyboard optimization",
+  "label": "移动端软键盘优化",
+  "labelKey": "plugin.mobileKeyboardOptimization.label",
+  "desc": "优化移动端输入框聚焦和视口高度，减少软键盘遮挡。",
+  "descKey": "plugin.mobileKeyboardOptimization.desc",
+  "enableStorageKey": "mobileKeyboardOptimization",
+  "defaultEnabled": true,
+  "surface": "renderer",
+  "order": 10
+}

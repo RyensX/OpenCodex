@@ -257,10 +257,13 @@
     order: 30,
     activate(context) {
       const tokenUsage = context.capabilities?.tokenUsage;
+      const adapterHost = w.__OpenCodexAdapterHost;
       if (
         context.scope !== "renderer" ||
         !document ||
         document.__opencodexTokenUsageInlineInstalled ||
+        !adapterHost?.dom?.observe ||
+        !adapterHost?.events?.observe ||
         !tokenUsage ||
         typeof tokenUsage.acquireConsumer !== "function" ||
         typeof tokenUsage.getForTurn !== "function"
@@ -514,7 +517,7 @@
         scheduleScanFlush();
       };
 
-      const mutationObserver = new MutationObserver((mutations) => {
+      const handleMutations = (mutations) => {
         // 后台流式 DOM 不做按钮候选查询；回到前台后从根节点补扫一次即可恢复全部徽标。
         if (document.visibilityState === "hidden") return;
         let removedNodes = false;
@@ -529,16 +532,21 @@
           }
         }
         if (removedNodes) scheduleScanFlush();
-      });
-      let mutationObservationActive = false;
+      };
+      const mutationObservationKey = {};
+      let disposeMutationObservation = null;
       const startMutationObservation = () => {
-        if (mutationObservationActive || document.visibilityState === "hidden") return;
-        mutationObserver.observe(document.documentElement, { childList: true, subtree: true });
-        mutationObservationActive = true;
+        if (disposeMutationObservation || document.visibilityState === "hidden") return;
+        disposeMutationObservation = adapterHost.dom.observe({
+          key: mutationObservationKey,
+          root: document.documentElement,
+          options: { childList: true, subtree: true },
+          callback: handleMutations,
+        });
       };
       const stopMutationObservation = () => {
-        if (mutationObservationActive) mutationObserver.disconnect();
-        mutationObservationActive = false;
+        disposeMutationObservation?.();
+        disposeMutationObservation = null;
       };
 
       const handleVisibility = () => {
@@ -587,7 +595,12 @@
         scanRoot(document.documentElement);
         startMutationObservation();
       }
-      document.addEventListener("visibilitychange", handleVisibility);
+      const disposeVisibility = adapterHost.events.observe({
+        key: {},
+        target: document,
+        type: "visibilitychange",
+        callback: handleVisibility,
+      });
 
       return () => {
         disposed = true;
@@ -595,7 +608,7 @@
         disposeUpdate();
         deactivateConsumer();
         stopMutationObservation();
-        document.removeEventListener("visibilitychange", handleVisibility);
+        disposeVisibility();
         intersectionObserver?.disconnect();
         for (const element of Array.from(document.querySelectorAll(`[${BADGE_ATTR}]`))) {
           element.remove();

@@ -1,13 +1,8 @@
-const COMPATIBILITY_REPORT_SCHEMA_VERSION = 1;
-
-const POINT_CATEGORIES = Object.freeze([
-  "web.runtime",
-  "gateway.runtime",
-  "static.cache",
-]);
+const COMPATIBILITY_REPORT_SCHEMA_VERSION = 2;
 
 const POINT_ID_RE = /^(web\.runtime|gateway\.runtime|static\.cache)\.[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
-const FEATURE_ID_RE = /^feature\.[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+const GROUP_ID_RE = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+const ADAPTER_ID_RE = /^adapter\.[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const FINGERPRINT_RE = /^[a-zA-Z0-9._:-]{1,160}$/;
 const HIT_EVENT_INTERVAL_MS = 5000;
 
@@ -36,10 +31,6 @@ function safeIdentityPart(value) {
 
 function runtimeIdentityKey(identity) {
   return `${identity.version}\0${identity.build}\0${identity.bundleHash}`;
-}
-
-function pointCategoryFromId(id) {
-  return POINT_CATEGORIES.find((category) => id.startsWith(`${category}.`)) || "";
 }
 
 function sanitizeCompatibilityText(value, fallback = "") {
@@ -85,41 +76,74 @@ function normalizedPointDefinition(definition) {
   if (!definition || typeof definition !== "object") throw new TypeError("Point definition is required");
   const id = String(definition.id || "").trim();
   if (!POINT_ID_RE.test(id)) throw new TypeError(`Invalid compatibility point id: ${id || "<empty>"}`);
+  const groupId = String(definition.groupId || "").trim();
+  if (!GROUP_ID_RE.test(groupId)) throw new TypeError(`Invalid compatibility group id: ${groupId || "<empty>"}`);
+  const directAdapterIds = Array.from(new Set(Array.isArray(definition.directAdapterIds) ? definition.directAdapterIds.map(String) : []));
+  const adapterChainIds = Array.from(new Set(Array.isArray(definition.adapterChainIds) ? definition.adapterChainIds.map(String) : []));
+  if (directAdapterIds.length === 0 || adapterChainIds.length === 0) {
+    throw new TypeError(`Compatibility point ${id} must declare adapter references`);
+  }
+  if (directAdapterIds.some((adapterId) => !ADAPTER_ID_RE.test(adapterId))) {
+    throw new TypeError(`Compatibility point ${id} has an invalid direct adapter id`);
+  }
+  if (adapterChainIds.some((adapterId) => !ADAPTER_ID_RE.test(adapterId))) {
+    throw new TypeError(`Compatibility point ${id} has an invalid adapter chain id`);
+  }
+  if (directAdapterIds.some((adapterId) => !adapterChainIds.includes(adapterId))) {
+    throw new TypeError(`Compatibility point ${id} direct adapters must be present in its complete chain`);
+  }
   return Object.freeze({
     id,
-    category: pointCategoryFromId(id),
     description: sanitizeCompatibilityText(definition.description),
     owner: sanitizeCompatibilityText(definition.owner || "opencodex"),
+    groupId,
+    directAdapterIds: Object.freeze(directAdapterIds),
+    adapterChainIds: Object.freeze(adapterChainIds),
   });
 }
 
-function normalizedFeatureDefinition(definition) {
-  if (!definition || typeof definition !== "object") throw new TypeError("Feature definition is required");
+function normalizedGroupDefinition(definition) {
+  if (!definition || typeof definition !== "object") throw new TypeError("Group definition is required");
   const id = String(definition.id || "").trim();
-  if (!FEATURE_ID_RE.test(id)) throw new TypeError(`Invalid compatibility feature id: ${id || "<empty>"}`);
-  const required = Array.from(new Set(Array.isArray(definition.required) ? definition.required.map(String) : []));
-  const optional = Array.from(new Set(Array.isArray(definition.optional) ? definition.optional.map(String) : []))
-    .filter((pointId) => !required.includes(pointId));
+  if (!GROUP_ID_RE.test(id)) throw new TypeError(`Invalid compatibility group id: ${id || "<empty>"}`);
+  const order = Number(definition.order);
+  if (!Number.isFinite(order)) throw new TypeError(`Compatibility group ${id} must declare a finite order`);
   return Object.freeze({
     id,
+    name: sanitizeCompatibilityText(definition.name),
     description: sanitizeCompatibilityText(definition.description),
-    fallback: sanitizeCompatibilityText(definition.fallback),
-    required: Object.freeze(required),
-    optional: Object.freeze(optional),
+    order,
+  });
+}
+
+function normalizedAdapterDefinition(definition) {
+  if (!definition || typeof definition !== "object") throw new TypeError("Adapter definition is required");
+  const id = String(definition.id || "").trim();
+  if (!ADAPTER_ID_RE.test(id)) throw new TypeError(`Invalid compatibility adapter id: ${id || "<empty>"}`);
+  const kind = definition.kind === "composite" ? "composite" : definition.kind === "terminal" ? "terminal" : "";
+  if (!kind) throw new TypeError(`Compatibility adapter ${id} has an invalid kind`);
+  return Object.freeze({
+    id,
+    name: sanitizeCompatibilityText(definition.name),
+    description: sanitizeCompatibilityText(definition.description),
+    kind,
+    dependencies: Object.freeze(Array.from(new Set(Array.isArray(definition.dependencies) ? definition.dependencies.map(String) : []))),
   });
 }
 
 function freshPointState(definition, generation, at) {
   return {
     id: definition.id,
-    category: definition.category,
     description: definition.description,
     owner: definition.owner,
+    groupId: definition.groupId,
+    directAdapterIds: definition.directAdapterIds,
+    adapterChainIds: definition.adapterChainIds,
     generation,
     location: {
       status: "unresolved",
       locatorRevision: "",
-      strategyId: "",
+      adapterId: "",
       expectedCandidates: 0,
       candidateCount: 0,
       targetHash: "",
@@ -173,15 +197,14 @@ function pointSummaryStatus(state) {
   return state.exercise.status === "active" ? "healthy" : "ready";
 }
 
-function featureSummaryStatus(feature, pointSnapshots) {
-  if (!feature.enabled) return "disabled";
-  const requiredStatuses = feature.definition.required.map((id) => pointSnapshots.get(id).status);
-  const optionalStatuses = feature.definition.optional.map((id) => pointSnapshots.get(id).status);
-  if (requiredStatuses.some((status) => status === "unavailable" || status === "disabled")) return "unavailable";
-  if (requiredStatuses.includes("degraded")) return "degraded";
-  if (requiredStatuses.includes("pending")) return "pending";
-  if (optionalStatuses.some((status) => ["unavailable", "degraded", "disabled"].includes(status))) return "degraded";
-  if (requiredStatuses.includes("ready") || optionalStatuses.includes("ready")) return "ready";
+function groupDisplayStatus(pointSnapshots) {
+  const statuses = pointSnapshots.map((point) => point.status);
+  if (statuses.length === 0) return "pending";
+  if (statuses.every((status) => status === "disabled")) return "disabled";
+  if (statuses.includes("unavailable")) return "unavailable";
+  if (statuses.includes("degraded") || statuses.includes("disabled")) return "degraded";
+  if (statuses.includes("pending")) return "pending";
+  if (statuses.includes("ready")) return "ready";
   return "healthy";
 }
 
@@ -198,7 +221,8 @@ function verificationOutcome(value) {
 
 function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = () => Date.now() } = {}) {
   const points = new Map();
-  const features = new Map();
+  const groups = new Map();
+  const adapterTypes = new Map();
   const listeners = new Set();
   let runtimeIdentity = normalizedRuntimeIdentity(getRuntimeIdentity());
   let runtimeKey = runtimeIdentityKey(runtimeIdentity);
@@ -246,13 +270,6 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     const point = points.get(String(id));
     if (!point) throw new CompatibilityStateError(`Unknown compatibility point: ${id}`, "COMPATIBILITY_POINT_UNKNOWN");
     return point;
-  }
-
-  function requiredFeature(id) {
-    synchronizeRuntime();
-    const feature = features.get(String(id));
-    if (!feature) throw new CompatibilityStateError(`Unknown compatibility feature: ${id}`, "COMPATIBILITY_FEATURE_UNKNOWN");
-    return feature;
   }
 
   function touch(point, eventType = "point-changed") {
@@ -468,9 +485,11 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     const state = point.state;
     return {
       id: state.id,
-      category: state.category,
       description: state.description,
       owner: state.owner,
+      groupId: state.groupId,
+      directAdapterIds: [...state.directAdapterIds],
+      adapterChainIds: [...state.adapterChainIds],
       generation: state.generation,
       status: pointSummaryStatus(state),
       location: { ...state.location },
@@ -490,6 +509,14 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     synchronizeRuntime();
     const normalized = normalizedPointDefinition(definition);
     if (points.has(normalized.id)) throw new CompatibilityStateError(`Duplicate compatibility point: ${normalized.id}`);
+    if (!groups.has(normalized.groupId)) {
+      throw new CompatibilityStateError(`Point ${normalized.id} references unknown group ${normalized.groupId}`);
+    }
+    for (const adapterId of normalized.adapterChainIds) {
+      if (!adapterTypes.has(adapterId)) {
+        throw new CompatibilityStateError(`Point ${normalized.id} references unknown adapter ${adapterId}`);
+      }
+    }
     points.set(normalized.id, {
       definition: normalized,
       state: freshPointState(normalized, 0, timestamp()),
@@ -501,23 +528,34 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     return normalized;
   }
 
-  function registerFeature(definition) {
+  function registerGroup(definition) {
     synchronizeRuntime();
-    const normalized = normalizedFeatureDefinition(definition);
-    if (features.has(normalized.id)) throw new CompatibilityStateError(`Duplicate compatibility feature: ${normalized.id}`);
-    for (const pointId of [...normalized.required, ...normalized.optional]) {
-      if (!points.has(pointId)) {
-        throw new CompatibilityStateError(`Feature ${normalized.id} references unknown point ${pointId}`);
+    const normalized = normalizedGroupDefinition(definition);
+    if (groups.has(normalized.id)) throw new CompatibilityStateError(`Duplicate compatibility group: ${normalized.id}`);
+    groups.set(normalized.id, normalized);
+    return normalized;
+  }
+
+  function registerAdapterType(definition) {
+    synchronizeRuntime();
+    const normalized = normalizedAdapterDefinition(definition);
+    if (adapterTypes.has(normalized.id)) throw new CompatibilityStateError(`Duplicate compatibility adapter: ${normalized.id}`);
+    for (const dependency of normalized.dependencies) {
+      if (!adapterTypes.has(dependency)) {
+        throw new CompatibilityStateError(`Adapter ${normalized.id} references unknown dependency ${dependency}`);
       }
     }
-    features.set(normalized.id, { definition: normalized, enabled: true, disabledReason: "" });
+    adapterTypes.set(normalized.id, normalized);
     return normalized;
   }
 
   function beginResolution(id, options = {}) {
     const point = requiredPoint(id);
     const locatorRevision = normalizedFingerprint(options.locatorRevision, "locatorRevision");
-    const strategyId = normalizedFingerprint(options.strategyId, "strategyId");
+    const adapterId = normalizedFingerprint(options.adapterId, "adapterId");
+    if (!point.definition.adapterChainIds.includes(adapterId)) {
+      throw new TypeError(`Adapter ${adapterId} is not declared by point ${point.definition.id}`);
+    }
     const expectedCandidates = normalizedPositiveInteger(options.expectedCandidates || 1, "expectedCandidates");
     const attemptToken = Symbol(`resolution:${point.definition.id}`);
     point.currentAttempt = attemptToken;
@@ -529,7 +567,7 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     point.state.location = {
       status: "resolving",
       locatorRevision,
-      strategyId,
+      adapterId,
       expectedCandidates,
       candidateCount: 0,
       contextHash: "",
@@ -624,44 +662,54 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     touch(point);
   }
 
-  function setFeatureEnabled(id, enabled, reason = "") {
-    const feature = requiredFeature(id);
-    feature.enabled = enabled === true;
-    feature.disabledReason = feature.enabled ? "" : sanitizeCompatibilityText(reason, "Disabled by configuration");
-    emit("feature-changed", feature.definition.id);
+  function setPointsEnabled(ids, enabled, reason = "") {
+    for (const id of ids || []) {
+      const point = requiredPoint(id);
+      if (enabled === true) {
+        if (point.state.application.status !== "disabled") continue;
+        point.state = freshPointState(point.definition, point.state.generation + 1, timestamp());
+        point.currentAttempt = null;
+        point.currentHandle = null;
+        point.lastHitEventAtMs = 0;
+        point.lastHitAtMs = 0;
+        touch(point);
+      } else {
+        disablePoint(id, reason);
+      }
+    }
   }
 
   function snapshot() {
     synchronizeRuntime();
     const pointItems = Array.from(points.values()).map(pointSnapshot).sort((left, right) => left.id.localeCompare(right.id));
-    const pointSnapshots = new Map(pointItems.map((point) => [point.id, point]));
-    const featureItems = Array.from(features.values())
-      .map((feature) => {
-        const status = featureSummaryStatus(feature, pointSnapshots);
-        const requiredStatuses = feature.definition.required.map((id) => pointSnapshots.get(id).status);
-        const canActivate =
-          feature.enabled &&
-          requiredStatuses.every((pointStatus) => pointStatus === "healthy" || pointStatus === "ready");
+    const groupItems = Array.from(groups.values())
+      .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+      .map((group) => {
+        const groupPoints = pointItems.filter((point) => point.groupId === group.id);
         return {
-          id: feature.definition.id,
-          description: feature.definition.description,
-          enabled: feature.enabled,
-          disabledReason: feature.disabledReason,
-          status,
-          canActivate,
-          fallback: feature.definition.fallback,
-          required: [...feature.definition.required],
-          optional: [...feature.definition.optional],
+          id: group.id,
+          name: group.name,
+          description: group.description,
+          order: group.order,
+          status: groupDisplayStatus(groupPoints),
+          pointIds: groupPoints.map((point) => point.id),
         };
-      })
-      .sort((left, right) => left.id.localeCompare(right.id));
-    const featureStatuses = featureItems.filter((feature) => feature.enabled).map((feature) => feature.status);
+      });
+    const adapterItems = Array.from(adapterTypes.values()).map((adapter) => ({
+      id: adapter.id,
+      name: adapter.name,
+      description: adapter.description,
+      kind: adapter.kind,
+      dependencies: [...adapter.dependencies],
+    }));
     const pointStatuses = pointItems.map((point) => point.status);
-    // 顶层状态同时覆盖功能组和尚未归组的底层点，Runner 等基础失败不能被功能组的 pending 掩盖。
-    const statuses = [...featureStatuses, ...pointStatuses];
-    const status = statuses.includes("unavailable")
+    // 分类组只是展示索引；总体状态必须只由修改点计算，避免同一失败被重复聚合。
+    const statuses = pointStatuses;
+    const status = statuses.length > 0 && statuses.every((pointStatus) => pointStatus === "disabled")
+      ? "disabled"
+      : statuses.includes("unavailable")
       ? "unavailable"
-      : statuses.includes("degraded")
+      : statuses.includes("degraded") || statuses.includes("disabled")
         ? "degraded"
         : statuses.includes("pending")
           ? "pending"
@@ -674,30 +722,31 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
       runtimeGeneration,
       runtime: { ...runtimeIdentity },
       status,
+      groups: groupItems,
+      adapterTypes: adapterItems,
       points: pointItems,
-      features: featureItems,
     };
   }
 
   return Object.freeze({
+    registerGroup,
+    registerGroups(definitions) {
+      return Array.from(definitions || [], registerGroup);
+    },
+    registerAdapterType,
+    registerAdapterTypes(definitions) {
+      return Array.from(definitions || [], registerAdapterType);
+    },
     registerPoint,
     registerPoints(definitions) {
       return Array.from(definitions || [], registerPoint);
     },
-    registerFeature,
-    registerFeatures(definitions) {
-      return Array.from(definitions || [], registerFeature);
-    },
     beginResolution,
     disablePoint,
     useFallback,
-    setFeatureEnabled,
+    setPointsEnabled,
     point(id) {
       return pointSnapshot(requiredPoint(id));
-    },
-    feature(id) {
-      const featureId = requiredFeature(id).definition.id;
-      return snapshot().features.find((item) => item.id === featureId);
     },
     snapshot,
     onChanged(listener) {
@@ -711,10 +760,8 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
 module.exports = {
   COMPATIBILITY_REPORT_SCHEMA_VERSION,
   HIT_EVENT_INTERVAL_MS,
-  POINT_CATEGORIES,
   CompatibilityStateError,
   createCompatibilityRegistry,
   normalizedRuntimeIdentity,
-  pointCategoryFromId,
   sanitizeCompatibilityText,
 };

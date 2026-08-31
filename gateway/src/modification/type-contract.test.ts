@@ -1,0 +1,156 @@
+import {
+  ArtifactBuildDeclaration,
+  ProcessInterceptionDeclaration,
+  RuntimeEnvironmentDeclaration,
+  StaticResourceDeclaration,
+  RuntimeViewDeclaration,
+  createArtifactBuildApi,
+  createProcessInterceptionApi,
+  createProtocolPipelineApi,
+  createRuntimeEnvironmentApi,
+  createRuntimeViewApi,
+  createStaticResourceApi,
+  defineArtifactTarget,
+  defineEnvironmentKey,
+  defineProcessTarget,
+  defineResourceLocator,
+  defineResourceTarget,
+  defineProtocolChannel,
+  defineProtocolSchema,
+  defineViewLocator,
+  defineViewSlot,
+  defineViewTarget,
+} from "./contracts";
+import { ProtocolDeclaration } from "./contracts";
+import { defineAdapter, defineCapability, defineSignal } from "./sdk";
+
+interface ThreadActionModel {
+  readonly turnId: string;
+}
+
+interface SidebarModel {
+  readonly threadId: string;
+}
+
+const viewAdapter = defineAdapter<RuntimeViewDeclaration>({
+  id: "adapter.type-test-view",
+  name: "类型测试视图",
+  description: "只用于编译期接口约束",
+  kind: "terminal",
+});
+const view = createRuntimeViewApi(viewAdapter);
+const threadTarget = defineViewTarget("view.thread-actions", defineViewLocator<ThreadActionModel>("locator.thread-actions"));
+const sidebarTarget = defineViewTarget("view.sidebar", defineViewLocator<SidebarModel>("locator.sidebar"));
+const threadSlot = defineViewSlot("slot.thread-after-fork", threadTarget);
+const sidebarSlot = defineViewSlot("slot.sidebar-footer", sidebarTarget);
+const usageSignal = defineSignal<{ readonly input: number }>("signal.token-usage");
+
+view.mount({
+  target: threadTarget,
+  slot: threadSlot,
+  source: usageSignal,
+  render({ data, model, ui }) {
+    return ui.text(`${model.turnId}:${data.input}`);
+  },
+});
+
+view.mount({
+  target: threadTarget,
+  // @ts-expect-error Sidebar 槽位不能挂载到线程操作区。
+  slot: sidebarSlot,
+  source: usageSignal,
+  render({ ui }) {
+    return ui.text("invalid");
+  },
+});
+
+const protocolAdapter = defineAdapter<ProtocolDeclaration>({
+  id: "adapter.type-test-protocol",
+  name: "类型测试协议",
+  description: "只用于编译期 Schema 约束",
+  kind: "terminal",
+});
+const protocol = createProtocolPipelineApi(protocolAdapter);
+const numberChannel = defineProtocolChannel<number>("channel.number");
+const stringSchema = defineProtocolSchema<string, string>("schema.string", (value) => value);
+
+protocol.observe({
+  channel: numberChannel,
+  // @ts-expect-error number Channel 不能使用 string Schema。
+  schema: stringSchema,
+  publishTo: defineSignal<string>("signal.string"),
+  map: (value) => value,
+});
+
+void sidebarTarget;
+
+const environmentAdapter = defineAdapter<RuntimeEnvironmentDeclaration>({
+  id: "adapter.type-test-environment",
+  name: "类型测试环境",
+  description: "只用于编译期环境值约束",
+  kind: "terminal",
+});
+const environment = createRuntimeEnvironmentApi(environmentAdapter);
+const timeoutKey = defineEnvironmentKey<number>("environment.timeout", "pre-bootstrap");
+environment.provide({
+  key: timeoutKey,
+  // @ts-expect-error number 环境键不能接收 string。
+  value: "slow",
+});
+
+interface LaunchRequest {
+  readonly executable: string;
+}
+const processAdapter = defineAdapter<ProcessInterceptionDeclaration>({
+  id: "adapter.type-test-process",
+  name: "类型测试进程",
+  description: "只用于编译期进程请求约束",
+  kind: "terminal",
+});
+const processApi = createProcessInterceptionApi(processAdapter);
+const launchTarget = defineProcessTarget<LaunchRequest, number>("process.launch");
+processApi.intercept({
+  target: launchTarget,
+  handle({ proceed }) {
+    // @ts-expect-error 进程目标的请求结构不能用字符串替代。
+    return proceed("invalid");
+  },
+});
+
+interface BundleSpec {
+  readonly platform: "mac" | "win";
+}
+const artifactAdapter = defineAdapter<ArtifactBuildDeclaration>({
+  id: "adapter.type-test-artifact",
+  name: "类型测试产物",
+  description: "只用于编译期产物规格约束",
+  kind: "terminal",
+});
+const artifacts = createArtifactBuildApi(artifactAdapter);
+const bundleTarget = defineArtifactTarget<BundleSpec, Uint8Array>("artifact.runner-bundle");
+artifacts.build({
+  target: bundleTarget,
+  // @ts-expect-error platform 必须是目标声明允许的平台。
+  spec: { platform: "linux" },
+  publishTo: defineCapability<Uint8Array>("capability.runner-bytes"),
+});
+
+const staticAdapter = defineAdapter<StaticResourceDeclaration>({
+  id: "adapter.type-test-static",
+  name: "类型测试静态资源",
+  description: "只用于编译期资源与 Locator 约束",
+  kind: "terminal",
+});
+const staticResources = createStaticResourceApi(staticAdapter);
+const htmlResource = defineResourceTarget<{ html: string }>("resource.renderer-html");
+const binaryLocator = defineResourceLocator<Uint8Array, number>("locator.binary-offset");
+staticResources.transform({
+  resource: htmlResource,
+  // @ts-expect-error HTML 资源不能使用二进制偏移 Locator。
+  locator: binaryLocator,
+  expectedCandidates: 1,
+  transform(document) {
+    return document;
+  },
+  verify: () => true,
+});

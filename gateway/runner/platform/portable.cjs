@@ -290,16 +290,14 @@ async function createPortableRunner({ layout, runtimeDir, logger, runCompatibili
 
   runCompatibility(
     "static.cache.runner.portable-layout",
-    () => ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath, markerPath, logger }),
-    "portable-runtime-copy"
+    () => ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath, markerPath, logger })
   );
   // app.asar 是 OpenCodex gateway 壳，必须每次按当前代码路径重写；官方资源目录只通过 env/process.resourcesPath 指回原安装包。
   fs.rmSync(runnerResourcesDir, { recursive: true, force: true });
   fs.mkdirSync(runnerResourcesDir, { recursive: true });
   const runnerAsarPath = await runCompatibility(
     "static.cache.runner.gateway-asar",
-    () => writeGatewayAsar({ runnerResourcesDir, workDir }),
-    "asar-package"
+    () => writeGatewayAsar({ runnerResourcesDir, workDir })
   );
   if (process.platform === "win32") {
     runCompatibility(
@@ -310,8 +308,7 @@ async function createPortableRunner({ layout, runtimeDir, logger, runCompatibili
         sourceExecutablePath: layout.executablePath,
         runnerAsarPath,
         logger,
-      }),
-      "pe-resource"
+      })
     );
   }
 

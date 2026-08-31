@@ -94,7 +94,8 @@ function createCompatibilityService({
 
   function resolveHandle(id, options, implementation) {
     const locatorRevision = String(options.locatorRevision || "legacy-v1");
-    const strategyId = String(options.strategyId || "legacy-adapter");
+    // 执行策略由修改点声明的强类型适配器决定，调用点不能再自由拼写策略名称。
+    const adapterId = String(registry.point(id).directAdapterIds[0]);
     const targetFingerprint = String(
       options.targetFingerprint || capabilityFingerprint(id, locatorRevision, currentIdentity(), options.targetKey)
     );
@@ -104,7 +105,7 @@ function createCompatibilityService({
     const handle = registry
       .beginResolution(id, {
         locatorRevision,
-        strategyId,
+        adapterId,
         expectedCandidates: options.expectedCandidates || 1,
       })
       .resolve({
@@ -178,7 +179,7 @@ function createCompatibilityService({
     registry
       .beginResolution(id, {
         locatorRevision: options.locatorRevision || "legacy-v1",
-        strategyId: options.strategyId || "legacy-adapter",
+        adapterId: String(registry.point(id).directAdapterIds[0]),
         expectedCandidates: options.expectedCandidates || 1,
       })
       .fail(error, { candidateCount: options.candidateCount || 0, reason: options.reason });
@@ -190,7 +191,7 @@ function createCompatibilityService({
     registry
       .beginResolution(id, {
         locatorRevision: options.locatorRevision || "legacy-v1",
-        strategyId: options.strategyId || "legacy-adapter",
+        adapterId: String(registry.point(id).directAdapterIds[0]),
         expectedCandidates: options.expectedCandidates || 1,
       })
       .unsupported({
@@ -205,7 +206,7 @@ function createCompatibilityService({
     registry
       .beginResolution(id, {
         locatorRevision: options.locatorRevision || "legacy-v1",
-        strategyId: options.strategyId || "legacy-adapter",
+        adapterId: String(registry.point(id).directAdapterIds[0]),
         expectedCandidates: options.expectedCandidates || 1,
       })
       .ambiguous({
@@ -243,7 +244,6 @@ function createCompatibilityService({
     if (normalizedPhase === "failed") {
       failPoint(normalizedId, reason || "Browser locator failed", {
         locatorRevision: "browser-v1",
-        strategyId: "browser-receipt",
       });
       return true;
     }
@@ -254,7 +254,6 @@ function createCompatibilityService({
     }
     const handle = installPoint(normalizedId, {
       locatorRevision: "browser-v1",
-      strategyId: "browser-receipt",
       targetKey: normalizedClientId,
     });
     if (!handle) return false;

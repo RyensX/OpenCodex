@@ -5,7 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const SUMMARY_SOURCE = fs.readFileSync(
-  path.resolve(__dirname, "..", "..", "web-shell", "codex-smart-scheduling-summary.js"),
+  path.resolve(__dirname, "..", "..", "web-shell", "internal", "providers", "codex-smart-scheduling-summary.js"),
   "utf-8"
 );
 const SUMMARY_SELECTOR = "[data-opencodex-smart-scheduling-summary]";
@@ -192,6 +192,28 @@ function createHarness() {
     setTimeout,
   };
   window.window = window;
+
+  window.__OpenCodexAdapterHost = {
+    dom: {
+      observe({ callback }) {
+        // 摘要实现已经改由共享宿主统一观察；测试仍保留单一回调入口来驱动等价场景。
+        mutationCallback = callback;
+        return () => {
+          if (mutationCallback === callback) mutationCallback = null;
+        };
+      },
+    },
+    events: {
+      observe({ target, type, callback }) {
+        if (target === window) windowListeners.set(type, callback);
+        else target?.addEventListener?.(type, callback);
+        return () => {
+          if (target === window && windowListeners.get(type) === callback) windowListeners.delete(type);
+          else target?.removeEventListener?.(type, callback);
+        };
+      },
+    },
+  };
 
   class TestHeaders {
     set() {}

@@ -1,0 +1,11 @@
+{
+  "id": "example.virtual-hello",
+  "apiVersion": 2,
+  "entry": "dist/index.mjs",
+  "sdkVersion": "^2.0.0",
+  "name": "Virtual Hello",
+  "label": "虚拟视图示例",
+  "desc": "通过声明式 RuntimeView 挂载内容，不直接访问真实 DOM。",
+  "defaultEnabled": true,
+  "order": 900
+}

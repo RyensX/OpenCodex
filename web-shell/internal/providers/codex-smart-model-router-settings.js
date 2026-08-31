@@ -1,6 +1,8 @@
 (function () {
   const w = window;
   if (w.__OpenCodexSmartModelRouterSettingsInstalled) return;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
   w.__OpenCodexSmartModelRouterSettingsInstalled = true;
 
   const FEATURE = "smart-model-router";
@@ -38,6 +40,7 @@
   let pickerSequence = 0;
   let activeChoicePopover = null;
   let updateQueue = Promise.resolve();
+  let compatibilityHitReported = false;
 
   function localized(key) {
     return (key && typeof messages[key] === "string" && messages[key]) || key || "";
@@ -118,6 +121,10 @@
   function reportInjection() {
     // 只回执设置入口已真正插入官方导航；上报失败不能影响设置页本身。
     void w.__OpenCodexSmartSchedulingInjectionHealth?.report("settings-page");
+    if (!compatibilityHitReported) {
+      compatibilityHitReported = true;
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.smart-router.settings");
+    }
   }
 
   function modelValue(model) {
@@ -319,11 +326,10 @@
       if (menu.isConnected) positionChoicePopover(button, menu);
     }
 
+    const globalEventDisposers = [];
+
     function close(restoreFocus) {
-      document.removeEventListener("pointerdown", handlePointerDown, true);
-      document.removeEventListener("keydown", handleKeyDown, true);
-      document.removeEventListener("scroll", reposition, true);
-      window.removeEventListener("resize", reposition);
+      for (const dispose of globalEventDisposers.splice(0).reverse()) dispose();
       menu.remove();
       button.setAttribute("aria-expanded", "false");
       button.removeAttribute("aria-controls");
@@ -333,10 +339,12 @@
 
     document.body.appendChild(menu);
     positionChoicePopover(button, menu);
-    document.addEventListener("pointerdown", handlePointerDown, true);
-    document.addEventListener("keydown", handleKeyDown, true);
-    document.addEventListener("scroll", reposition, true);
-    window.addEventListener("resize", reposition);
+    globalEventDisposers.push(
+      adapterHost.events.observe({ key: {}, target: document, type: "pointerdown", capture: true, callback: handlePointerDown }),
+      adapterHost.events.observe({ key: {}, target: document, type: "keydown", capture: true, callback: handleKeyDown }),
+      adapterHost.events.observe({ key: {}, target: document, type: "scroll", capture: true, callback: reposition }),
+      adapterHost.events.observe({ key: {}, target: window, type: "resize", callback: reposition })
+    );
     activeChoicePopover = { button, close };
     requestAnimationFrame(() => {
       if (activeChoicePopover?.button === button) setHighlighted(highlightedIndex);
@@ -1043,33 +1051,39 @@
   }
 
   function install() {
-    const observer = new MutationObserver((records) => {
+    const handleMutations = (records) => {
       // 官方正文和侧栏的高频变更不会影响设置入口，仅设置导航或自定义页面变化才重新同步。
       if (document.visibilityState === "hidden" || !mutationsTouchSettings(records)) return;
       scheduleSync();
-    });
-    let observerActive = false;
+    };
+    let disposeObservation = null;
     const startObservation = () => {
-      if (observerActive || document.visibilityState === "hidden") return;
-      observer.observe(document.documentElement, { childList: true, subtree: true });
-      observerActive = true;
+      if (disposeObservation || document.visibilityState === "hidden") return;
+      disposeObservation = adapterHost.dom.observe({
+        key: {},
+        root: document.documentElement,
+        options: { childList: true, subtree: true },
+        callback: handleMutations,
+      });
     };
     const stopObservation = () => {
-      if (observerActive) observer.disconnect();
-      observerActive = false;
+      disposeObservation?.();
+      disposeObservation = null;
     };
-    document.addEventListener(
-      "click",
-      (event) => {
+    adapterHost.events.observe({
+      key: {},
+      target: document,
+      type: "click",
+      capture: true,
+      callback(event) {
         const button = event.target?.closest?.("[data-settings-panel-slug]");
         if (button && button.dataset.settingsPanelSlug !== NAV_SLUG) deactivateSettings();
       },
-      true
-    );
-    window.addEventListener("resize", () => {
-      if (active) positionPage();
     });
-    document.addEventListener("visibilitychange", () => {
+    adapterHost.events.observe({ key: {}, target: window, type: "resize", callback: () => {
+      if (active) positionPage();
+    } });
+    adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: () => {
       if (document.visibilityState === "hidden") {
         // 自定义设置页在后台不需要跟随官方 DOM，回前台时一次全量同步即可恢复挂载。
         stopObservation();
@@ -1077,7 +1091,7 @@
       }
       startObservation();
       scheduleSync();
-    });
+    } });
     startObservation();
     scheduleSync();
   }
@@ -1092,6 +1106,11 @@
     },
   });
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install, { once: true });
-  else install();
+  if (document.readyState === "loading") {
+    let disposeReady = () => {};
+    disposeReady = adapterHost.events.observe({ key: {}, target: document, type: "DOMContentLoaded", callback: () => {
+      disposeReady();
+      install();
+    } });
+  } else install();
 })();

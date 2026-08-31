@@ -175,13 +175,13 @@ function writeRunnerCompatibilityReport(paths, officialRuntime, error = null) {
       } else if (error) {
         service.failPoint(id, error, {
           locatorRevision: "runner-cache-v1",
-          strategyId: "launcher-bootstrap",
           fallback: false,
         });
       } else {
         service.installPoint(id, {
           locatorRevision: "runner-cache-v1",
-          strategyId: "launcher-bootstrap",
+          // compatibilityPoints 是 Runner 成功执行后的回执，此处可以直接记录一次真实命中。
+          active: true,
         });
       }
     }

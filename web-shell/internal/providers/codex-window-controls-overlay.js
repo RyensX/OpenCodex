@@ -1,5 +1,7 @@
 (function () {
   const w = window;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
   const activeRoot = document.documentElement || null;
   const previousInstallState = w.__opencodexWindowControlsOverlayState;
   if (previousInstallState?.document === document && previousInstallState?.root === activeRoot) return;
@@ -136,11 +138,12 @@
     let windowControlsThemeColor = "";
     let imagePreviewThemeColor = "";
     let cssColorProbe = null;
-    let mutationObserver = null;
+    let disposeMutationObservation = null;
     let managedRootStyleMutationBudget = 0;
     let resizeObserver = null;
     let heavyObserversActive = false;
     let inactiveMetricsSynced = false;
+    let compatibilityHitReported = false;
     let currentImagePreviewRoot = null;
     const METRIC_MOUNT_SELECTOR = [
       "header[data-app-shell-header-edge-scroll]",
@@ -153,13 +156,13 @@
       const nextValue = String(value);
       if (rootStyle.getPropertyValue(name) === nextValue) return;
       // 每次实际自写对应一个 style MutationRecord，observer 据此只过滤自身产生的记录。
-      if (mutationObserver) managedRootStyleMutationBudget += 1;
+      if (disposeMutationObservation) managedRootStyleMutationBudget += 1;
       rootStyle.setProperty(name, nextValue);
     }
 
     function removeManagedRootStyle(name) {
       if (!rootStyle.getPropertyValue(name)) return;
-      if (mutationObserver) managedRootStyleMutationBudget += 1;
+      if (disposeMutationObservation) managedRootStyleMutationBudget += 1;
       rootStyle.removeProperty(name);
     }
 
@@ -599,9 +602,17 @@
       if (heavyObserversActive) return;
       heavyObserversActive = true;
       inactiveMetricsSynced = false;
-      if (typeof MutationObserver === "function") {
-        // 只有 WCO 真正可见时才观察官方 renderer；普通网页和移动端无需承担整页 DOM 监听成本。
-        mutationObserver = new MutationObserver((records) => {
+      // 只有 WCO 真正可见时才观察官方 renderer；普通网页和移动端无需承担整页 DOM 监听成本。
+      disposeMutationObservation = adapterHost.dom.observe({
+        key: {},
+        root: document.documentElement,
+        options: {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["class", "style", "data-theme"],
+        },
+        callback(records) {
           let hasExternalMutation = false;
           for (const record of Array.from(records || [])) {
             // CSS 测量探针会频繁改写自身 style；绝不能让它们反向触发下一轮测量。
@@ -616,14 +627,8 @@
           }
           // 预算之外的根 style 记录来自官方 renderer，必须像其它外部变化一样重新测量。
           if (hasExternalMutation) queueRightHeaderSlotMetrics();
-        });
-        mutationObserver.observe(document.documentElement, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ["class", "style", "data-theme"],
-        });
-      }
+        },
+      });
       if (typeof ResizeObserver === "function") {
         resizeObserver = new ResizeObserver(queueRightHeaderSlotMetrics);
         resizeObserver.observe(root);
@@ -631,9 +636,9 @@
     }
 
     function stopHeavyObservers() {
-      mutationObserver?.disconnect();
+      disposeMutationObservation?.();
       resizeObserver?.disconnect();
-      mutationObserver = null;
+      disposeMutationObservation = null;
       managedRootStyleMutationBudget = 0;
       resizeObserver = null;
       currentImagePreviewRoot = null;
@@ -649,6 +654,10 @@
         return;
       }
       if (visible && overlay && typeof overlay.getTitlebarAreaRect === "function") {
+        if (!compatibilityHitReported) {
+          compatibilityHitReported = true;
+          w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.window-controls-overlay");
+        }
         startHeavyObservers();
         const rect = overlay.getTitlebarAreaRect();
         setInsets(true, insetsFromRect(rect));
@@ -656,6 +665,10 @@
         return;
       }
       if (visible) {
+        if (!compatibilityHitReported) {
+          compatibilityHitReported = true;
+          w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.window-controls-overlay");
+        }
         startHeavyObservers();
         setInsets(true, null);
         queueRightHeaderSlotMetrics();
@@ -672,20 +685,16 @@
 
     ensureOverrideStyles();
     if (overlay?.addEventListener) {
-      overlay.addEventListener("geometrychange", syncInsets);
-      addCleanup(() => overlay.removeEventListener?.("geometrychange", syncInsets));
+      addCleanup(adapterHost.events.observe({ key: {}, target: overlay, type: "geometrychange", callback: syncInsets }));
     }
     if (displayModeQuery?.addEventListener) {
-      displayModeQuery.addEventListener("change", syncInsets);
-      addCleanup(() => displayModeQuery.removeEventListener("change", syncInsets));
+      addCleanup(adapterHost.events.observe({ key: {}, target: displayModeQuery, type: "change", callback: syncInsets }));
     } else if (displayModeQuery?.addListener) {
       displayModeQuery.addListener(syncInsets);
       addCleanup(() => displayModeQuery.removeListener?.(syncInsets));
     }
-    w.addEventListener("resize", syncInsets);
-    addCleanup(() => w.removeEventListener("resize", syncInsets));
-    document.addEventListener?.("visibilitychange", syncInsets);
-    addCleanup(() => document.removeEventListener?.("visibilitychange", syncInsets));
+    addCleanup(adapterHost.events.observe({ key: {}, target: w, type: "resize", callback: syncInsets }));
+    addCleanup(adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: syncInsets }));
     syncInsets();
     const initialFrameId =
       typeof w.requestAnimationFrame === "function" ? w.requestAnimationFrame(syncInsets) : null;
@@ -711,8 +720,5 @@
   }
 
   installState.cleanup = installWindowControlsOverlaySafeArea() || null;
-  if (installState.cleanup) {
-    w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.window-controls-overlay");
-  }
   w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.window-controls-overlay");
 })();

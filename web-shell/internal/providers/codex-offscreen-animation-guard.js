@@ -1,6 +1,8 @@
 (function () {
   const w = window;
   if (w.__opencodexOffscreenAnimationGuardInstalled) return;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
   w.__opencodexOffscreenAnimationGuardInstalled = true;
 
   const REGION_CONFIGS = [
@@ -13,14 +15,15 @@
       targetSelector: ".horizontal-scroll-fade-mask",
     },
   ];
-  let discoveryObserver = null;
+  let disposeDiscoveryObservation = null;
   let discoveryFrame = null;
 
   function createRegionGuard({ rootSelector, targetSelector }) {
     const originalPlayStates = new WeakMap();
     const observedTargets = new Set();
-    const rootLifecycleObservers = [];
-    let mutationObserver = null;
+    const rootLifecycleDisposers = [];
+    let disposeMutationObservation = null;
+    let disposeRootScroll = null;
     let visibilityObserver = null;
     let visibilityFrame = null;
     let root = null;
@@ -44,6 +47,7 @@
       });
       // 先同步暂停，IntersectionObserver 下一帧确认可见后再恢复，避免离屏动画抢跑一帧。
       target.style.setProperty("animation-play-state", "paused", "important");
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.offscreen-animation");
       visibilityObserver.observe(target);
     }
 
@@ -99,12 +103,13 @@
     function teardown() {
       if (visibilityFrame !== null) w.cancelAnimationFrame?.(visibilityFrame);
       visibilityFrame = null;
-      root?.removeEventListener?.("scroll", scheduleVisibilitySync);
-      mutationObserver?.disconnect();
+      disposeRootScroll?.();
+      disposeRootScroll = null;
+      disposeMutationObservation?.();
       visibilityObserver?.disconnect?.();
-      for (const observer of rootLifecycleObservers) observer.disconnect();
-      rootLifecycleObservers.length = 0;
-      mutationObserver = null;
+      for (const dispose of rootLifecycleDisposers.reverse()) dispose();
+      rootLifecycleDisposers.length = 0;
+      disposeMutationObservation = null;
       visibilityObserver = null;
       // 容器被重建时恢复旧节点原有样式并释放强引用，避免多次切换会话后积累 detached DOM。
       for (const target of observedTargets) restorePlayState(target);
@@ -113,13 +118,15 @@
     }
 
     function observeRootLifecycle(nextRoot) {
-      if (typeof w.MutationObserver !== "function") return;
       let ancestor = nextRoot.parentNode;
       // 只观察祖先的直接子节点，不监听其整棵子树；任一层被 React 替换时再统一重查两个根。
       while (ancestor && ancestor !== document) {
-        const observer = new w.MutationObserver(scheduleRootDiscovery);
-        observer.observe(ancestor, { childList: true });
-        rootLifecycleObservers.push(observer);
+        rootLifecycleDisposers.push(adapterHost.dom.observe({
+          key: {},
+          root: ancestor,
+          options: { childList: true },
+          callback: scheduleRootDiscovery,
+        }));
         ancestor = ancestor.parentNode;
       }
     }
@@ -128,7 +135,6 @@
       if (!nextRoot || nextRoot === root || typeof w.IntersectionObserver !== "function") return false;
       teardown();
       root = nextRoot;
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.offscreen-animation");
       const observer = new w.IntersectionObserver(
         (entries) => {
           // disconnect 后可能仍有排队回调；旧 observer 不得改写新容器里的节点。
@@ -147,18 +153,26 @@
       visibilityObserver = observer;
       scanAddedNode(nextRoot);
 
-      if (typeof w.MutationObserver === "function") {
-        // 只观察目标区域新增/移除节点，不监听属性与文本变化，避免动画样式本身形成反馈循环。
-        mutationObserver = new w.MutationObserver((records) => {
+      // 只观察目标区域新增/移除节点，不监听属性与文本变化，避免动画样式本身形成反馈循环。
+      disposeMutationObservation = adapterHost.dom.observe({
+        key: {},
+        root: nextRoot,
+        options: { childList: true, subtree: true },
+        callback(records) {
           for (const record of records) {
             for (const node of record.removedNodes || []) forgetRemovedNode(node);
             for (const node of record.addedNodes || []) scanAddedNode(node);
           }
           scheduleVisibilitySync();
-        });
-        mutationObserver.observe(nextRoot, { childList: true, subtree: true });
-      }
-      nextRoot.addEventListener?.("scroll", scheduleVisibilitySync, { passive: true });
+        },
+      });
+      disposeRootScroll = adapterHost.events.observe({
+        key: {},
+        target: nextRoot,
+        type: "scroll",
+        passive: true,
+        callback: scheduleVisibilitySync,
+      });
       observeRootLifecycle(nextRoot);
       scheduleVisibilitySync();
       return true;
@@ -183,8 +197,8 @@
     discoveryFrame = null;
     for (const guard of regionGuards) guard.refreshRoot();
     if (regionGuards.every((guard) => guard.hasRoot())) {
-      discoveryObserver?.disconnect();
-      discoveryObserver = null;
+      disposeDiscoveryObservation?.();
+      disposeDiscoveryObservation = null;
     } else {
       installDiscoveryObserver();
     }
@@ -200,15 +214,16 @@
   }
 
   function installDiscoveryObserver() {
-    if (discoveryObserver || typeof w.MutationObserver !== "function") return;
+    if (disposeDiscoveryObservation) return;
     // head 阶段两个区域尚未挂载；全部找到后立即关闭这条全页发现监听。
-    discoveryObserver = new w.MutationObserver(scheduleRootDiscovery);
-    discoveryObserver.observe(document.documentElement, { childList: true, subtree: true });
+    disposeDiscoveryObservation = adapterHost.dom.observe({
+      key: {},
+      root: document.documentElement,
+      options: { childList: true, subtree: true },
+      callback: scheduleRootDiscovery,
+    });
   }
 
   refreshRoots();
-  if (regionGuards.some((guard) => guard.hasRoot())) {
-    w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.offscreen-animation");
-  }
   w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.offscreen-animation");
 })();

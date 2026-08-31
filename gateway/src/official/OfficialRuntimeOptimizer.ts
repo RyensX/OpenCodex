@@ -315,7 +315,6 @@ class OfficialRuntimeOptimizer {
           const method = candidateCount > expectedCandidates ? "ambiguousPoint" : "unsupportedPoint";
           this.compatibilityService[method](id, {
             locatorRevision: "official-main-v1",
-            strategyId: "static-regex",
             candidateCount,
             expectedCandidates: Math.max(1, expectedCandidates),
             reason: `Expected ${expectedCandidates} candidates but found ${candidateCount}`,
@@ -328,7 +327,6 @@ class OfficialRuntimeOptimizer {
     try {
       const capability = this.compatibilityService.bindCapability(id, patcher, {
         locatorRevision: "official-main-v1",
-        strategyId: "static-regex",
         candidateCount,
         expectedCandidates,
         targetKey: fileName,
@@ -347,7 +345,6 @@ class OfficialRuntimeOptimizer {
     try {
       this.compatibilityService.unsupportedPoint(id, {
         locatorRevision: "official-main-v1",
-        strategyId: "static-regex",
         reason: "Official capability marker is not present",
       });
     } catch {}

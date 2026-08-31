@@ -5,51 +5,52 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const WEB_SHELL_DIR = path.resolve(__dirname, "..", "..", "web-shell");
+const INTERNAL_PROVIDER_DIR = path.join(WEB_SHELL_DIR, "internal", "providers");
 const MOBILE_VIEWPORT_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "plugins", "mobile-keyboard-optimization", "index.js"),
+  path.join(WEB_SHELL_DIR, "internal", "providers", "mobile-keyboard-optimization.js"),
   "utf8"
 );
 const IOS_FIX_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "plugins", "ios-fix", "index.js"),
+  path.join(WEB_SHELL_DIR, "internal", "providers", "ios-fix.js"),
   "utf8"
 );
-const WCO_SOURCE = fs.readFileSync(path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js"), "utf8");
+const WCO_SOURCE = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-window-controls-overlay.js"), "utf8");
 const COMPOSER_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "codex-smart-model-router-composer.js"),
+  path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-composer.js"),
   "utf8"
 );
-const TOOLTIP_SOURCE = fs.readFileSync(path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js"), "utf8");
-const BRIDGE_SOURCE = fs.readFileSync(path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js"), "utf8");
+const TOOLTIP_SOURCE = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-tooltip-dismiss-guard.js"), "utf8");
+const BRIDGE_SOURCE = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js"), "utf8");
 const SIDEBAR_PREVIEW_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "codex-sidebar-preview.js"),
+  path.join(INTERNAL_PROVIDER_DIR, "codex-sidebar-preview.js"),
   "utf8"
 );
 const OFFSCREEN_ANIMATION_GUARD_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "codex-offscreen-animation-guard.js"),
+  path.join(INTERNAL_PROVIDER_DIR, "codex-offscreen-animation-guard.js"),
   "utf8"
 );
 const REMOTE_FILE_ACTIONS_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "codex-remote-file-actions.js"),
+  path.join(INTERNAL_PROVIDER_DIR, "codex-remote-file-actions.js"),
   "utf8"
 );
 const HEALTH_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "codex-smart-scheduling-injection-health.js"),
+  path.join(INTERNAL_PROVIDER_DIR, "codex-smart-scheduling-injection-health.js"),
   "utf8"
 );
 const SETTINGS_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "codex-smart-model-router-settings.js"),
+  path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-settings.js"),
   "utf8"
 );
 const SUMMARY_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "codex-smart-scheduling-summary.js"),
+  path.join(INTERNAL_PROVIDER_DIR, "codex-smart-scheduling-summary.js"),
   "utf8"
 );
 const TOKEN_USAGE_INLINE_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "plugins", "token-usage-inline", "index.js"),
+  path.join(WEB_SHELL_DIR, "internal", "providers", "token-usage-inline.js"),
   "utf8"
 );
 const TOKEN_USAGE_CAPABILITY_SOURCE = fs.readFileSync(
-  path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js"),
+  path.join(INTERNAL_PROVIDER_DIR, "codex-token-usage-capability.js"),
   "utf8"
 );
 
@@ -234,6 +235,30 @@ function createScheduler() {
   };
 }
 
+function installAdapterHost(window, MutationObserverClass) {
+  // 单元测试用最小 Provider 门面；真实共享、去重和引用计数由 browser-host 专项测试覆盖。
+  window.__OpenCodexAdapterHost = {
+    dom: {
+      observe({ root, options, callback }) {
+        const observer = new MutationObserverClass(callback);
+        observer.observe(root, options);
+        return () => observer.disconnect();
+      },
+    },
+    events: {
+      observe({ target, type, callback, capture = false, passive = false }) {
+        target.addEventListener(type, callback, { capture, passive });
+        return () => target.removeEventListener(type, callback, { capture });
+      },
+    },
+    hooks: {
+      around() {
+        return () => {};
+      },
+    },
+  };
+}
+
 test("sidebar preview hands off immediately when the official sidebar mounts", () => {
   const scheduler = createScheduler();
   const document = new ListenerTarget();
@@ -286,6 +311,7 @@ test("sidebar preview hands off immediately when the official sidebar mounts", (
     requestAnimationFrame: scheduler.requestAnimationFrame,
     setTimeout: scheduler.setTimeout,
   });
+  installAdapterHost(window, window.MutationObserver);
   window.window = window;
 
   vm.runInNewContext(SIDEBAR_PREVIEW_SOURCE, { document, MouseEvent: class {}, window });
@@ -340,6 +366,7 @@ test("sidebar preview leaves no observer or timer behind when history is empty",
     requestAnimationFrame: scheduler.requestAnimationFrame,
     setTimeout: scheduler.setTimeout,
   });
+  installAdapterHost(window, window.MutationObserver);
   window.window = window;
 
   vm.runInNewContext(SIDEBAR_PREVIEW_SOURCE, { document, MouseEvent: class {}, window });
@@ -411,6 +438,7 @@ test("offscreen sidebar animations pause until visible and observe replacement s
     },
     requestAnimationFrame: scheduler.requestAnimationFrame,
   });
+  installAdapterHost(window, window.MutationObserver);
   window.window = window;
 
   vm.runInNewContext(OFFSCREEN_ANIMATION_GUARD_SOURCE, { document, window });
@@ -501,6 +529,7 @@ test("offscreen horizontal scroll fades pause without changing visible content",
     cancelAnimationFrame: scheduler.cancelAnimationFrame,
     requestAnimationFrame: scheduler.requestAnimationFrame,
   });
+  installAdapterHost(window, window.MutationObserver);
   window.window = window;
 
   vm.runInNewContext(OFFSCREEN_ANIMATION_GUARD_SOURCE, { document, window });
@@ -580,6 +609,7 @@ test("offscreen animation guard releases and reinstalls when the sidebar root is
     cancelAnimationFrame: scheduler.cancelAnimationFrame,
     requestAnimationFrame: scheduler.requestAnimationFrame,
   });
+  installAdapterHost(window, window.MutationObserver);
   window.window = window;
 
   vm.runInNewContext(OFFSCREEN_ANIMATION_GUARD_SOURCE, { document, window });
@@ -631,6 +661,14 @@ test("shared viewport coordinator coalesces event storms and owns one listener s
     setTimeout: scheduler.setTimeout,
     visualViewport,
   });
+  window.__OpenCodexAdapterHost = {
+    events: {
+      observe({ target, type, callback, capture = false, passive = false }) {
+        target.addEventListener(type, callback, { capture, passive });
+        return () => target.removeEventListener(type, callback, { capture });
+      },
+    },
+  };
   window.window = window;
 
   vm.runInNewContext(MOBILE_VIEWPORT_SOURCE, { console, document, window });
@@ -800,6 +838,7 @@ test("WCO heavy observers exist only while the overlay is visible", () => {
     requestAnimationFrame: scheduler.requestAnimationFrame,
     setTimeout: scheduler.setTimeout,
   });
+  installAdapterHost(window, TestMutationObserver);
   window.window = window;
 
   vm.runInNewContext(WCO_SOURCE, {
@@ -902,6 +941,23 @@ test("composer observer ignores streaming content and hidden-page mutations", ()
     __OpenCodexSmartSchedulingInjectionHealth: { report: () => Promise.resolve() },
   };
   window.window = window;
+  window.__OpenCodexAdapterHost = {
+    dom: {
+      observe({ callback }) {
+        // 共享宿主只改变真实 Observer 的所有权，不改变适配器接收 mutation 的语义。
+        observerCallback = callback;
+        return () => {
+          if (observerCallback === callback) observerCallback = null;
+        };
+      },
+    },
+    events: {
+      observe({ target, type, callback }) {
+        target.addEventListener(type, callback);
+        return () => target.removeEventListener(type, callback);
+      },
+    },
+  };
   vm.runInNewContext(COMPOSER_SOURCE, {
     MutationObserver: TestMutationObserver,
     console,
@@ -1048,6 +1104,10 @@ test("injection health polls only while the explicit settings lifecycle is activ
       return 1;
     },
   });
+  installAdapterHost(window, class {
+    disconnect() {}
+    observe() {}
+  });
   window.window = window;
 
   vm.runInNewContext(HEALTH_SOURCE, {
@@ -1112,6 +1172,7 @@ test("tooltip guard uses one pointer stream and does no timer work without toolt
     clearTimeout: scheduler.clearTimeout,
     setTimeout: scheduler.setTimeout,
   });
+  installAdapterHost(window, TestMutationObserver);
   window.window = window;
 
   vm.runInNewContext(TOOLTIP_SOURCE, { console, document, window });
@@ -1178,10 +1239,12 @@ test("gateway logout menu observes DOM only during an interaction session", () =
     requestAnimationFrame: scheduler.requestAnimationFrame,
     setTimeout: scheduler.setTimeout,
   });
+  installAdapterHost(window, TestMutationObserver);
   window.window = window;
   const api = vm.runInNewContext(
     `(() => {
       const w = window;
+      const adapterHost = w.__OpenCodexAdapterHost;
       function gatewayAuthLogoutItemFromEvent() { return null; }
       function handleGatewayAuthLogoutPointer() {}
       function handleGatewayAuthLogoutKeydown() {}
@@ -1252,6 +1315,7 @@ test("remote file menu observes DOM only during a file-tree context-menu session
     requestAnimationFrame: scheduler.requestAnimationFrame,
     setTimeout: scheduler.setTimeout,
   });
+  installAdapterHost(window, TestMutationObserver);
   window.window = window;
 
   vm.runInNewContext(REMOTE_FILE_ACTIONS_SOURCE, {
@@ -1762,19 +1826,19 @@ test("smart scheduling protocol traversal shares one batch budget", () => {
 
 test("whole-document observer filters stay scoped to their feature mounts", () => {
   // 这些源码约束覆盖不适合完整 DOM 模拟的 portal/app-shell 边界，防止后续又引入 closest 全树放大。
-  assert.match(IOS_FIX_SOURCE, /mutationObserver\.observe\(observedRoot, \{ childList: true \}\)/);
-  assert.match(IOS_FIX_SOURCE, /mutationObserver\.observe\(document\.body, \{ childList: true \}\)/);
-  assert.match(IOS_FIX_SOURCE, /document\.visibilityState === "hidden"[\s\S]*mutationObserver\?\.disconnect\(\)/);
+  assert.match(IOS_FIX_SOURCE, /adapterHost\.dom\.observe\(\{[\s\S]*root: target,[\s\S]*options: \{ childList: true \}/);
+  assert.match(IOS_FIX_SOURCE, /const target = observedRoot \|\| document\.body/);
+  assert.match(IOS_FIX_SOURCE, /document\.visibilityState === "hidden"[\s\S]*disposeMutationObservation\?\.\(\)/);
   assert.match(IOS_FIX_SOURCE, /reason === "orientationchange"[\s\S]*largestObservedLayoutHeight = 0/);
   assert.doesNotMatch(IOS_FIX_SOURCE, /mutationObserver\.observe\([^)]*, \{[\s\S]*?subtree: true/);
   assert.doesNotMatch(IOS_FIX_SOURCE, /attributeFilter: \["class", "style"\]/);
   assert.match(BRIDGE_SOURCE, /node\.firstElementChild && node\.querySelector\?\.\(menuSelector\)/);
   assert.doesNotMatch(BRIDGE_SOURCE, /node\?\.nodeType === 1 \? node : mutation\.target/);
   assert.match(BRIDGE_SOURCE, /function installGatewayAuthMenuInjection\(\)[\s\S]*observeGatewayAuthMenuSession/);
-  assert.match(BRIDGE_SOURCE, /menuObserver \|\|= new MutationObserver\(handleMenuMutations\)/);
+  assert.match(BRIDGE_SOURCE, /disposeMenuObservation = adapterHost\.dom\.observe\(\{/);
   assert.doesNotMatch(
     sourceSection(BRIDGE_SOURCE, "    const start = () => {", "\n    if (document.readyState === \"loading\")"),
-    /\.observe\(/
+    /adapterHost\.dom\.observe\(/
   );
   assert.match(BRIDGE_SOURCE, /reconnectDeferredUntilVisible = true/);
   assert.match(BRIDGE_SOURCE, /document\.visibilityState === "hidden"/);
@@ -1806,25 +1870,28 @@ test("whole-document observer filters stay scoped to their feature mounts", () =
   assert.match(BRIDGE_SOURCE, /sessionTimeout = w\.setTimeout\(cancelPicker, FILE_PICKER_SESSION_TIMEOUT_MS\)/);
   assert.match(HEALTH_SOURCE, /document\.visibilityState === "hidden"[\s\S]*w\.clearInterval\(pollTimer\)/);
   assert.doesNotMatch(HEALTH_SOURCE, /new MutationObserver/);
-  assert.match(HEALTH_SOURCE, /w\.addEventListener\(SETTINGS_VISIBILITY_EVENT, schedulePollingSync\)/);
+  assert.match(HEALTH_SOURCE, /type: SETTINGS_VISIBILITY_EVENT, callback: schedulePollingSync/);
   assert.match(SETTINGS_SOURCE, /w\.dispatchEvent\(new CustomEvent\(HEALTH_VISIBILITY_EVENT\)\)/);
-  assert.match(COMPOSER_SOURCE, /triggerTextObserver\.observe\(trigger, \{ characterData: true/);
+  assert.match(
+    COMPOSER_SOURCE,
+    /adapterHost\.dom\.observe\(\{[\s\S]*root: trigger,[\s\S]*options: \{ characterData: true, childList: true, subtree: true \}/
+  );
   assert.doesNotMatch(
-    sourceSection(COMPOSER_SOURCE, "  function startComposerObservation", "\n\n  document.addEventListener"),
+    sourceSection(COMPOSER_SOURCE, "  function startComposerObservation", "\n\n  adapterHost.events.observe"),
     /characterData: true/
   );
   assert.match(COMPOSER_SOURCE, /stopComposerObservation\(\);[\s\S]*startComposerObservation\(\)/);
   assert.match(SETTINGS_SOURCE, /document\.visibilityState === "hidden"[\s\S]*stopObservation\(\)/);
   assert.match(TOOLTIP_SOURCE, /if \(!tooltipPresent\) return/);
   assert.match(TOOLTIP_SOURCE, /if \(!tooltipPresent && !tooltipObserverExpiryTimer\) return/);
-  assert.match(TOOLTIP_SOURCE, /pointermove", rememberPointer, \{ capture: true, passive: true \}/);
+  assert.match(TOOLTIP_SOURCE, /type: "pointermove", callback: rememberPointer, capture: true, passive: true/);
   assert.doesNotMatch(TOOLTIP_SOURCE, /querySelectorAll\("\[aria-describedby\]"\)/);
   assert.match(TOOLTIP_SOURCE, /function observeForTooltipMount\(event\)/);
   assert.match(TOOLTIP_SOURCE, /if \(tooltipObserverExpiryTimer\) \{/);
   assert.match(TOOLTIP_SOURCE, /tooltipObserverExpiryTimer = w\.setTimeout/);
   assert.doesNotMatch(BRIDGE_SOURCE, /renderBridgeErrorToast\(payload\), 0/);
   assert.match(BRIDGE_SOURCE, /retryCount >= BRIDGE_TOAST_BODY_RETRY_MAX/);
-  assert.match(BRIDGE_SOURCE, /document\.addEventListener\("error", handleAppFsImageError, true\)/);
+  assert.match(BRIDGE_SOURCE, /type: "error", capture: true, callback: handleAppFsImageError/);
   assert.match(BRIDGE_SOURCE, /document\.visibilityState === "hidden"[\s\S]*stopObservation\(\)/);
   assert.match(BRIDGE_SOURCE, /else startObservation\(\)/);
   assert.doesNotMatch(
@@ -1832,10 +1899,8 @@ test("whole-document observer filters stay scoped to their feature mounts", () =
     /childList/
   );
   assert.match(REMOTE_FILE_ACTIONS_SOURCE, /function observePendingPathMenu\(session\)/);
-  assert.doesNotMatch(
-    sourceSection(REMOTE_FILE_ACTIONS_SOURCE, "  function installMenuObserver", "\n\n  w.addEventListener"),
-    /new MutationObserver/
-  );
+  assert.doesNotMatch(REMOTE_FILE_ACTIONS_SOURCE, /new MutationObserver/);
+  assert.doesNotMatch(TOOLTIP_SOURCE, /new (?:w\.)?MutationObserver/);
   assert.match(MOBILE_VIEWPORT_SOURCE, /!context\.platform\.isMobile\(\)/);
   assert.match(MOBILE_VIEWPORT_SOURCE, /request\("orientationchange"/);
   assert.doesNotMatch(MOBILE_VIEWPORT_SOURCE, /will-change:\s*transform/);

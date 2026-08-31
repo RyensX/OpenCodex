@@ -649,15 +649,30 @@
       collectTokenUsageFromTree(treeRoot, source);
     }
 
-    function handleTokenUsageAppHostData(data) {
-      if (!tokenUsageConsumerActive() || typeof data !== "string" || !data.trim()) return;
+    function handleTokenUsageAppHostData(data, rawFrame = data, decodeFrame = null) {
+      if (!tokenUsageConsumerActive()) return;
+      if (data && typeof data === "object") {
+        // 共享 ProtocolPipeline 已完成一次解码；仍沿用原关键词/结构过滤，命中口径不变。
+        if (typeof rawFrame === "string" && !tokenUsageTextHasPassiveHint(rawFrame)) {
+          markTokenUsagePassiveSkipped();
+          return;
+        }
+        if (!shouldHandleTokenUsagePassiveMessage(data)) {
+          markTokenUsagePassiveSkipped();
+          return;
+        }
+        handleTokenUsageProtocolMessage(data, "app-host", true);
+        return;
+      }
+      if (typeof data !== "string" || !data.trim()) return;
       if (!tokenUsageTextHasPassiveHint(data)) {
         markTokenUsagePassiveSkipped();
         return;
       }
       try {
         // app-host 通道是字符串帧，只有命中 token 关键词后才 parse，避免每条 RPC 都 JSON.parse。
-        handleTokenUsageProtocolMessage(JSON.parse(data), "app-host", true);
+        const decoded = typeof decodeFrame === "function" ? decodeFrame() : JSON.parse(data);
+        handleTokenUsageProtocolMessage(decoded, "app-host", true);
       } catch {}
     }
 

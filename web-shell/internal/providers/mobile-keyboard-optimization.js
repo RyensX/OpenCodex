@@ -2,6 +2,7 @@
   const w = window;
   const pluginSystem = w.OpenCodexPluginSystem || w.__OpenCodexPluginSystem;
   if (!pluginSystem || typeof pluginSystem.registerPlugin !== "function") return;
+  const sharedAdapterHost = w.__OpenCodexAdapterHost;
 
   const POST_SEND_FOCUS_BLOCK_MS = 4000;
   const MANUAL_FOCUS_MS = 900;
@@ -50,6 +51,7 @@
     let pendingReason = "viewport";
     let lastSnapshot = null;
     let settleGeneration = 0;
+    let eventDisposers = [];
     const diagnostics = { dispatches: 0, frameRequests: 0, metricReads: 0 };
 
     function readSnapshot() {
@@ -166,30 +168,28 @@
     };
 
     function startListening() {
-      if (listening) return;
+      if (listening || !sharedAdapterHost?.events?.observe) return;
       listening = true;
-      w.addEventListener("resize", requestViewportTransition, { passive: true });
+      const observe = (target, type, callback, options = {}) => {
+        if (!target) return;
+        eventDisposers.push(sharedAdapterHost.events.observe({ key: {}, target, type, callback, ...options }));
+      };
+      observe(w, "resize", requestViewportTransition, { passive: true });
       // 单独保留旋转原因，订阅方可丢弃旧方向的稳定高度，避免把横竖屏差值误判成键盘。
-      w.addEventListener("orientationchange", requestOrientationTransition, { passive: true });
-      w.visualViewport?.addEventListener("resize", requestViewportTransition, { passive: true });
-      w.visualViewport?.addEventListener("scroll", requestViewportTransition, { passive: true });
-      document.addEventListener("focusin", requestFocusIn, true);
-      document.addEventListener("focusout", requestFocusOut, true);
-      document.addEventListener("input", requestInput, true);
-      document.addEventListener("visibilitychange", handleVisibility);
+      observe(w, "orientationchange", requestOrientationTransition, { passive: true });
+      observe(w.visualViewport, "resize", requestViewportTransition, { passive: true });
+      observe(w.visualViewport, "scroll", requestViewportTransition, { passive: true });
+      observe(document, "focusin", requestFocusIn, { capture: true });
+      observe(document, "focusout", requestFocusOut, { capture: true });
+      observe(document, "input", requestInput, { capture: true });
+      observe(document, "visibilitychange", handleVisibility);
     }
 
     function stopListening() {
       if (!listening) return;
       listening = false;
-      w.removeEventListener("resize", requestViewportTransition, { passive: true });
-      w.removeEventListener("orientationchange", requestOrientationTransition, { passive: true });
-      w.visualViewport?.removeEventListener("resize", requestViewportTransition, { passive: true });
-      w.visualViewport?.removeEventListener("scroll", requestViewportTransition, { passive: true });
-      document.removeEventListener("focusin", requestFocusIn, true);
-      document.removeEventListener("focusout", requestFocusOut, true);
-      document.removeEventListener("input", requestInput, true);
-      document.removeEventListener("visibilitychange", handleVisibility);
+      for (const disposeEvent of eventDisposers.reverse()) disposeEvent();
+      eventDisposers = [];
       cancelAnimationFrame();
       clearSettleTimers();
       // 无订阅期间屏幕仍可能旋转或被浏览器工具栏改变；再次启用时必须重新读取真实尺寸。
@@ -235,17 +235,20 @@
     builtin: true,
     order: 10,
     activate(context) {
+      const adapterHost = w.__OpenCodexAdapterHost;
       if (
         context.scope !== "renderer" ||
         !document ||
         !context.platform.isMobile() ||
-        document.__opencodexMobileKeyboardPluginInstalled
+        document.__opencodexMobileKeyboardPluginInstalled ||
+        !adapterHost?.events?.observe ||
+        !adapterHost?.hooks?.around
       ) {
         // 桌面端没有软键盘，不安装 viewport/input 监听器，也不写入仅移动端消费的 CSS 变量。
         return null;
       }
       document.__opencodexMobileKeyboardPluginInstalled = true;
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-keyboard");
+      w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.plugin.mobile-keyboard");
 
       let focusBlockedUntilMs = 0;
       let lastManualFocusIntentAtMs = 0;
@@ -336,6 +339,7 @@
         if (height > 0) setStyleValue(root, "--codex-visual-viewport-height", `${height}px`);
         setStyleValue(root, "--codex-visual-viewport-offset-top", `${offsetTop}px`);
         setStyleValue(root, "--codex-keyboard-inset-bottom", `${keyboardInset}px`);
+        w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-keyboard");
       };
 
       const keepActiveInputVisible = (snapshot = viewportCoordinator.snapshot()) => {
@@ -380,6 +384,7 @@
         if (!isEnabled() || !isMobile()) return;
         if (event.touches && event.touches.length < 2) return;
         event.preventDefault();
+        w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-keyboard");
       };
 
       const rememberManualFocusIntent = (event) => {
@@ -399,20 +404,20 @@
       };
 
       const proto = w.HTMLElement && w.HTMLElement.prototype;
-      const originalFocus = proto && typeof proto.focus === "function" ? proto.focus : null;
-      const focusGuardState = (w.__opencodexMobileKeyboardFocusGuardState =
-        w.__opencodexMobileKeyboardFocusGuardState || {
-          shouldSuppressFocus: () => false,
-        });
-      focusGuardState.shouldSuppressFocus = shouldSuppressFocus;
-      if (originalFocus && !proto.__opencodexMobileKeyboardFocusPatched) {
-        proto.__opencodexMobileKeyboardFocusPatched = true;
-        proto.__opencodexMobileKeyboardOriginalFocus = originalFocus;
-        proto.focus = function focus(...args) {
-          if (focusGuardState.shouldSuppressFocus(this)) return;
-          return proto.__opencodexMobileKeyboardOriginalFocus.apply(this, args);
-        };
-      }
+      const disposeFocusHook = proto && typeof proto.focus === "function"
+        ? adapterHost.hooks.around({
+            key: {},
+            target: proto,
+            property: "focus",
+            handle(thisValue, args, proceed) {
+              if (shouldSuppressFocus(thisValue)) {
+                w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-keyboard");
+                return;
+              }
+              return proceed(args);
+            },
+          })
+        : () => {};
 
       const disposePreference = context.events.on("plugin:enabled-changed", (payload) => {
         if (payload && payload.id === context.plugin.id) scheduleViewportUpdate();
@@ -423,23 +428,21 @@
         }
       });
 
-      document.addEventListener("touchmove", preventZoomGesture, { passive: false });
-      document.addEventListener("gesturestart", preventZoomGesture, { passive: false });
-      document.addEventListener("gesturechange", preventZoomGesture, { passive: false });
-      document.addEventListener("pointerdown", rememberManualFocusIntent, true);
-      document.addEventListener("touchstart", rememberManualFocusIntent, true);
+      const eventDisposers = [
+        adapterHost.events.observe({ key: {}, target: document, type: "touchmove", passive: false, callback: preventZoomGesture }),
+        adapterHost.events.observe({ key: {}, target: document, type: "gesturestart", passive: false, callback: preventZoomGesture }),
+        adapterHost.events.observe({ key: {}, target: document, type: "gesturechange", passive: false, callback: preventZoomGesture }),
+        adapterHost.events.observe({ key: {}, target: document, type: "pointerdown", capture: true, callback: rememberManualFocusIntent }),
+        adapterHost.events.observe({ key: {}, target: document, type: "touchstart", capture: true, callback: rememberManualFocusIntent }),
+      ];
 
       return () => {
         disposePreference();
         disposeIpcInvoke();
         disposeViewport();
-        document.removeEventListener("touchmove", preventZoomGesture, { passive: false });
-        document.removeEventListener("gesturestart", preventZoomGesture, { passive: false });
-        document.removeEventListener("gesturechange", preventZoomGesture, { passive: false });
-        document.removeEventListener("pointerdown", rememberManualFocusIntent, true);
-        document.removeEventListener("touchstart", rememberManualFocusIntent, true);
+        disposeFocusHook();
+        for (const disposeEvent of eventDisposers.reverse()) disposeEvent();
         if (style.parentNode) style.parentNode.removeChild(style);
-        focusGuardState.shouldSuppressFocus = () => false;
         document.documentElement.removeAttribute("data-opencodex-mobile-keyboard-optimization");
         document.documentElement.removeAttribute("data-opencodex-ios-keyboard-optimization");
         document.documentElement.style.removeProperty("--codex-visual-viewport-height");

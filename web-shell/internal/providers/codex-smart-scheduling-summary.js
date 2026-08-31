@@ -1,6 +1,8 @@
 (function () {
   const w = window;
   if (w.__OpenCodexSmartSchedulingSummaryInstalled) return;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
   w.__OpenCodexSmartSchedulingSummaryInstalled = true;
 
   const FEATURE = "smart-model-router";
@@ -69,6 +71,7 @@
   let nextHydrationSequence = 0;
   let configurationRetryTimer = null;
   let configurationRetryCount = 0;
+  let compatibilityHitReported = false;
 
   function normalizedId(value) {
     if (value == null) return "";
@@ -496,6 +499,10 @@
     const tooltip = `${copy.model}: ${route.model}\n${copy.effort}: ${route.effort}\n${copy.status}: ${resultText}`;
     if (section.title !== tooltip) section.title = tooltip;
     if (!section.isConnected) container.prepend(section);
+    if (section.isConnected && !compatibilityHitReported) {
+      compatibilityHitReported = true;
+      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.smart-router.summary");
+    }
   }
 
   function scheduleRender() {
@@ -908,13 +915,24 @@
     }
   }
 
-  function handleAppHostData(data, direction = "server") {
+  function handleAppHostData(data, direction = "server", rawFrame = data, decodeFrame = null) {
     // 后台页不渲染摘要；恢复可见时会从 gateway 权威状态重新 hydrate，无需持续解析 App Server 帧。
     if (document.visibilityState === "hidden") return;
+    if (data && typeof data === "object") {
+      // ProtocolPipeline 已统一解码的帧直接复用，避免 Token 与摘要消费者各做一次 JSON.parse。
+      if (
+        typeof rawFrame === "string" &&
+        !rawFrame.includes("turn/") &&
+        !rawFrame.includes("thread/")
+      ) return;
+      visitProtocolMessages(data, direction);
+      return;
+    }
     if (typeof data !== "string" || !data.trim()) return;
     if (!data.includes("turn/") && !data.includes("thread/")) return;
     try {
-      visitProtocolMessages(JSON.parse(data), direction);
+      const decoded = typeof decodeFrame === "function" ? decodeFrame() : JSON.parse(data);
+      visitProtocolMessages(decoded, direction);
     } catch {}
   }
 
@@ -968,11 +986,11 @@
   function install() {
     if (installed) return;
     installed = true;
-    const observer = new MutationObserver((records) => {
+    const handleObservedMutations = (records) => {
       // 后台错过的侧栏/摘要挂载会在 visibilitychange 中全量校正，无需持续处理 DOM 流。
       if (document.visibilityState === "hidden") return;
       handleMutations(records);
-    });
+    };
     const observerOptions = {
       attributes: true,
       attributeFilter: [
@@ -983,18 +1001,22 @@
       childList: true,
       subtree: true,
     };
-    let observerActive = false;
+    let disposeObservation = null;
     const startObservation = () => {
-      if (observerActive || document.visibilityState === "hidden") return;
-      observer.observe(document.documentElement, observerOptions);
-      observerActive = true;
+      if (disposeObservation || document.visibilityState === "hidden") return;
+      disposeObservation = adapterHost.dom.observe({
+        key: {},
+        root: document.documentElement,
+        options: observerOptions,
+        callback: handleObservedMutations,
+      });
     };
     const stopObservation = () => {
-      if (observerActive) observer.disconnect();
-      observerActive = false;
+      disposeObservation?.();
+      disposeObservation = null;
     };
     // React 可能复用侧栏行并只修改活动属性，属性变化也必须触发当前任务同步。
-    document.addEventListener("visibilitychange", () => {
+    adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: () => {
       if (document.visibilityState === "hidden") {
         // 后台期间同时停止全页 observer 与协议解析；可见后通过当前路由和 HTTP 权威状态补齐。
         stopObservation();
@@ -1004,10 +1026,15 @@
       syncCurrentThread();
       void hydrateActiveRoute(currentThreadId());
       scheduleRender();
+    } });
+    adapterHost.events.observe({ key: {}, target: w, type: "popstate", callback: syncCurrentThread });
+    adapterHost.events.observe({ key: {}, target: w, type: "opencodex:plugin-event", callback: handlePluginEvent });
+    adapterHost.events.observe({
+      key: {},
+      target: w,
+      type: "opencodex:smart-scheduling-config-changed",
+      callback: (event) => applyConfiguration(event.detail),
     });
-    w.addEventListener("popstate", syncCurrentThread);
-    w.addEventListener("opencodex:plugin-event", handlePluginEvent);
-    w.addEventListener("opencodex:smart-scheduling-config-changed", (event) => applyConfiguration(event.detail));
     startObservation();
     syncCurrentThread();
     void loadConfiguration();
@@ -1043,6 +1070,11 @@
     },
   });
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install, { once: true });
-  else install();
+  if (document.readyState === "loading") {
+    let disposeReady = () => {};
+    disposeReady = adapterHost.events.observe({ key: {}, target: document, type: "DOMContentLoaded", callback: () => {
+      disposeReady();
+      install();
+    } });
+  } else install();
 })();

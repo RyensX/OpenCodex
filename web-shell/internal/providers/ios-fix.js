@@ -77,21 +77,24 @@
     builtin: true,
     order: 15,
     activate(context) {
+      const adapterHost = w.__OpenCodexAdapterHost;
       if (
         context.scope !== "renderer" ||
         !document ||
         !isIOSWebKitDevice() ||
-        document.__opencodexIosFixInstalled
+        document.__opencodexIosFixInstalled ||
+        !adapterHost?.dom?.observe ||
+        !adapterHost?.events?.observe
       ) {
         return null;
       }
       const viewportCoordinator = w.__OpenCodexViewportCoordinator;
       if (!viewportCoordinator || typeof viewportCoordinator.subscribe !== "function") return null;
       document.__opencodexIosFixInstalled = true;
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.ios-layout");
+      w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.plugin.ios-layout");
 
       let keyboardOpeningUntilMs = 0;
-      let mutationObserver = null;
+      let disposeMutationObservation = null;
       let mutationSettleTimer = 0;
       let markedAppShell = null;
       let largestObservedLayoutHeight = 0;
@@ -468,6 +471,7 @@
         setStyleValue(root, "--opencodex-ios-visual-viewport-offset-top", cssPixel(metrics.offsetTop));
         setStyleValue(root, "--opencodex-ios-keyboard-inset-bottom", cssPixel(metrics.keyboardInset));
         syncAppShellMark(true);
+        w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.ios-layout");
 
         lastDebugState = {
           keyboardInset: roundedNumber(metrics.keyboardInset),
@@ -494,35 +498,37 @@
       const observeAppRoot = () => {
         if (
           document.visibilityState === "hidden" ||
-          mutationObserver ||
+          disposeMutationObservation ||
           !document.body ||
-          typeof w.MutationObserver !== "function"
+          !adapterHost?.dom?.observe
         ) {
           return;
         }
         let observedRoot = null;
-        const observeCurrentRoot = () => {
-          const nextRoot = rootElement();
-          if (nextRoot === observedRoot) return !!nextRoot;
-          mutationObserver.disconnect();
-          observedRoot = nextRoot;
-          if (observedRoot) {
-            // app shell 永远是 #root 的第一层容器，只观察这一层即可避开正文流式 DOM 热路径。
-            mutationObserver.observe(observedRoot, { childList: true });
-            return true;
-          }
-          // 极早加载时 #root 可能尚未创建；这里只短暂观察 body 直属子节点，出现后立即收窄。
-          mutationObserver.observe(document.body, { childList: true });
-          return false;
-        };
-        mutationObserver = new w.MutationObserver((records) => {
+        const handleRootMutations = (records) => {
           const wasWaitingForRoot = !observedRoot;
           const hasRoot = observeCurrentRoot();
           if (!hasRoot || (!wasWaitingForRoot && !records.some((record) => record.target === observedRoot))) return;
           if (mutationSettleTimer) w.clearTimeout(mutationSettleTimer);
           // 顶层容器批量替换后稍后统一定位 app shell，避免在 React 提交中间态重复测量。
           mutationSettleTimer = w.setTimeout(() => scheduleViewportUpdate("ios-dom"), 50);
-        });
+        };
+        const observeCurrentRoot = () => {
+          const nextRoot = rootElement();
+          if (nextRoot === observedRoot) return !!nextRoot;
+          disposeMutationObservation?.();
+          disposeMutationObservation = null;
+          observedRoot = nextRoot;
+          const target = observedRoot || document.body;
+          // app shell 永远是 #root 的第一层容器；极早加载时只短暂观察 body，出现后立即收窄。
+          disposeMutationObservation = adapterHost.dom.observe({
+            key: {},
+            root: target,
+            options: { childList: true },
+            callback: handleRootMutations,
+          });
+          return !!observedRoot;
+        };
         observeCurrentRoot();
       };
 
@@ -531,8 +537,8 @@
           // 隐藏页不需要追踪 React 顶层容器替换；前台恢复时重新定位当前根节点即可。
           if (mutationSettleTimer) w.clearTimeout(mutationSettleTimer);
           mutationSettleTimer = 0;
-          mutationObserver?.disconnect();
-          mutationObserver = null;
+          disposeMutationObservation?.();
+          disposeMutationObservation = null;
           return;
         }
         observeAppRoot();
@@ -543,15 +549,20 @@
       });
 
       const disposeViewport = viewportCoordinator.subscribe(updateViewportState);
-      document.addEventListener("visibilitychange", handleDocumentVisibility);
+      const disposeVisibility = adapterHost.events.observe({
+        key: {},
+        target: document,
+        type: "visibilitychange",
+        callback: handleDocumentVisibility,
+      });
       observeAppRoot();
 
       return () => {
         disposePreference();
         disposeViewport();
-        document.removeEventListener("visibilitychange", handleDocumentVisibility);
+        disposeVisibility();
         if (mutationSettleTimer) w.clearTimeout(mutationSettleTimer);
-        if (mutationObserver) mutationObserver.disconnect();
+        disposeMutationObservation?.();
         if (style.parentNode) style.parentNode.removeChild(style);
         if (w[DEBUG_GLOBAL] === debugSnapshot) delete w[DEBUG_GLOBAL];
         clearViewportState();

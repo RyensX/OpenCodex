@@ -55,7 +55,6 @@ test("compatibility service binds existing behavior behind a tracked capability"
     },
     {
       locatorRevision: "html-lang-v1",
-      strategyId: "html-transform",
       verify: () => true,
     }
   );
@@ -140,7 +139,13 @@ test("compatibility report store writes latest and bounded per-runtime history a
     fs.utimesSync(historyPath, adjustedTime, adjustedTime);
   }
 
-  assert.equal(store.read().runtime.version, "26.3");
+  const normalizedLegacyReport = store.read();
+  assert.equal(normalizedLegacyReport.runtime.version, "26.3");
+  assert.equal(normalizedLegacyReport.schemaVersion, 2);
+  assert.equal(normalizedLegacyReport.sourceSchemaVersion, 1);
+  assert.equal(normalizedLegacyReport.readOnly, true);
+  assert.equal(normalizedLegacyReport.groups.length, 3);
+  assert.equal(normalizedLegacyReport.adapterTypes[0].id, "adapter.legacy-report");
   assert.equal(fs.readdirSync(historyDir).length, 2);
   assert.equal(fs.readdirSync(path.dirname(filePath)).some((name) => name.includes(".tmp-")), false);
   assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
@@ -176,7 +181,7 @@ test("repeating the same runtime identity keeps installed capability handles val
   const capability = service.bindCapability(
     "gateway.runtime.electron.dialog-open",
     (value) => value,
-    { locatorRevision: "dialog-v1", strategyId: "test" }
+    { locatorRevision: "dialog-v1" }
   );
 
   service.setRuntimeIdentity({ version: "26.8", build: "1", bundleHash: "bundle-a" });

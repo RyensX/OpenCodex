@@ -5,7 +5,12 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 const { PATCHED_OFFICIAL_PREFIX } = require("../runtime/core/config.cjs");
-const { pluginMessagesForLocale } = require("../runtime/core/plugin-assets.cjs");
+const {
+  listPluginEntries,
+  pluginEntryFileFromRequestPath,
+  pluginMessagesForLocale,
+  pluginSdkRangeCompatible,
+} = require("../runtime/core/plugin-assets.cjs");
 const { createCompatibilityService } = require("../runtime/compatibility/service.cjs");
 const {
   OPENCODEX_RUNTIME_BOOTSTRAP_PATH,
@@ -13,35 +18,12 @@ const {
 } = require("../runtime/http/static-assets.cjs");
 
 const WEB_SHELL_INDEX = path.resolve(__dirname, "..", "..", "web-shell", "index.html");
-const BRIDGE_POLYFILL = path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js");
-const SMART_SCHEDULING_SETTINGS = path.resolve(
-  __dirname,
-  "..",
-  "..",
-  "web-shell",
-  "codex-smart-model-router-settings.js"
-);
-const SMART_SCHEDULING_INJECTION_HEALTH = path.resolve(
-  __dirname,
-  "..",
-  "..",
-  "web-shell",
-  "codex-smart-scheduling-injection-health.js"
-);
-const SMART_SCHEDULING_COMPOSER = path.resolve(
-  __dirname,
-  "..",
-  "..",
-  "web-shell",
-  "codex-smart-model-router-composer.js"
-);
-const SMART_SCHEDULING_SUMMARY = path.resolve(
-  __dirname,
-  "..",
-  "..",
-  "web-shell",
-  "codex-smart-scheduling-summary.js"
-);
+const INTERNAL_PROVIDER_DIR = path.resolve(__dirname, "..", "..", "web-shell", "internal", "providers");
+const BRIDGE_POLYFILL = path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js");
+const SMART_SCHEDULING_SETTINGS = path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-settings.js");
+const SMART_SCHEDULING_INJECTION_HEALTH = path.join(INTERNAL_PROVIDER_DIR, "codex-smart-scheduling-injection-health.js");
+const SMART_SCHEDULING_COMPOSER = path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-composer.js");
+const SMART_SCHEDULING_SUMMARY = path.join(INTERNAL_PROVIDER_DIR, "codex-smart-scheduling-summary.js");
 const SMART_SCHEDULING_SUMMARY_CSS = path.resolve(
   __dirname,
   "..",
@@ -62,9 +44,9 @@ const TOKEN_USAGE_INLINE_PLUGIN = path.resolve(
   "..",
   "..",
   "web-shell",
-  "plugins",
-  "token-usage-inline",
-  "index.js"
+  "internal",
+  "providers",
+  "token-usage-inline.js"
 );
 const MESSAGE_FOR_VIEW_CHANNEL = "codex_desktop:message-for-view";
 const WINDOW_FOCUS_CHANGED_MESSAGE = "electron-window-focus-changed";
@@ -195,9 +177,18 @@ test("runtime compatibility diagnostics are public, grouped, explained, and repo
   const page = fs.readFileSync(service.staticFile(pagePath), "utf8");
   assert.match(page, /id="pointsTable"/);
   assert.doesNotMatch(page, /id="featureList"/);
-  for (const help of ["overall", "location", "application", "verification", "exercise"]) {
+  for (const help of ["adapter", "overall", "location", "application", "verification", "exercise"]) {
     assert.match(page, new RegExp(`data-help="${help}"`));
   }
+  assert.match(page, /分组只用于查看，不影响启用、回退或执行决策/);
+  assert.doesNotMatch(page, /未归组|独立修改点/);
+  const diagnosticsScript = fs.readFileSync(service.staticFile("/opencodex/runtime-compatibility.js"), "utf8");
+  const diagnosticsStyles = fs.readFileSync(service.staticFile("/opencodex/runtime-compatibility.css"), "utf8");
+  assert.match(diagnosticsScript, /point\.adapterChainIds/);
+  assert.match(diagnosticsScript, /snapshot\.adapterTypes/);
+  assert.match(diagnosticsScript, /feature-title-line/);
+  assert.doesNotMatch(diagnosticsScript, /snapshot\.features/);
+  assert.match(diagnosticsStyles, /\.feature-title-line/);
   const loginShell = fs.readFileSync(WEB_SHELL_INDEX, "utf8");
   assert.match(loginShell, /href="\/settings\/developer\/runtime-compatibility"/);
 
@@ -686,7 +677,7 @@ test("injects remote file actions after the bridge polyfill", (t) => {
   assert.equal(remoteFileIndex > bridgeIndex, true);
   assert.equal(
     service.staticFile("/codex-remote-file-actions.js"),
-    path.resolve(__dirname, "..", "..", "web-shell", "codex-remote-file-actions.js")
+    path.join(INTERNAL_PROVIDER_DIR, "codex-remote-file-actions.js")
   );
 });
 
@@ -715,11 +706,11 @@ test("injects smart scheduling settings and summary into the authenticated rende
   );
   assert.equal(
     service.staticFile("/codex-smart-model-router-settings.js"),
-    path.resolve(__dirname, "..", "..", "web-shell", "codex-smart-model-router-settings.js")
+    path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-settings.js")
   );
   assert.equal(
     service.staticFile("/codex-smart-scheduling-summary.js"),
-    path.resolve(__dirname, "..", "..", "web-shell", "codex-smart-scheduling-summary.js")
+    path.join(INTERNAL_PROVIDER_DIR, "codex-smart-scheduling-summary.js")
   );
 });
 
@@ -935,7 +926,11 @@ test("plugin i18n falls back to Chinese when the current locale omits a key", ()
   const pluginDir = path.join(root, "only-chinese-plugin");
   const messageKey = "plugin.onlyChinesePlugin.fallback";
   fs.mkdirSync(pluginDir);
-  fs.writeFileSync(path.join(pluginDir, "index.js"), "(function () {})();");
+  fs.writeFileSync(path.join(pluginDir, "plugin.json"), JSON.stringify({
+    id: "example.only-chinese-plugin",
+    name: "Only Chinese plugin",
+    defaultEnabled: true,
+  }));
   fs.writeFileSync(path.join(pluginDir, "i18.zh.json"), JSON.stringify({ [messageKey]: "中文默认文案" }));
 
   const previousRoots = process.env.OPENCODEX_PLUGIN_DIRS;
@@ -953,7 +948,7 @@ test("plugin i18n falls back to Chinese when the current locale omits a key", ()
 test("smart scheduling summary follows root-path task context while Auto remains enabled", () => {
   const source = fs.readFileSync(SMART_SCHEDULING_SUMMARY, "utf-8");
   const styles = fs.readFileSync(SMART_SCHEDULING_SUMMARY_CSS, "utf-8");
-  const bridge = fs.readFileSync(path.resolve(__dirname, "..", "..", "web-shell", "codex-bridge-polyfill.js"), "utf-8");
+  const bridge = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js"), "utf-8");
 
   // 独立分类复用官方摘要面板结构，所有文案读取插件 i18n，并覆盖三类终止路径。
   assert.match(source, /data-pip-obstacle="thread-summary-panel/);
@@ -1155,6 +1150,8 @@ test("plugin loader registers manifest-only plugins without inventing an index s
   assert.match(source, /opencodex\.smart-model-router/);
   assert.doesNotMatch(source, /smart-model-router\/index\.js/);
   assert.match(source, /registerPlugin\(manifest\)/);
+  assert.match(source, /createPluginScope\(entry\.manifest\)/);
+  assert.match(source, /sdk\.commit\(\)/);
 
   function executeWithConfig(gatewayPluginConfig) {
     let reloadCount = 0;
@@ -1184,6 +1181,49 @@ test("plugin loader registers manifest-only plugins without inventing an index s
   assert.equal(executeWithConfig(undefined), 0);
   // 已认证直达页发现升级前遗留操作时只回退一次，让原同步壳提交该操作。
   assert.equal(executeWithConfig({ plugins: [] }), 1);
+});
+
+test("external plugins require an SDK-compatible ESM v2 entry and never execute index.js", (t) => {
+  const root = makeTempDir(t);
+  const modernDir = path.join(root, "modern-plugin");
+  const legacyDir = path.join(root, "legacy-plugin");
+  fs.mkdirSync(path.join(modernDir, "dist"), { recursive: true });
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.writeFileSync(path.join(modernDir, "plugin.json"), JSON.stringify({
+    id: "example.modern",
+    apiVersion: 2,
+    entry: "dist/index.mjs",
+    sdkVersion: "^2.0.0",
+  }));
+  fs.writeFileSync(path.join(modernDir, "dist", "index.mjs"), "export default sdk => void sdk;");
+  fs.writeFileSync(path.join(legacyDir, "plugin.json"), JSON.stringify({ id: "example.legacy" }));
+  fs.writeFileSync(path.join(legacyDir, "index.js"), "throw new Error('must not execute');");
+
+  const previousRoots = process.env.OPENCODEX_PLUGIN_DIRS;
+  try {
+    process.env.OPENCODEX_PLUGIN_DIRS = root;
+    const entries = listPluginEntries();
+    const modern = entries.find((entry) => entry.manifest.id === "example.modern");
+    const legacy = entries.find((entry) => entry.manifest.id === "example.legacy");
+    assert.equal(modern.entryFile, fs.realpathSync(path.join(modernDir, "dist", "index.mjs")));
+    assert.match(modern.urlPath, /modern-plugin\/entry\.mjs$/);
+    assert.equal(pluginEntryFileFromRequestPath(`/opencodex-plugins/${modern.urlPath}`), modern.entryFile);
+    assert.equal(legacy.entryFile, null);
+    assert.equal(legacy.urlPath, "");
+    const aggregateSource = runtimeBootstrapSource(createService(makeOfficialWebviewDir(t)));
+    assert.match(aggregateSource, /createPluginScope\(entry\.manifest\)/);
+    assert.match(aggregateSource, /modern-plugin\/entry\.mjs/);
+    assert.doesNotMatch(aggregateSource, /must not execute/);
+  } finally {
+    if (previousRoots === undefined) delete process.env.OPENCODEX_PLUGIN_DIRS;
+    else process.env.OPENCODEX_PLUGIN_DIRS = previousRoots;
+  }
+
+  assert.equal(pluginSdkRangeCompatible("2.0.0"), true);
+  assert.equal(pluginSdkRangeCompatible("^2.0.0"), true);
+  assert.equal(pluginSdkRangeCompatible(">=2 <3"), true);
+  assert.equal(pluginSdkRangeCompatible("^3.0.0"), false);
+  assert.equal(pluginSdkRangeCompatible(""), false);
 });
 
 test("renames official open-in-folder locale message only for remote browser hosts", (t) => {

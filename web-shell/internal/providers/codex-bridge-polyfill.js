@@ -1,6 +1,8 @@
 (function () {
   const w = window;
   if (w.__codexBridgePolyfillInstalled) return;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe || !adapterHost?.hooks?.around || !adapterHost?.protocol?.publish) return;
   w.__codexBridgePolyfillInstalled = true;
   const cfg = (w.__CODEX_WEB_CONFIG__ =
     w.__CODEX_WEB_CONFIG__ || {
@@ -132,8 +134,8 @@
     }
   }
 
-  function handleTokenUsageAppHostData(data) {
-    tokenUsageCapability?.handleAppHostData?.(data);
+  function handleTokenUsageAppHostData(data, rawFrame = data, decodeFrame = null) {
+    tokenUsageCapability?.handleAppHostData?.(data, rawFrame, decodeFrame);
   }
 
   function handleTokenUsageGatewayPayload(payload) {
@@ -142,20 +144,37 @@
 
   const smartSchedulingBridgeStats = { clientFrames: 0, serverFrames: 0, protocolFrames: 0 };
 
-  function handleSmartSchedulingAppHostData(data, direction) {
+  function handleSmartSchedulingAppHostData(data, direction, rawFrame = data, decodeFrame = null) {
     // 智能调度的展示状态由独立模块维护，bridge 只标记帧方向并保持原始内容透明转发。
     if (direction === "client") smartSchedulingBridgeStats.clientFrames += 1;
     else smartSchedulingBridgeStats.serverFrames += 1;
-    if (typeof data === "string" && (data.includes("turn/") || data.includes("thread/"))) {
+    if (typeof rawFrame === "string" && (rawFrame.includes("turn/") || rawFrame.includes("thread/"))) {
       smartSchedulingBridgeStats.protocolFrames += 1;
     }
-    w.__OpenCodexSmartSchedulingSummary?.handleAppHostData?.(data, direction);
+    w.__OpenCodexSmartSchedulingSummary?.handleAppHostData?.(data, direction, rawFrame, decodeFrame);
   }
 
   function handleSmartSchedulingGatewayMessage(message) {
     if (!message || message.type !== "opencodex:smart-scheduling-route") return false;
     w.__OpenCodexSmartSchedulingSummary?.handleRouteEvent?.(message.event);
     return true;
+  }
+
+  const appHostProtocolChannel = adapterHost.protocol.channels.appHost;
+  adapterHost.protocol.observe({
+    key: {},
+    channel: appHostProtocolChannel,
+    propagateErrors: true,
+    callback(frame) {
+      const direction = frame.metadata.direction === "client" ? "client" : "server";
+      if (direction === "server") handleTokenUsageAppHostData(frame.raw, frame.raw, frame.decode);
+      handleSmartSchedulingAppHostData(frame.raw, direction, frame.raw, frame.decode);
+    },
+  });
+
+  function publishAppHostData(data, direction) {
+    // 同一帧只在 ProtocolPipeline 中解码一次，再分发给 Token 与智能调度消费者。
+    adapterHost.protocol.publish({ channel: appHostProtocolChannel, value: data, metadata: { direction } });
   }
 
   w.__OpenCodexSmartSchedulingBridgeDiagnostics = Object.freeze({
@@ -1171,11 +1190,12 @@
     document.__codexGatewayAuthMenuInjectionInstalled = true;
     const MENU_SESSION_TTL_MS = 2_500;
     let scheduled = false;
-    let menuObserver = null;
+    let disposeMenuObservation = null;
     let menuObserverExpiryTimer = 0;
     const pendingScanRoots = new Set();
     const stopMenuObservation = () => {
-      menuObserver?.disconnect();
+      disposeMenuObservation?.();
+      disposeMenuObservation = null;
       if (menuObserverExpiryTimer) w.clearTimeout(menuObserverExpiryTimer);
       menuObserverExpiryTimer = 0;
     };
@@ -1228,9 +1248,13 @@
       }
     };
     const observeGatewayAuthMenuSession = () => {
-      menuObserver ||= new MutationObserver(handleMenuMutations);
-      menuObserver.disconnect();
-      menuObserver.observe(document.documentElement, { childList: true, subtree: true });
+      disposeMenuObservation?.();
+      disposeMenuObservation = adapterHost.dom.observe({
+        key: {},
+        root: document.documentElement,
+        options: { childList: true, subtree: true },
+        callback: handleMenuMutations,
+      });
       if (menuObserverExpiryTimer) w.clearTimeout(menuObserverExpiryTimer);
       // 菜单通常在同一帧挂载；有限会话兼容慢设备，同时不让观察器进入正文流式热路径。
       menuObserverExpiryTimer = w.setTimeout(stopMenuObservation, MENU_SESSION_TTL_MS);
@@ -1257,12 +1281,12 @@
       }
     };
     const start = () => {
-      document.addEventListener("pointerdown", handlePointerInteraction, true);
-      document.addEventListener("click", handlePointerInteraction, true);
-      document.addEventListener("keydown", handleKeyInteraction, true);
+      adapterHost.events.observe({ key: {}, target: document, type: "pointerdown", capture: true, callback: handlePointerInteraction });
+      adapterHost.events.observe({ key: {}, target: document, type: "click", capture: true, callback: handlePointerInteraction });
+      adapterHost.events.observe({ key: {}, target: document, type: "keydown", capture: true, callback: handleKeyInteraction });
     };
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", start, { once: true });
+      adapterHost.events.observe({ key: {}, target: document, type: "DOMContentLoaded", once: true, callback: start });
     } else {
       start();
     }
@@ -1688,6 +1712,7 @@
       let finished = false;
       let focusCheckTimer = 0;
       let sessionTimeout = 0;
+      let disposeFocus = null;
       const allowMultiple = pickFilesAllowsMultiple(params);
       const accept = pickFilesAccept(params);
 
@@ -1700,7 +1725,8 @@
       input.style.opacity = "0";
 
       const cleanup = () => {
-        w.removeEventListener("focus", handleFocus, true);
+        disposeFocus?.();
+        disposeFocus = null;
         if (focusCheckTimer) w.clearTimeout(focusCheckTimer);
         if (sessionTimeout) w.clearTimeout(sessionTimeout);
         focusCheckTimer = 0;
@@ -1735,7 +1761,7 @@
         { once: true }
       );
       input.addEventListener("cancel", () => finish([]), { once: true });
-      w.addEventListener("focus", handleFocus, true);
+      disposeFocus = adapterHost.events.observe({ key: {}, target: w, type: "focus", capture: true, callback: handleFocus });
       activeBrowserFilePickerCancel = cancelPicker;
       // 某些 WebView 既不触发 cancel 也不恢复 focus；兜底释放离屏 input 与窗口监听。
       sessionTimeout = w.setTimeout(cancelPicker, FILE_PICKER_SESSION_TIMEOUT_MS);
@@ -2302,8 +2328,7 @@
       });
       return true;
     }
-    handleTokenUsageAppHostData(data);
-    handleSmartSchedulingAppHostData(data, "server");
+    publishAppHostData(data, "server");
     try {
       state.port.postMessage(data);
       if (data === null) closeAppHostRelay(state, "official_closed", false);
@@ -2321,7 +2346,7 @@
   function installAppHostMessagePortBridge() {
     if (w.__codexAppHostMessagePortBridgeInstalled) return;
     w.__codexAppHostMessagePortBridgeInstalled = true;
-    w.addEventListener("message", (event) => {
+    adapterHost.events.observe({ key: {}, target: w, type: "message", callback: (event) => {
       // 官方 renderer 按 Electron preload 协议给 window 自己 postMessage，不处理 iframe/外部来源。
       if (event.source !== w) return;
       const data = event.data;
@@ -2361,7 +2386,7 @@
           return;
         }
         // 当前官方 Web 路由固定为根路径；展示模块需从本标签页发出的 RPC 识别正在查看的 thread。
-        handleSmartSchedulingAppHostData(portData, "client");
+        publishAppHostData(portData, "client");
         queueAppHostRelayPayload(state, { type: "app-host-port-message", data: portData });
         if (portData === null) closeAppHostRelay(state, "browser_closed", false);
       });
@@ -2380,7 +2405,7 @@
         wsReady,
         wsState: websocketStateName(ws),
       });
-    });
+    } });
   }
 
   function payloadFromIpcArgs(args) {
@@ -2785,7 +2810,7 @@
   function installAppFsImageRewrite() {
     if (!document || document.__codexAppFsImageRewriteInstalled) return;
     document.__codexAppFsImageRewriteInstalled = true;
-    let observer = null;
+    let disposeObservation = null;
 
     const scanExistingImages = () => {
       document
@@ -2794,23 +2819,22 @@
     };
 
     const stopObservation = () => {
-      observer?.disconnect();
+      disposeObservation?.();
+      disposeObservation = null;
     };
 
     const startObservation = () => {
       if (document.visibilityState === "hidden") return;
       // 后台期间可能新增图片；回前台先补扫一次，再恢复仅 src 属性观察。
       scanExistingImages();
-      if (typeof MutationObserver !== "function") return;
-      observer ||= new MutationObserver((mutations) => {
-        for (const mutation of mutations) {
-          rewriteAppFsImageElement(mutation.target);
-        }
-      });
-      observer.observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ["src"],
-        subtree: true,
+      disposeObservation?.();
+      disposeObservation = adapterHost.dom.observe({
+        key: {},
+        root: document.documentElement,
+        options: { attributes: true, attributeFilter: ["src"], subtree: true },
+        callback(mutations) {
+          for (const mutation of mutations) rewriteAppFsImageElement(mutation.target);
+        },
       });
     };
 
@@ -2821,12 +2845,12 @@
 
     const start = () => {
       // 安装前已经存在或已经失败的图片只在启动时扫描一次。
-      document.addEventListener("error", handleAppFsImageError, true);
-      document.addEventListener("visibilitychange", handleVisibility);
+      adapterHost.events.observe({ key: {}, target: document, type: "error", capture: true, callback: handleAppFsImageError });
+      adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: handleVisibility });
       startObservation();
     };
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", start, { once: true });
+      adapterHost.events.observe({ key: {}, target: document, type: "DOMContentLoaded", once: true, callback: start });
     } else {
       start();
     }
@@ -3663,7 +3687,7 @@
   }
 
   // 已连接 socket 保持后台业务语义；只有断线重试暂停，回到前台后再按原退避策略恢复。
-  document.addEventListener("visibilitychange", handleReconnectVisibilityChange);
+  adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: handleReconnectVisibilityChange });
   w.OpenCodexRuntimeCompatibility?.reportMany?.([
     "web.runtime.platform.desktop-globals",
     "web.runtime.bridge.desktop-api",

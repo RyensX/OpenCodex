@@ -69,7 +69,6 @@ function createInjectionHealthRegistry({ getRuntimeIdentity = () => ({}), compat
       try {
         compatibilityService?.installPoint(compatibilityPoint, {
           locatorRevision: "smart-router-injection-v1",
-          strategyId: "legacy-health-adapter",
         });
         compatibilityService?.recordHit(compatibilityPoint);
       } catch {}
@@ -95,7 +94,8 @@ function createInjectionHealthRegistry({ getRuntimeIdentity = () => ({}), compat
         compatibilityService?.browserReport({
           clientId: normalizedId,
           id: compatibilityPoint,
-          phase: "active",
+          // 健康回执只证明脚本和观察器已安装；真实 DOM 效果由对应语义 Provider 单独上报命中。
+          phase: "installed",
         });
       } catch {}
     }

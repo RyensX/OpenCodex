@@ -43,6 +43,7 @@ const LATE_STARTUP_MODULE_PREFIXES = [
 
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
 const OPENCODEX_PLUGIN_SYSTEM_PATH = "/opencodex-plugin-system.js";
+const OPENCODEX_MODIFICATION_RUNTIME_PATH = "/opencodex-modification-runtime.js";
 const OPENCODEX_GATEWAY_PLUGIN_SWITCHES_PATH = "/opencodex-gateway-plugin-switches.js";
 const CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH = "/codex-smart-model-router-settings.css";
 const CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH = "/codex-smart-scheduling-injection-health.js";
@@ -75,6 +76,22 @@ const OFFICIAL_LOADING_SHIMMER_POWER_GUARD = [
   "</style>",
 ].join("");
 const WEB_SHELL_ASSETS_DIR = path.join(WEB_SHELL_DIR, "assets");
+const OPENCODEX_MODIFICATION_RUNTIME_FILE = path.join(
+  __dirname,
+  "..",
+  "..",
+  "dist",
+  "web",
+  "opencodex-modification-runtime.js"
+);
+const INTERNAL_PROVIDER_DIR = path.join(WEB_SHELL_DIR, "internal", "providers");
+const BUILTIN_PROVIDER_FILES = new Map([
+  ["/opencodex/internal/providers/mobile-keyboard-optimization.js", path.join(INTERNAL_PROVIDER_DIR, "mobile-keyboard-optimization.js")],
+  ["/opencodex/internal/providers/ios-fix.js", path.join(INTERNAL_PROVIDER_DIR, "ios-fix.js")],
+  ["/opencodex/internal/providers/mobile-sidebar-auto-collapse.js", path.join(INTERNAL_PROVIDER_DIR, "mobile-sidebar-auto-collapse.js")],
+  ["/opencodex/internal/providers/token-usage-inline.js", path.join(INTERNAL_PROVIDER_DIR, "token-usage-inline.js")],
+  ["/opencodex/internal/providers/project-recent-sort.js", path.join(INTERNAL_PROVIDER_DIR, "project-recent-sort.js")],
+]);
 const OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID = "artifactTab.preview.openInFolder";
 const OPENCODEX_DOWNLOAD_FILE_MESSAGE_ID = "web.remoteFile.downloadFile";
 const JS_STRING_LITERAL = String.raw`(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|` + "`" + String.raw`(?:\\.|[^` + "`" + String.raw`\\])*` + "`" + ")";
@@ -209,6 +226,8 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [RUNTIME_COMPATIBILITY_SETTINGS_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.html")],
   [RUNTIME_COMPATIBILITY_SCRIPT_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.js")],
   [RUNTIME_COMPATIBILITY_STYLE_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.css")],
+  [OPENCODEX_MODIFICATION_RUNTIME_PATH, OPENCODEX_MODIFICATION_RUNTIME_FILE],
+  ...BUILTIN_PROVIDER_FILES,
   [OPENCODEX_PLUGIN_SYSTEM_PATH, path.join(WEB_SHELL_DIR, "opencodex-plugin-system.js")],
   [
     OPENCODEX_RUNTIME_COMPATIBILITY_PATH,
@@ -224,28 +243,28 @@ const WEB_SHELL_STATIC_FILES = new Map([
   ],
   [
     CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH,
-    path.join(WEB_SHELL_DIR, "codex-smart-scheduling-injection-health.js"),
+    path.join(INTERNAL_PROVIDER_DIR, "codex-smart-scheduling-injection-health.js"),
   ],
-  [CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH, path.join(WEB_SHELL_DIR, "codex-smart-model-router-settings.js")],
-  [CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH, path.join(WEB_SHELL_DIR, "codex-smart-model-router-composer.js")],
+  [CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-settings.js")],
+  [CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-composer.js")],
   [
     CODEX_SMART_SCHEDULING_SUMMARY_CSS_PATH,
     path.join(WEB_SHELL_DIR, "codex-smart-scheduling-summary.css"),
   ],
-  [CODEX_SMART_SCHEDULING_SUMMARY_PATH, path.join(WEB_SHELL_DIR, "codex-smart-scheduling-summary.js")],
-  [OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH, path.join(WEB_SHELL_DIR, "codex-token-usage-capability.js")],
+  [CODEX_SMART_SCHEDULING_SUMMARY_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-smart-scheduling-summary.js")],
+  [OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-token-usage-capability.js")],
   [OPENCODEX_WINDOW_CONTROLS_OVERLAY_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css")],
-  [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.js")],
-  [OPENCODEX_SIDEBAR_PREVIEW_PATH, path.join(WEB_SHELL_DIR, "codex-sidebar-preview.js")],
+  [OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-window-controls-overlay.js")],
+  [OPENCODEX_SIDEBAR_PREVIEW_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-sidebar-preview.js")],
   [
     OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH,
-    path.join(WEB_SHELL_DIR, "codex-offscreen-animation-guard.js"),
+    path.join(INTERNAL_PROVIDER_DIR, "codex-offscreen-animation-guard.js"),
   ],
-  [CODEX_BRIDGE_POLYFILL_PATH, path.join(WEB_SHELL_DIR, "codex-bridge-polyfill.js")],
-  [CODEX_REMOTE_FILE_ACTIONS_PATH, path.join(WEB_SHELL_DIR, "codex-remote-file-actions.js")],
+  [CODEX_BRIDGE_POLYFILL_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js")],
+  [CODEX_REMOTE_FILE_ACTIONS_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-remote-file-actions.js")],
   [CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.css")],
-  [CODEX_WORKSPACE_ROOT_PICKER_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.js")],
-  [CODEX_TOOLTIP_DISMISS_GUARD_PATH, path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js")],
+  [CODEX_WORKSPACE_ROOT_PICKER_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-workspace-root-picker.js")],
+  [CODEX_TOOLTIP_DISMISS_GUARD_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-tooltip-dismiss-guard.js")],
 ]);
 
 // 静态资源层把官方 renderer/web-shell 的路径差异统一隐藏起来，server 只需要按 URL 取文件。
@@ -289,12 +308,11 @@ function createStaticAssetService({
     ])
   );
 
-  function compatibilityCapability(id, implementation, strategyId) {
+  function compatibilityCapability(id, implementation) {
     if (!compatibilityService) return implementation;
     try {
       return compatibilityService.bindCapability(id, implementation, {
         locatorRevision: "renderer-cache-v1",
-        strategyId,
         // 骨架自身不可用时仍执行原转换函数，保证接入前后的输出字节完全一致。
         fallback: implementation,
         verify: () => typeof implementation === "function",
@@ -304,11 +322,10 @@ function createStaticAssetService({
     }
   }
 
-  function installCompatibilityPoint(id, strategyId) {
+  function installCompatibilityPoint(id) {
     try {
       compatibilityService?.installPoint(id, {
         locatorRevision: "renderer-cache-v1",
-        strategyId,
       });
     } catch {}
   }
@@ -327,7 +344,6 @@ function createStaticAssetService({
     try {
       compatibilityService?.failPoint(id, new Error(reason), {
         locatorRevision: "renderer-cache-v1",
-        strategyId: "compressed-js",
         fallbackReason: "Official renderer behavior",
       });
     } catch {}
@@ -335,76 +351,63 @@ function createStaticAssetService({
 
   const patchHtmlLangCompatible = compatibilityCapability(
     "static.cache.renderer.html.lang",
-    patchHtmlLang,
-    "html-attribute"
+    patchHtmlLang
   );
   const patchHtmlViewportCompatible = compatibilityCapability(
     "static.cache.renderer.html.viewport",
-    patchHtmlViewport,
-    "html-meta"
+    patchHtmlViewport
   );
   const patchHtmlIconsCompatible = compatibilityCapability(
     "static.cache.renderer.html.icon-pwa",
-    patchHtmlIcons,
-    "html-link"
+    patchHtmlIcons
   );
   const patchHtmlAssetPathsCompatible = compatibilityCapability(
     "static.cache.renderer.html.asset-path-map",
-    patchHtmlAssetPaths,
-    "html-url-map"
+    patchHtmlAssetPaths
   );
   const patchHtmlFontPreloadsCompatible = compatibilityCapability(
     "static.cache.renderer.html.font-preload",
-    patchHtmlFontPreloads,
-    "html-link-filter"
+    patchHtmlFontPreloads
   );
   const patchOfficialAssetUrlsCompatible = compatibilityCapability(
     "static.cache.renderer.asset-namespace",
-    patchOfficialAssetUrls,
-    "patched-namespace"
+    patchOfficialAssetUrls
   );
   const patchOfficialCspUnsafeEvalCompatible = compatibilityCapability(
     "static.cache.renderer.csp.unsafe-eval",
-    patchOfficialCspUnsafeEval,
-    "csp-source"
+    patchOfficialCspUnsafeEval
   );
   const patchOfficialCspManifestSrcCompatible = compatibilityCapability(
     "static.cache.renderer.csp.manifest-src",
-    patchOfficialCspManifestSrc,
-    "csp-directive"
+    patchOfficialCspManifestSrc
   );
   const patchHistorySignalsCompatible = compatibilityCapability(
     "static.cache.renderer.history-turn-signals",
-    patchAppServerManagerSignalsChunk,
-    "compressed-js"
+    patchAppServerManagerSignalsChunk
   );
   const patchApplicationMenuCompatible = compatibilityCapability(
     "static.cache.renderer.application-menu",
-    patchApplicationMenuCapabilityCheck,
-    "compressed-js"
+    patchApplicationMenuCapabilityCheck
   );
   const patchRequestSchedulingCompatible = compatibilityCapability(
     "static.cache.renderer.app-server-request-scheduling",
-    patchAppServerRequestScheduling,
-    "compressed-js"
+    patchAppServerRequestScheduling
   );
   const patchPluginImageCompatible = compatibilityCapability(
     "static.cache.renderer.plugin-image-lazy-load",
-    patchPluginSummaryImageInlining,
-    "compressed-js"
+    patchPluginSummaryImageInlining
   );
   const patchOpenInFolderLocaleCompatible = compatibilityCapability(
     "static.cache.renderer.open-in-folder-locale",
-    patchOpenInFolderLocaleMessage,
-    "locale-literal"
+    patchOpenInFolderLocaleMessage
   );
-  for (const [id, strategyId] of [
-    ["static.cache.renderer.html.runtime-bootstrap", "html-bootstrap"],
-    ["static.cache.renderer.html.startup-preload", "html-preload"],
-    ["static.cache.renderer.html.sidebar-preview", "html-preview"],
-    ["static.cache.renderer.html.loading-animation", "html-style"],
+  for (const id of [
+    "static.cache.renderer.html.runtime-bootstrap",
+    "static.cache.renderer.html.startup-preload",
+    "static.cache.renderer.html.sidebar-preview",
+    "static.cache.renderer.html.loading-animation",
   ]) {
-    installCompatibilityPoint(id, strategyId);
+    installCompatibilityPoint(id);
   }
 
   function matchedPatchedOfficialPrefix(reqPath) {
@@ -676,30 +679,17 @@ function createStaticAssetService({
   }`;
   }
 
-  function pluginManifestRegistrationScript(entries) {
-    const manifests = entries.map((entry) => entry.manifest).filter(Boolean);
-    return `(() => {
-  const manifests = ${JSON.stringify(manifests)};
-  const pluginSystem = window.OpenCodexPluginSystem || window.__OpenCodexPluginSystem;
-  if (pluginSystem && typeof pluginSystem.registerPlugin === "function") {
-    for (const manifest of manifests) pluginSystem.registerPlugin(manifest);
-  }
-${pluginGatewayStateBootstrapScript()}
-})();\n`;
-  }
-
   function runtimeBootstrapFileGroups(entries) {
     return {
       beforePlugins: [
+        WEB_SHELL_STATIC_FILES.get(OPENCODEX_MODIFICATION_RUNTIME_PATH),
         WEB_SHELL_STATIC_FILES.get(OPENCODEX_RUNTIME_COMPATIBILITY_PATH),
         WEB_SHELL_STATIC_FILES.get(OPENCODEX_SIDEBAR_PREVIEW_PATH),
         WEB_SHELL_STATIC_FILES.get(OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH),
         WEB_SHELL_STATIC_FILES.get(OPENCODEX_PLUGIN_SYSTEM_PATH),
       ],
-      pluginSources: entries
-        .filter((entry) => entry.entryFile && entry.sourceId === "builtin")
-        .map((entry) => entry.entryFile),
       afterPlugins: [
+        ...BUILTIN_PROVIDER_FILES.keys(),
         CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH,
         CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH,
         CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH,
@@ -715,7 +705,7 @@ ${pluginGatewayStateBootstrapScript()}
   }
 
   function runtimeBootstrapFingerprint(entries, groups) {
-    const files = [...groups.beforePlugins, ...groups.pluginSources, ...groups.afterPlugins];
+    const files = [...groups.beforePlugins, ...groups.afterPlugins];
     const fileIdentities = files.map((file) => {
       try {
         const stat = fs.statSync(file);
@@ -735,8 +725,8 @@ ${pluginGatewayStateBootstrapScript()}
     // 每段脚本都用分号隔开，避免前一文件的尾部表达式与后一文件 IIFE 发生自动分号插入歧义。
     return [
       ...groups.beforePlugins.map(readText),
-      pluginManifestRegistrationScript(entries),
-      ...groups.pluginSources.map(readText),
+      // 聚合启动路径也必须使用 v2 ESM loader；不能把 export 语法当普通脚本拼进 IIFE。
+      createPluginLoaderScript(entries),
       ...groups.afterPlugins.map(readText),
     ].join("\n;\n");
   }
@@ -936,11 +926,13 @@ ${pluginGatewayStateBootstrapScript()}
         ]
       : [
           '<script src="/codex-web-config.js"></script>',
+          `<script src="${OPENCODEX_MODIFICATION_RUNTIME_PATH}"></script>`,
           `<script src="${OPENCODEX_RUNTIME_COMPATIBILITY_PATH}"></script>`,
           `<script src="${OPENCODEX_SIDEBAR_PREVIEW_PATH}"></script>`,
           `<script src="${OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH}"></script>`,
           `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
           `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
+          ...[...BUILTIN_PROVIDER_FILES.keys()].map((url) => `<script src="${url}"></script>`),
           `<script src="${CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH}"></script>`,
           `<script src="${CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH}"></script>`,
           `<script src="${CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH}"></script>`,
@@ -1162,33 +1154,40 @@ ${pluginGatewayStateBootstrapScript()}
     );
   }
 
-  function createPluginLoaderScript() {
-    const entries = listPluginEntries();
+  function createPluginLoaderScript(entries = listPluginEntries()) {
     const manifests = entries.map((entry) => entry.manifest).filter(Boolean);
-    const pluginUrls = entries
+    const executablePlugins = entries
       .filter((entry) => entry.entryFile && entry.urlPath)
-      .map((entry) => `${OPENCODEX_PLUGIN_URL_PREFIX}${entry.urlPath}?v=${entry.version}`);
+      .map((entry) => ({
+        manifest: entry.manifest,
+        url: `${OPENCODEX_PLUGIN_URL_PREFIX}${entry.urlPath}?v=${entry.version}`,
+      }));
     return `(() => {
   const manifests = ${JSON.stringify(manifests)};
-  const pluginUrls = ${JSON.stringify(pluginUrls)};
+  const executablePlugins = ${JSON.stringify(executablePlugins)};
   // 声明式插件先注册元信息；它没有可执行入口，核心能力只由 gateway 的受信 feature 注册表绑定。
   const pluginSystem = window.OpenCodexPluginSystem || window.__OpenCodexPluginSystem;
   if (pluginSystem && typeof pluginSystem.registerPlugin === "function") {
     for (const manifest of manifests) pluginSystem.registerPlugin(manifest);
   }
 ${pluginGatewayStateBootstrapScript()}
-  // loader 由 gateway 生成；刷新页面即可重新扫描 web-shell/plugins 下的旧式脚本插件。
-  function loadPlugin(url) {
-    if (document.readyState === "loading") {
-      document.write('<script src="' + url + '"><\\/script>');
-      return;
+  // v2 插件以 ESM 工厂接收宿主 SDK；模块加载失败只禁用该插件，不阻断登录壳或官方 Renderer。
+  async function loadPlugin(entry) {
+    try {
+      const module = await import(entry.url);
+      if (typeof module.default !== "function") throw new TypeError("Plugin default export must be a factory");
+      const sdkRoot = window.OpenCodexPluginSdk;
+      if (!sdkRoot || sdkRoot.apiVersion !== 2 || typeof sdkRoot.createPluginScope !== "function") {
+        throw new TypeError("OpenCodex plugin SDK v2 is unavailable");
+      }
+      const sdk = sdkRoot.createPluginScope(entry.manifest);
+      await module.default(sdk);
+      sdk.commit();
+    } catch (error) {
+      console.warn("[opencodex-plugin] ESM plugin load failed", entry.url, error);
     }
-    const script = document.createElement("script");
-    script.src = url;
-    script.async = false;
-    (document.head || document.documentElement).appendChild(script);
   }
-  for (const url of pluginUrls) loadPlugin(url);
+  for (const entry of executablePlugins) void loadPlugin(entry);
 })();\n`;
   }
 

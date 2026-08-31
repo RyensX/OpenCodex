@@ -5,7 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const PICKER_SOURCE = fs.readFileSync(
-  path.resolve(__dirname, "..", "..", "web-shell", "codex-workspace-root-picker.js"),
+  path.resolve(__dirname, "..", "..", "web-shell", "internal", "providers", "codex-workspace-root-picker.js"),
   "utf-8"
 );
 
@@ -67,6 +67,14 @@ function createPickerHarness({ hostname = "remote.example.com", resolvePath } = 
     },
   };
   const window = {
+    __OpenCodexAdapterHost: {
+      events: {
+        observe({ target, type, callback, capture = false }) {
+          target.addEventListener(type, callback, capture);
+          return () => target.removeEventListener(type, callback, capture);
+        },
+      },
+    },
     __codexWebBridgeHelpers: {
       deliverLocalRendererMessage(channel, payload) {
         delivered.push({ channel, payload: serializable(payload) });

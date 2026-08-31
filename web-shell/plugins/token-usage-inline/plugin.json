@@ -1,0 +1,11 @@
+{
+  "id": "opencodex.token-usage-inline",
+  "name": "Token usage inline",
+  "label": "显示Token消耗",
+  "labelKey": "plugin.tokenUsageInline.label",
+  "desc": "在AI回复底部显示输入、输出 token 和缓存命中率。",
+  "descKey": "plugin.tokenUsageInline.desc",
+  "defaultEnabled": true,
+  "surface": "renderer",
+  "order": 30
+}

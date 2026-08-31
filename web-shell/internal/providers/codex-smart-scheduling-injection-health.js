@@ -1,6 +1,8 @@
 (function () {
   const w = window;
   if (w.__OpenCodexSmartSchedulingInjectionHealthInstalled) return;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.events?.observe) return;
   w.__OpenCodexSmartSchedulingInjectionHealthInstalled = true;
 
   const ENDPOINT = "/api/opencodex/model-router/injections";
@@ -217,8 +219,8 @@
   }
 
   // 设置页由同仓脚本创建，直接消费其生命周期事件，避免为一个低频页面常驻整页 DOM observer。
-  w.addEventListener(SETTINGS_VISIBILITY_EVENT, schedulePollingSync);
-  document.addEventListener("visibilitychange", () => {
+  adapterHost.events.observe({ key: {}, target: w, type: SETTINGS_VISIBILITY_EVENT, callback: schedulePollingSync });
+  adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: () => {
     if (document.visibilityState === "hidden") {
       // 后台标签的 rAF 可能暂停，必须同步停掉分钟轮询，不能等待下一帧。
       if (pollTimer) w.clearInterval(pollTimer);
@@ -226,7 +228,7 @@
       return;
     }
     schedulePollingSync();
-  });
+  } });
 
   w.__OpenCodexSmartSchedulingInjectionHealth = Object.freeze({
     clientId,

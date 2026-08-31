@@ -6,7 +6,7 @@ const vm = require("node:vm");
 const { listPluginEntries, pluginMessagesForLocale } = require("../runtime/core/plugin-assets.cjs");
 
 const PLUGIN_SOURCE = fs.readFileSync(
-  path.resolve(__dirname, "..", "..", "web-shell", "plugins", "project-recent-sort", "index.js"),
+  path.resolve(__dirname, "..", "..", "web-shell", "internal", "providers", "project-recent-sort.js"),
   "utf-8"
 );
 const FLAT_PREFERENCES_KEY = "flat-project-sidebar-preferences-v1";
@@ -77,6 +77,20 @@ function createHarness({
       registeredPlugin = plugin;
     },
   };
+  window.__OpenCodexAdapterHost = {
+    hooks: {
+      around({ target, property, handle }) {
+        const original = target[property];
+        const wrapper = function (...args) {
+          return handle(this, args, (nextArgs = args) => original.apply(this, nextArgs));
+        };
+        target[property] = wrapper;
+        return () => {
+          if (target[property] === wrapper) target[property] = original;
+        };
+      },
+    },
+  };
   window.window = window;
 
   vm.runInNewContext(PLUGIN_SOURCE, { console, window });
@@ -122,7 +136,7 @@ test("project recent sort plugin is discovered with localized copy", () => {
   // 插件必须由现有内置 loader 自动发现，且默认开关和文案能出现在插件设置中。
   assert.ok(entry);
   assert.equal(entry.sourceId, "builtin");
-  assert.equal(entry.urlPath, "builtin/project-recent-sort/index.js");
+  assert.equal(entry.urlPath, "");
   assert.equal(zh["plugin.projectRecentSort.label"], "项目最近更新排序");
   assert.equal(en["plugin.projectRecentSort.label"], "Sort projects by recent activity");
 });

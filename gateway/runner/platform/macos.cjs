@@ -138,18 +138,15 @@ async function createMacRunner({ layout, runtimeDir, logger, runCompatibility = 
     () => {
       fs.writeFileSync(path.join(contentsDir, "Info.plist"), runnerInfoPlist(), "utf8");
       fs.writeFileSync(path.join(contentsDir, "PkgInfo"), "APPL????", "utf8");
-    },
-    "macos-bundle-metadata"
+    }
   );
   await runCompatibility(
     "static.cache.runner.gateway-asar",
-    () => writeGatewayAsar({ runnerResourcesDir, workDir }),
-    "asar-package"
+    () => writeGatewayAsar({ runnerResourcesDir, workDir })
   );
   runCompatibility(
     "static.cache.runner.macos-entry-signature",
-    () => signRunnerExecutable(runnerExecutablePath),
-    "codesign-ad-hoc"
+    () => signRunnerExecutable(runnerExecutablePath)
   );
 
   logLine(logger, `prepared official Electron runner: app=${runnerAppPath}`);

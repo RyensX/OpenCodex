@@ -1,6 +1,8 @@
 (function () {
   const w = window;
   if (w.__opencodexSidebarPreviewInstalled) return;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
   w.__opencodexSidebarPreviewInstalled = true;
 
   const PREVIEW_ID = "opencodex-sidebar-preview";
@@ -12,7 +14,7 @@
   let pendingThreadId = "";
   let checkTimer = null;
   let checkDelayMs = 16;
-  let readyObserver = null;
+  let disposeReadyObservation = null;
   let readyFrame = null;
 
   function scheduleLateModulePreloads() {
@@ -45,7 +47,7 @@
     const scheduleInstall = () => w.setTimeout(install, LATE_MODULE_PRELOAD_DELAY_MS);
     // load 后再留出一段主模块初始化窗口，避免低速 CPU 同时编译语言包和 React 首屏任务。
     if (document.readyState === "complete") scheduleInstall();
-    else w.addEventListener("load", scheduleInstall, { once: true });
+    else adapterHost.events.observe({ key: {}, target: w, type: "load", once: true, callback: scheduleInstall });
   }
 
   function previewElement() {
@@ -64,12 +66,12 @@
   function removePreview() {
     if (checkTimer) w.clearTimeout(checkTimer);
     if (readyFrame) w.cancelAnimationFrame(readyFrame);
-    readyObserver?.disconnect();
+    disposeReadyObservation?.();
     checkTimer = null;
     readyFrame = null;
-    readyObserver = null;
+    disposeReadyObservation = null;
     previewElement()?.remove();
-    document.removeEventListener("click", onDocumentClick, true);
+    disposePreviewClick?.();
   }
 
   function handoffIfOfficialReady() {
@@ -128,23 +130,33 @@
   }
 
   function observeOfficialSidebar() {
-    if (readyObserver || typeof w.MutationObserver !== "function") return;
-    readyObserver = new w.MutationObserver(() => {
+    if (disposeReadyObservation) return;
+    disposeReadyObservation = adapterHost.dom.observe({
+      key: {},
+      root: document.documentElement,
+      options: { childList: true, subtree: true },
+      callback() {
       if (readyFrame) return;
       readyFrame = w.requestAnimationFrame(() => {
         readyFrame = null;
         // 官方 React 提交侧栏节点时直接交接，不让连续 DOM 更新反复取消定时检查。
         handoffIfOfficialReady();
       });
+      },
     });
-    readyObserver.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   // 脚本位于 head，先安装委托；服务端预渲染的 aside 随后才会被解析进 body。
   scheduleLateModulePreloads();
-  document.addEventListener("click", onDocumentClick, true);
+  const disposePreviewClick = adapterHost.events.observe({
+    key: {},
+    target: document,
+    type: "click",
+    capture: true,
+    callback: onDocumentClick,
+  });
   scheduleCheck();
-  document.addEventListener("DOMContentLoaded", () => {
+  adapterHost.events.observe({ key: {}, target: document, type: "DOMContentLoaded", once: true, callback: () => {
     if (!previewElement()) {
       // 没有历史快照时服务端不会输出 aside；立即清理轮询和点击委托，避免空会话页面常驻全局 DOM 观察器。
       removePreview();
@@ -152,5 +164,5 @@
     }
     // React 初始化期间不观察整棵 DOM；没有提前点击时指数退避轮询足以在 250ms 内完成遮罩交接。
     scheduleCheck();
-  }, { once: true });
+  } });
 })();

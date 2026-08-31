@@ -159,9 +159,15 @@
     builtin: true,
     order: 20,
     activate(context) {
-      if (context.scope !== "renderer" || !document || document.__opencodexMobileSidebarPluginInstalled) return null;
+      const adapterHost = w.__OpenCodexAdapterHost;
+      if (
+        context.scope !== "renderer" ||
+        !document ||
+        document.__opencodexMobileSidebarPluginInstalled ||
+        !adapterHost?.events?.observe
+      ) return null;
       document.__opencodexMobileSidebarPluginInstalled = true;
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-sidebar");
+      w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.plugin.mobile-sidebar");
 
       let collapseTimer = null;
       const isEnabled = () => context.plugin.isEnabled();
@@ -176,9 +182,11 @@
           const toggleButton = findSidebarToggleButton();
           if (toggleButton && typeof toggleButton.click === "function") {
             toggleButton.click();
+            w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-sidebar");
             return;
           }
           postSidebarToggleMessage();
+          w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-sidebar");
         }, AUTO_COLLAPSE_DELAY_MS);
       };
 
@@ -203,14 +211,26 @@
         if (isEnabled() && isMobile() && isNewConversationMessage(payload)) collapseAfterSelection();
       });
 
-      document.addEventListener("click", handleClick, true);
-      document.addEventListener("pointerdown", handlePointerDown, true);
+      const disposeClick = adapterHost.events.observe({
+        key: {},
+        target: document,
+        type: "click",
+        capture: true,
+        callback: handleClick,
+      });
+      const disposePointerDown = adapterHost.events.observe({
+        key: {},
+        target: document,
+        type: "pointerdown",
+        capture: true,
+        callback: handlePointerDown,
+      });
 
       return () => {
         if (collapseTimer) w.clearTimeout(collapseTimer);
         disposeViewMessage();
-        document.removeEventListener("click", handleClick, true);
-        document.removeEventListener("pointerdown", handlePointerDown, true);
+        disposeClick();
+        disposePointerDown();
         document.__opencodexMobileSidebarPluginInstalled = false;
       };
     },

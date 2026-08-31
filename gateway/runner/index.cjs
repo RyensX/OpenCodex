@@ -11,13 +11,12 @@ async function prepareOfficialElectronRuntime({ runtimeDir, officialBundleDir, l
   } catch {
     // 兼容骨架属于诊断旁路，初始化失败时 Runner 仍按原流程构建。
   }
-  const runCompatibility = (id, operation, strategyId) => {
+  const runCompatibility = (id, operation) => {
     if (!compatibilityService) return operation();
     let capability = operation;
     try {
       capability = compatibilityService.bindCapability(id, operation, {
         locatorRevision: "runner-cache-v1",
-        strategyId,
         fallback: operation,
         verify: () => typeof operation === "function",
       });

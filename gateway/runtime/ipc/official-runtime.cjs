@@ -149,13 +149,13 @@ const GATEWAY_BOOTSTRAP_COMPATIBILITY_POINTS = Object.freeze([
   "gateway.runtime.ipc.computer-use-auth",
 ]);
 
-function installRuntimeCompatibilityPoints(ids, strategyId = "gateway-bootstrap") {
+function installRuntimeCompatibilityPoints(ids, { active = false } = {}) {
   if (!runtimeCompatibility) return;
   for (const id of ids) {
     try {
       runtimeCompatibility.installPoint(id, {
         locatorRevision: "gateway-runtime-v1",
-        strategyId,
+        active,
       });
     } catch (error) {
       diagnosticWarn("official-runtime", "compatibility_point_install_failed", {
@@ -174,13 +174,12 @@ function recordRuntimeCompatibilityHit(id, count = 1) {
   }
 }
 
-function runRuntimeCompatibilityCapability(id, operation, strategyId) {
+function runRuntimeCompatibilityCapability(id, operation) {
   if (!runtimeCompatibility) return operation();
   let capability = operation;
   try {
     capability = runtimeCompatibility.bindCapability(id, operation, {
       locatorRevision: "gateway-runtime-v1",
-      strategyId,
       // 骨架异常时仍执行原安装函数，不能改变 Electron Hook 的安装顺序或错误合约。
       fallback: operation,
       verify: () => typeof operation === "function",
@@ -198,7 +197,8 @@ function installRunnerCompatibilityPoints() {
   const installed = new Set(
     ids.filter((id) => typeof id === "string" && id.startsWith("static.cache.runner."))
   );
-  installRuntimeCompatibilityPoints(installed, "runner-build-receipt");
+  // 环境变量只包含 Runner 已经成功完成的构建步骤，因此这批回执属于真实命中。
+  installRuntimeCompatibilityPoints(installed, { active: true });
   for (const id of [
     "static.cache.runner.macos-background-bundle",
     "static.cache.runner.macos-entry-signature",
@@ -223,7 +223,6 @@ function validateInstalledRuntimeCompatibilityPoints() {
     try {
       runtimeCompatibility.failPoint(id, lastError || "Runtime hook was not installed", {
         locatorRevision: "gateway-runtime-v1",
-        strategyId: "runtime-status-verification",
         fallbackReason: "Official runtime behavior",
       });
     } catch {}
@@ -2470,55 +2469,45 @@ function startOfficialRuntime(options = {}) {
   installRunnerCompatibilityPoints();
   runRuntimeCompatibilityCapability(
     "gateway.runtime.environment.official-app",
-    () => alignOfficialElectronEnvironment(officialBundle),
-    "process-environment"
+    () => alignOfficialElectronEnvironment(officialBundle)
   );
   runRuntimeCompatibilityCapability(
     "gateway.runtime.ipc.live-observer",
-    () => officialLiveObserver.start(),
-    "local-socket-observer"
+    () => officialLiveObserver.start()
   );
   runRuntimeCompatibilityCapability(
     "gateway.runtime.process.app-server-launch",
-    () => installAppServerSpawnHook(officialBundle),
-    "child-process-wrapper"
+    () => installAppServerSpawnHook(officialBundle)
   );
   runRuntimeCompatibilityCapability(
     "gateway.runtime.electron.ipc-main",
-    installIpcMainHooks,
-    "electron-api-wrapper"
+    installIpcMainHooks
   );
   runRuntimeCompatibilityCapability(
     "gateway.runtime.electron.browser-window",
-    installBrowserWindowHooks,
-    "electron-constructor-wrapper"
+    installBrowserWindowHooks
   );
   runRuntimeCompatibilityCapability(
     "gateway.runtime.electron.dialog-open",
-    installDialogHooks,
-    "electron-api-wrapper"
+    installDialogHooks
   );
   runRuntimeCompatibilityCapability(
     "gateway.runtime.process.remote-file-manager",
-    installRemoteFileManagerOpenHooks,
-    "child-process-wrapper"
+    installRemoteFileManagerOpenHooks
   );
   runRuntimeCompatibilityCapability(
     "gateway.runtime.electron.notification",
     () => installOfficialNotificationHook(electron, {
       publishNotification: (payload) => (wsHub ? wsHub.broadcast(payload, { suppressDiagnostic: true }) : 0),
-    }),
-    "electron-module-wrapper"
+    })
   );
   runRuntimeCompatibilityCapability(
     "gateway.runtime.electron.tray",
-    () => installOfficialTrayHook(electron),
-    "electron-module-wrapper"
+    () => installOfficialTrayHook(electron)
   );
   runRuntimeCompatibilityCapability(
     "gateway.runtime.electron.single-instance",
-    patchOfficialAppSingleton,
-    "electron-api-wrapper"
+    patchOfficialAppSingleton
   );
 
   // 官方 bootstrap 负责注册 IPC handler、创建隐藏 BrowserWindow 和启动自己的 app-server 连接。

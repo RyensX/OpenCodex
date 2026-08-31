@@ -229,13 +229,11 @@ class LocalCodexBundleProvider {
           if (group.state === "unsupported-layout" || group.state === "not-present" || !group.state) {
             this.compatibilityService.unsupportedPoint(id, {
               locatorRevision: "official-main-cache-v1",
-              strategyId: "cached-manifest",
               reason: group.state === "not-present" ? "Official capability is not present" : "Cached locator did not resolve",
             });
           } else {
             this.compatibilityService.installPoint(id, {
               locatorRevision: "official-main-cache-v1",
-              strategyId: "cached-manifest",
             });
           }
         } catch {}

@@ -1,6 +1,8 @@
 (function () {
   const w = window;
   if (w.__codexTooltipDismissGuardInstalled) return;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
   w.__codexTooltipDismissGuardInstalled = true;
 
   const TOOLTIP_SELECTOR = '[role="tooltip"]';
@@ -22,7 +24,7 @@
   let lastPointer = null;
   let pendingFrame = 0;
   let tooltipPresent = !!document.querySelector(TOOLTIP_SELECTOR);
-  let tooltipObserver = null;
+  let disposeTooltipObservation = null;
   let tooltipObserverExpiryTimer = 0;
   const TOOLTIP_OBSERVER_SESSION_MS = 2_500;
 
@@ -125,7 +127,8 @@
   }
 
   function stopTooltipObservation() {
-    tooltipObserver?.disconnect();
+    disposeTooltipObservation?.();
+    disposeTooltipObservation = null;
     if (tooltipObserverExpiryTimer) w.clearTimeout(tooltipObserverExpiryTimer);
     tooltipObserverExpiryTimer = 0;
     if (!tooltipPresent) lastPointer = null;
@@ -160,35 +163,37 @@
     if (!mayOpenTooltip(event)) return;
     if (tooltipPresent && document.querySelector(TOOLTIP_SELECTOR)) return;
     tooltipPresent = false;
-    if (typeof w.MutationObserver !== "function") return;
     // 同一交互会话不反复断开、重连或续期，避免鼠标经过嵌套按钮节点时持续扫描全页。
     if (tooltipObserverExpiryTimer) {
       rememberPointer(event);
       return;
     }
-    tooltipObserver ||= new w.MutationObserver(handleTooltipMutations);
-    tooltipObserver.disconnect();
-    tooltipObserver.observe(document.documentElement, { childList: true, subtree: true });
+    disposeTooltipObservation = adapterHost.dom.observe({
+      key: {},
+      root: document.documentElement,
+      options: { childList: true, subtree: true },
+      callback: handleTooltipMutations,
+    });
     // Tooltip 只会紧随 hover/focus 挂载；有限会话避免正文流式更新永久进入观察队列。
     tooltipObserverExpiryTimer = w.setTimeout(stopTooltipObservation, TOOLTIP_OBSERVER_SESSION_MS);
     if (event?.type !== "focusin") rememberPointer(event);
   }
 
   if (typeof w.PointerEvent === "function") {
-    document.addEventListener("pointermove", rememberPointer, { capture: true, passive: true });
-    document.addEventListener("pointerover", observeForTooltipMount, { capture: true, passive: true });
-    document.addEventListener("pointerout", dismissOnDocumentExit, { capture: true, passive: true });
+    adapterHost.events.observe({ key: {}, target: document, type: "pointermove", callback: rememberPointer, capture: true, passive: true });
+    adapterHost.events.observe({ key: {}, target: document, type: "pointerover", callback: observeForTooltipMount, capture: true, passive: true });
+    adapterHost.events.observe({ key: {}, target: document, type: "pointerout", callback: dismissOnDocumentExit, capture: true, passive: true });
   } else {
     // 老浏览器没有 PointerEvent 时才使用鼠标事件，避免现代浏览器为同一次移动执行两遍逻辑。
-    document.addEventListener("mousemove", rememberPointer, { capture: true, passive: true });
-    document.addEventListener("mouseover", observeForTooltipMount, { capture: true, passive: true });
-    document.addEventListener("mouseout", dismissOnDocumentExit, { capture: true, passive: true });
+    adapterHost.events.observe({ key: {}, target: document, type: "mousemove", callback: rememberPointer, capture: true, passive: true });
+    adapterHost.events.observe({ key: {}, target: document, type: "mouseover", callback: observeForTooltipMount, capture: true, passive: true });
+    adapterHost.events.observe({ key: {}, target: document, type: "mouseout", callback: dismissOnDocumentExit, capture: true, passive: true });
   }
-  document.addEventListener("focusin", observeForTooltipMount, true);
-  document.addEventListener("scroll", dispatchOfficialTooltipDismiss, { capture: true, passive: true });
-  w.addEventListener("blur", dispatchOfficialTooltipDismiss);
-  document.addEventListener("visibilitychange", () => {
+  adapterHost.events.observe({ key: {}, target: document, type: "focusin", callback: observeForTooltipMount, capture: true });
+  adapterHost.events.observe({ key: {}, target: document, type: "scroll", callback: dispatchOfficialTooltipDismiss, capture: true, passive: true });
+  adapterHost.events.observe({ key: {}, target: w, type: "blur", callback: dispatchOfficialTooltipDismiss });
+  adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: () => {
     if (document.visibilityState !== "visible") dispatchOfficialTooltipDismiss();
-  });
+  } });
   w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.tooltip-dismiss");
 })();
