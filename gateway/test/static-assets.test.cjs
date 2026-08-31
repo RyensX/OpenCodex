@@ -182,13 +182,24 @@ function runtimeBootstrapSource(service) {
   return res.body.toString("utf-8");
 }
 
-test("runtime compatibility page is protected and its reporter loads before feature scripts", (t) => {
+test("runtime compatibility diagnostics are public, grouped, explained, and reported before feature scripts", (t) => {
   const webviewDir = makeOfficialWebviewDir(t);
   const service = createService(webviewDir);
   const pagePath = "/opencodex/runtime-compatibility";
-  assert.equal(service.isPublicStaticPath(pagePath), false);
-  assert.match(service.protectedStaticFile(pagePath), /runtime-compatibility\.html$/);
-  assert.equal(fs.existsSync(service.protectedStaticFile(pagePath)), true);
+  const settingsPath = "/settings/developer/runtime-compatibility";
+  assert.equal(service.isPublicStaticPath(pagePath), true);
+  assert.equal(service.isPublicStaticPath(settingsPath), true);
+  assert.match(service.staticFile(pagePath), /runtime-compatibility\.html$/);
+  assert.equal(fs.existsSync(service.staticFile(settingsPath)), true);
+
+  const page = fs.readFileSync(service.staticFile(pagePath), "utf8");
+  assert.match(page, /id="pointsTable"/);
+  assert.doesNotMatch(page, /id="featureList"/);
+  for (const help of ["overall", "location", "application", "verification", "exercise"]) {
+    assert.match(page, new RegExp(`data-help="${help}"`));
+  }
+  const loginShell = fs.readFileSync(WEB_SHELL_INDEX, "utf8");
+  assert.match(loginShell, /href="\/settings\/developer\/runtime-compatibility"/);
 
   const bootstrap = runtimeBootstrapSource(service);
   const compatibilityIndex = bootstrap.indexOf("OpenCodexRuntimeCompatibility");

@@ -1,6 +1,6 @@
 (() => {
-  const state = { snapshot: null, timer: null };
-  const labels = {
+  const state = { snapshot: null, timer: null, helpTrigger: null };
+  const overallLabels = {
     healthy: "已命中",
     ready: "已就绪",
     pending: "待检测",
@@ -8,13 +8,97 @@
     unavailable: "不可用",
     disabled: "已关闭",
   };
+  const phaseLabels = {
+    location: {
+      unresolved: "未定位",
+      resolving: "定位中",
+      resolved: "已定位",
+      unsupported: "不支持",
+      ambiguous: "不唯一",
+      failed: "定位失败",
+      stale: "已失效",
+    },
+    application: {
+      pending: "待应用",
+      applying: "应用中",
+      applied: "已应用",
+      failed: "应用失败",
+      disabled: "已关闭",
+    },
+    verification: {
+      pending: "待验证",
+      verified: "已验证",
+      "not-required": "无需验证",
+      failed: "验证失败",
+    },
+    exercise: {
+      "not-exercised": "未命中",
+      active: "已命中",
+    },
+  };
+  const helpContent = {
+    overall: {
+      title: "总状态",
+      description: "综合定位、应用、验证、实际命中和回退结果。功能组会原子检查必需修改点；可选点失败时，功能组显示降级而不是直接不可用。",
+      statuses: [
+        ["healthy", "已命中", "修改点已经就绪，并且对应代码路径在本次运行中至少实际执行过一次。"],
+        ["ready", "已就绪", "定位、应用和验证已经完成，但对应路径尚未在本次运行中实际执行；这不代表失败。"],
+        ["pending", "待检测", "定位、应用或验证仍未完成，当前还不能得出最终结论。"],
+        ["degraded", "已降级", "修改点正在使用官方行为或其他回退方案；功能仍可继续，但增强能力可能不可用。"],
+        ["unavailable", "不可用", "定位、应用或验证失败，或者功能组中的必需修改点不可用。"],
+        ["disabled", "已关闭", "修改点或功能组被配置关闭，或不适用于当前平台和运行时。"],
+      ],
+    },
+    location: {
+      title: "定位状态",
+      description: "定位用于在当前官方运行时中寻找唯一且满足约束的目标代码或能力。只有定位成功后才会进入应用阶段。",
+      statuses: [
+        ["unresolved", "未定位", "尚未开始寻找目标。"],
+        ["resolving", "定位中", "正在扫描候选目标并检查约束。"],
+        ["resolved", "已定位", "找到了数量正确且约束通过的目标。"],
+        ["unsupported", "不支持", "没有找到足够候选，通常表示当前官方版本不包含该目标。"],
+        ["ambiguous", "不唯一", "找到多个候选，无法安全判断应该修改哪一个。"],
+        ["failed", "定位失败", "候选存在，但结构、指纹或其他强约束未通过。"],
+        ["stale", "已失效", "定位后目标又发生变化，旧定位结果已被拒绝使用。"],
+      ],
+    },
+    application: {
+      title: "应用状态",
+      description: "应用表示把兼容实现安装到已定位的目标上，例如挂接函数、注入桥接或改写缓存内容。",
+      statuses: [
+        ["pending", "待应用", "已经登记修改点，但还没有开始应用。"],
+        ["applying", "应用中", "兼容实现正在安装。"],
+        ["applied", "已应用", "兼容实现已经成功安装。"],
+        ["failed", "应用失败", "安装过程抛出错误或未能完成。"],
+        ["disabled", "已关闭", "该修改点被配置关闭或不适用于当前环境，不会执行应用。"],
+      ],
+    },
+    verification: {
+      title: "验证状态",
+      description: "验证在应用之后检查目标结构或能力是否符合预期，防止“已经执行修改”被误当成“修改确实生效”。",
+      statuses: [
+        ["pending", "待验证", "尚未完成应用后检查。"],
+        ["verified", "已验证", "应用后的结构或行为检查已经通过。"],
+        ["not-required", "无需验证", "该修改点没有额外验证步骤；应用成功即可进入就绪状态。"],
+        ["failed", "验证失败", "应用后的检查未通过，修改点会被判定为不可用。"],
+      ],
+    },
+    exercise: {
+      title: "命中状态",
+      description: "命中记录兼容代码路径是否在本次运行中被真实业务调用，并累计调用次数。它用于区分“已经准备好”和“已经实际工作过”。",
+      statuses: [
+        ["not-exercised", "未命中", "兼容实现可能已经就绪，但当前运行中还没有业务操作走到该路径；这不代表失败。"],
+        ["active", "已命中", "对应路径已经实际执行；页面同时显示累计命中次数。"],
+      ],
+    },
+  };
 
   const byId = (id) => document.getElementById(id);
 
   function badge(status) {
     const span = document.createElement("span");
     span.className = `badge badge--${status}`;
-    span.textContent = labels[status] || status;
+    span.textContent = overallLabels[status] || status;
     return span;
   }
 
@@ -29,7 +113,7 @@
     container.replaceChildren();
     const counts = summaryCounts(snapshot.points || []);
     const cards = [
-      ["总体", labels[snapshot.status] || snapshot.status],
+      ["总体", overallLabels[snapshot.status] || snapshot.status],
       ["已命中", counts.healthy],
       ["已就绪", counts.ready],
       ["降级 / 不可用", counts.degraded + counts.unavailable],
@@ -48,88 +132,233 @@
     }
   }
 
-  function renderFeatures(features) {
-    const container = byId("featureList");
-    container.replaceChildren();
-    for (const feature of features || []) {
-      const article = document.createElement("article");
-      article.className = "feature";
-      const head = document.createElement("div");
-      head.className = "feature-head";
-      const identity = document.createElement("div");
-      const code = document.createElement("code");
-      code.textContent = feature.id;
-      const title = document.createElement("p");
-      title.textContent = feature.description;
-      identity.append(code, title);
-      head.append(identity, badge(feature.status));
-      const details = document.createElement("p");
-      details.className = "muted";
-      details.textContent = `必需 ${feature.required.length} · 可选 ${feature.optional.length} · 回退：${feature.fallback || "无"}`;
-      article.append(head, details);
-      container.append(article);
-    }
+  function statusFromIndependentPoints(points) {
+    const statuses = points.map((point) => point.status);
+    if (statuses.length === 0) return "pending";
+    if (statuses.every((status) => status === "disabled")) return "disabled";
+    if (statuses.includes("unavailable")) return "unavailable";
+    if (statuses.includes("degraded") || statuses.includes("disabled")) return "degraded";
+    if (statuses.includes("pending")) return "pending";
+    if (statuses.includes("ready")) return "ready";
+    return "healthy";
   }
 
-  function statusCell(status) {
+  function groupedPoints(snapshot) {
+    const points = snapshot.points || [];
+    const pointById = new Map(points.map((point) => [point.id, point]));
+    const assigned = new Set();
+    const groups = [];
+    for (const feature of snapshot.features || []) {
+      const entries = [];
+      for (const id of feature.required || []) {
+        const point = pointById.get(id);
+        if (!point) continue;
+        assigned.add(id);
+        entries.push({ point, role: "required" });
+      }
+      for (const id of feature.optional || []) {
+        const point = pointById.get(id);
+        if (!point) continue;
+        assigned.add(id);
+        entries.push({ point, role: "optional" });
+      }
+      groups.push({ feature, entries, independent: false });
+    }
+
+    const independentEntries = points
+      .filter((point) => !assigned.has(point.id))
+      .map((point) => ({ point, role: "independent" }));
+    if (independentEntries.length > 0) {
+      const independentPoints = independentEntries.map((entry) => entry.point);
+      groups.push({
+        independent: true,
+        feature: {
+          id: "feature.independent-points",
+          description: "基础与独立兼容修改点",
+          status: statusFromIndependentPoints(independentPoints),
+          fallback: "各修改点按自身策略独立回退",
+          required: [],
+          optional: [],
+        },
+        entries: independentEntries,
+      });
+    }
+    return groups;
+  }
+
+  function pointMatchesFilters(point) {
+    const category = byId("categoryFilter").value;
+    const status = byId("statusFilter").value;
+    return (!category || point.category === category) && (!status || point.status === status);
+  }
+
+  function pointRole(role) {
+    const label = document.createElement("span");
+    label.className = `point-role point-role--${role}`;
+    label.textContent = role === "required" ? "必需" : role === "optional" ? "可选" : "独立";
+    return label;
+  }
+
+  function phaseCell(kind, status, textOverride = "") {
     const cell = document.createElement("td");
-    cell.textContent = status || "-";
+    const value = document.createElement("span");
+    value.className = `phase-status phase-status--${String(status || "unknown").replace(/[^a-z-]/g, "")}`;
+    value.textContent = textOverride || phaseLabels[kind]?.[status] || status || "-";
+    value.title = status || "";
+    cell.append(value);
     return cell;
   }
 
-  function renderPoints(points) {
-    const category = byId("categoryFilter").value;
-    const status = byId("statusFilter").value;
-    const visible = (points || []).filter((point) => {
-      return (!category || point.category === category) && (!status || point.status === status);
-    });
-    const rows = byId("pointRows");
-    rows.replaceChildren();
-    for (const point of visible) {
-      const row = document.createElement("tr");
-      const identity = document.createElement("td");
-      const code = document.createElement("code");
-      code.textContent = point.id;
-      const description = document.createElement("div");
-      description.className = "point-description";
-      description.textContent = point.description;
-      identity.append(code, description);
-      const reasonText = point.location.reason || point.application.lastError || point.verification.lastError || point.fallback.reason;
-      if (reasonText) {
-        const reason = document.createElement("div");
-        reason.className = "point-reason";
-        reason.textContent = reasonText;
-        identity.append(reason);
-      }
-      const overall = document.createElement("td");
-      overall.append(badge(point.status));
-      const hits = document.createElement("td");
-      hits.textContent = point.exercise.status === "active" ? String(point.exercise.hitCount) : "未命中";
-      row.append(
-        identity,
-        overall,
-        statusCell(point.location.status),
-        statusCell(point.application.status),
-        statusCell(point.verification.status),
-        hits
-      );
-      rows.append(row);
+  function pointRow(entry) {
+    const point = entry.point;
+    const row = document.createElement("tr");
+    row.className = "point-row";
+    const identity = document.createElement("td");
+    const identityLine = document.createElement("div");
+    identityLine.className = "point-identity";
+    const code = document.createElement("code");
+    code.textContent = point.id;
+    identityLine.append(code, pointRole(entry.role));
+    const description = document.createElement("div");
+    description.className = "point-description";
+    description.textContent = point.description;
+    identity.append(identityLine, description);
+    const reasonText =
+      point.location?.reason ||
+      point.application?.lastError ||
+      point.verification?.lastError ||
+      point.fallback?.reason;
+    if (reasonText) {
+      const reason = document.createElement("div");
+      reason.className = "point-reason";
+      reason.textContent = reasonText;
+      identity.append(reason);
     }
-    byId("emptyState").hidden = visible.length > 0;
+
+    const overall = document.createElement("td");
+    overall.append(badge(point.status));
+    const hitCount = Number(point.exercise?.hitCount || 0);
+    const hitText = point.exercise?.status === "active"
+      ? `${phaseLabels.exercise.active} · ${hitCount} 次`
+      : phaseLabels.exercise[point.exercise?.status] || "未命中";
+    row.append(
+      identity,
+      overall,
+      phaseCell("location", point.location?.status),
+      phaseCell("application", point.application?.status),
+      phaseCell("verification", point.verification?.status),
+      phaseCell("exercise", point.exercise?.status, hitText)
+    );
+    return row;
+  }
+
+  function groupHeader(group, visibleCount) {
+    const feature = group.feature;
+    const row = document.createElement("tr");
+    row.className = "feature-group-row";
+    const cell = document.createElement("td");
+    cell.colSpan = 6;
+    const article = document.createElement("article");
+    article.className = "feature-group";
+    const head = document.createElement("div");
+    head.className = "feature-head";
+    const identity = document.createElement("div");
+    identity.className = "feature-identity";
+    const code = document.createElement("code");
+    code.textContent = feature.id;
+    const title = document.createElement("h3");
+    title.textContent = feature.description;
+    identity.append(code, title);
+    head.append(identity, badge(feature.status));
+    const details = document.createElement("p");
+    details.className = "feature-details muted";
+    const composition = group.independent
+      ? `独立 ${group.entries.length}`
+      : `必需 ${feature.required.length} · 可选 ${feature.optional.length}`;
+    details.textContent = `${composition} · 当前显示 ${visibleCount}/${group.entries.length} · 回退：${feature.fallback || "无"}`;
+    article.append(head, details);
+    if (!feature.enabled && feature.disabledReason) {
+      const disabledReason = document.createElement("p");
+      disabledReason.className = "point-reason";
+      disabledReason.textContent = feature.disabledReason;
+      article.append(disabledReason);
+    }
+    cell.append(article);
+    row.append(cell);
+    return row;
+  }
+
+  function renderPoints(snapshot) {
+    const table = byId("pointsTable");
+    for (const body of Array.from(table.tBodies)) body.remove();
+    let visiblePointCount = 0;
+    for (const group of groupedPoints(snapshot)) {
+      const visibleEntries = group.entries.filter((entry) => pointMatchesFilters(entry.point));
+      if (visibleEntries.length === 0) continue;
+      const body = document.createElement("tbody");
+      body.className = "point-group";
+      body.append(groupHeader(group, visibleEntries.length));
+      for (const entry of visibleEntries) body.append(pointRow(entry));
+      table.append(body);
+      visiblePointCount += visibleEntries.length;
+    }
+    byId("emptyState").hidden = visiblePointCount > 0;
   }
 
   function render(snapshot) {
     state.snapshot = snapshot;
     const runtime = snapshot.runtime || {};
-    byId("runtimeIdentity").textContent = `Codex ${runtime.version || "unknown"} · build ${runtime.build || "unknown"} · 报告 ${new Date(snapshot.generatedAt).toLocaleString()}`;
+    const generatedAt = new Date(snapshot.generatedAt);
+    const reportTime = Number.isNaN(generatedAt.getTime()) ? "未知时间" : generatedAt.toLocaleString();
+    byId("runtimeIdentity").textContent = `Codex ${runtime.version || "unknown"} · build ${runtime.build || "unknown"} · 报告 ${reportTime}`;
     renderSummary(snapshot);
-    renderFeatures(snapshot.features);
-    renderPoints(snapshot.points);
+    renderPoints(snapshot);
+  }
+
+  function openHelp(key, trigger) {
+    const content = helpContent[key];
+    if (!content) return;
+    state.helpTrigger = trigger || null;
+    byId("helpDialogTitle").textContent = content.title;
+    byId("helpDialogDescription").textContent = content.description;
+    const list = byId("helpDialogStatuses");
+    list.replaceChildren();
+    for (const [status, label, description] of content.statuses) {
+      const item = document.createElement("div");
+      item.className = "help-status-item";
+      const heading = document.createElement("div");
+      heading.className = "help-status-heading";
+      const strong = document.createElement("strong");
+      strong.textContent = label;
+      const code = document.createElement("code");
+      code.textContent = status;
+      heading.append(strong, code);
+      const text = document.createElement("p");
+      text.textContent = description;
+      item.append(heading, text);
+      list.append(item);
+    }
+    const dialog = byId("helpDialog");
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+  }
+
+  function closeHelp() {
+    const dialog = byId("helpDialog");
+    if (typeof dialog.close === "function" && dialog.open) dialog.close();
+    else {
+      dialog.removeAttribute("open");
+      state.helpTrigger?.focus?.();
+      state.helpTrigger = null;
+    }
   }
 
   async function refresh() {
     try {
-      const response = await fetch("/api/opencodex/runtime-compatibility", { credentials: "same-origin", cache: "no-store" });
+      const response = await fetch("/api/opencodex/runtime-compatibility", {
+        credentials: "omit",
+        cache: "no-store",
+      });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
       if (!payload.ok || !payload.compatibility) throw new Error(payload.error || "Invalid compatibility response");
@@ -155,8 +384,20 @@
 
   byId("refreshButton").addEventListener("click", () => void refresh());
   byId("backButton").addEventListener("click", () => history.length > 1 ? history.back() : location.assign("/"));
-  byId("categoryFilter").addEventListener("change", () => renderPoints(state.snapshot?.points || []));
-  byId("statusFilter").addEventListener("change", () => renderPoints(state.snapshot?.points || []));
+  byId("categoryFilter").addEventListener("change", () => renderPoints(state.snapshot || { points: [], features: [] }));
+  byId("statusFilter").addEventListener("change", () => renderPoints(state.snapshot || { points: [], features: [] }));
+  document.addEventListener("click", (event) => {
+    const trigger = event.target.closest?.("[data-help]");
+    if (trigger) openHelp(trigger.dataset.help, trigger);
+  });
+  byId("helpDialogClose").addEventListener("click", closeHelp);
+  byId("helpDialog").addEventListener("click", (event) => {
+    if (event.target === byId("helpDialog")) closeHelp();
+  });
+  byId("helpDialog").addEventListener("close", () => {
+    state.helpTrigger?.focus?.();
+    state.helpTrigger = null;
+  });
   document.addEventListener("visibilitychange", scheduleRefresh);
   void refresh().finally(scheduleRefresh);
 })();

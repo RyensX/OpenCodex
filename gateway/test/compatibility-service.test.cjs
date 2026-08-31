@@ -7,6 +7,7 @@ const { EventEmitter } = require("node:events");
 const {
   RUNTIME_COMPATIBILITY_API_PATH,
   RUNTIME_COMPATIBILITY_REPORT_PATH,
+  handlePublicRuntimeCompatibilityApi,
   handleRuntimeCompatibilityApi,
 } = require("../runtime/http/runtime-compatibility.cjs");
 const { createCompatibilityReportStore } = require("../runtime/compatibility/report-store.cjs");
@@ -181,6 +182,47 @@ test("repeating the same runtime identity keeps installed capability handles val
   service.setRuntimeIdentity({ version: "26.8", build: "1", bundleHash: "bundle-a" });
   assert.equal(capability("same-runtime"), "same-runtime");
   assert.equal(service.registry.point("gateway.runtime.electron.dialog-open").status, "healthy");
+  service.dispose();
+});
+
+test("public compatibility API exposes only the read-only sanitized snapshot", () => {
+  const service = createCompatibilityService();
+  const getResponse = responseRecorder();
+  assert.equal(
+    handlePublicRuntimeCompatibilityApi(
+      request("GET"),
+      getResponse,
+      new URL(`http://localhost${RUNTIME_COMPATIBILITY_API_PATH}`),
+      service
+    ),
+    true
+  );
+  assert.equal(getResponse.status, 200);
+  assert.equal(JSON.parse(getResponse.body).compatibility.points.length, 102);
+
+  const reportResponse = responseRecorder();
+  assert.equal(
+    handlePublicRuntimeCompatibilityApi(
+      request("POST"),
+      reportResponse,
+      new URL(`http://localhost${RUNTIME_COMPATIBILITY_REPORT_PATH}`),
+      service
+    ),
+    false
+  );
+  assert.equal(reportResponse.status, 0);
+
+  const unavailableResponse = responseRecorder();
+  assert.equal(
+    handlePublicRuntimeCompatibilityApi(
+      request("GET"),
+      unavailableResponse,
+      new URL(`http://localhost${RUNTIME_COMPATIBILITY_API_PATH}`),
+      null
+    ),
+    true
+  );
+  assert.equal(unavailableResponse.status, 503);
   service.dispose();
 });
 

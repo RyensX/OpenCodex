@@ -1212,14 +1212,6 @@ ipcMain.handle("launcher:open-logs", async () => {
   if (gatewayState.paths) revealPath(gatewayState.paths.logPath);
   return buildState();
 });
-ipcMain.handle("launcher:open-runtime-compatibility", () => {
-  const openUrl = openOpenCodexUrl();
-  if (gatewayState.status?.ok && openUrl) {
-    // 与主入口统一使用 localhost，复用浏览器已有的认证 Cookie。
-    return shell.openExternal(`${openUrl}/settings/developer/runtime-compatibility`);
-  }
-  return gatewayState.paths ? revealPath(gatewayState.paths.compatibilityReportPath) : false;
-});
 ipcMain.handle("launcher:open-github", () => {
   // GitHub 入口不接收渲染进程传参，固定打开项目主页，减少外链面。
   return shell.openExternal(OPENCODEX_GITHUB_URL);

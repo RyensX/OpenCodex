@@ -54,7 +54,10 @@ const { openFileTargetFromIpc } = require("./ipc/open-file-context.cjs");
 const { createPickedFilesService } = require("./ipc/picked-files.cjs");
 const { OPENCODEX_RUNTIME_BOOTSTRAP_PATH, createStaticAssetService } = require("./http/static-assets.cjs");
 const { handleOpenCodexPluginApi } = require("./http/plugin-config.cjs");
-const { handleRuntimeCompatibilityApi } = require("./http/runtime-compatibility.cjs");
+const {
+  handlePublicRuntimeCompatibilityApi,
+  handleRuntimeCompatibilityApi,
+} = require("./http/runtime-compatibility.cjs");
 const { createHistoryPreviewService } = require("./history-preview.cjs");
 const { createWsHub } = require("./ipc/ws-hub.cjs");
 const { workspaceRootsFromIpcPayload } = require("./ipc/workspace-root-context.cjs");
@@ -422,7 +425,7 @@ function createRequestHandler({
   /**
    * 路由顺序很关键：
    * 1. 认证和 launcher 探活先处理。
-   * 2. 登录页依赖的公开静态资源先放行。
+   * 2. 匿名只读诊断和登录页依赖的公开静态资源先放行。
    * 3. 未登录请求返回公开登录壳；已认证请求直接返回最终 renderer。
    * 4. 其余 API、官方资源和本地文件入口必须通过 auth gate。
    */
@@ -454,6 +457,8 @@ function createRequestHandler({
       }
       return sendJson(res, 200, buildGatewayStatus(), { "cache-control": "no-store" });
     }
+
+    if (handlePublicRuntimeCompatibilityApi(req, res, url, compatibilityService)) return;
 
     // 公开静态资源先返回，保证登录页和 web-shell polyfill 在未登录时也能加载。
     if (pathname === "/opencodex-plugin-loader.js" && req.method === "GET") {
@@ -495,7 +500,7 @@ function createRequestHandler({
       return staticAssets.serveRendererIndex(req, res, authRefreshHeaders(shellAuth), { sidebarPreview });
     }
 
-    // 从这里开始进入受保护区：官方 renderer、IPC API、本地文件和诊断接口都不能匿名访问。
+    // 从这里开始进入受保护区：官方 renderer、写入型诊断、IPC API 和本地文件入口都不能匿名访问。
     const requestAuthForRefresh = AUTH_PASSWORD_HASH ? authResultForRequest(req, url) : null;
     if (AUTH_PASSWORD_HASH && !requestAuthForRefresh.authenticated) return sendUnauthorized(req, res);
     const requestAuthRefreshHeaders = authRefreshHeaders(requestAuthForRefresh);
@@ -542,15 +547,6 @@ function createRequestHandler({
     if (await handleRuntimeCompatibilityApi(req, res, url, compatibilityService)) return;
 
     if (await handleOpenCodexPluginApi(req, res, url, pluginService)) return;
-
-    const protectedStaticFile = staticAssets.protectedStaticFile?.(pathname);
-    if (
-      protectedStaticFile &&
-      (req.method === "GET" || req.method === "HEAD") &&
-      exists(protectedStaticFile)
-    ) {
-      return staticAssets.serveFile(req, res, protectedStaticFile, 200, pathname);
-    }
 
     if (pathname === "/api/local-file/download-path" && req.method === "POST") {
       // 侧栏文件树右键下载入口：文件直接下发，目录先临时压缩再返回短期 token。

@@ -118,11 +118,8 @@ test("launcher and dev runner wire restart supervision without background pollin
     launcherSource,
     /gatewayState\.officialRuntime = officialRuntime;\s+writeRunnerCompatibilityReportSafely\(paths, officialRuntime\)/
   );
-  // 调试页沿用主入口的 localhost 域，才能复用现有认证 Cookie。
-  assert.match(
-    launcherSource,
-    /ipcMain\.handle\("launcher:open-runtime-compatibility", \(\) => \{\s+const openUrl = openOpenCodexUrl\(\)/
-  );
+  // 调试入口已经迁到 Web 认证页设置，Launcher 不再保留重复 IPC 入口。
+  assert.doesNotMatch(launcherSource, /launcher:open-runtime-compatibility/);
   // 隐藏 Electron 只承载本地 IPC；Chromium GCM/后台同步必须关闭，避免周期网络唤醒。
   assert.match(officialRunnerSource, /appendSwitch\("disable-background-networking"\)/);
 
@@ -139,4 +136,9 @@ test("launcher and dev runner wire restart supervision without background pollin
   assert.match(serverSource, /readBody\(req, \{ maxBytes: CLIENT_LOG_BODY_MAX_BYTES \}\)/);
   assert.match(serverSource, /readBody\(req, \{ maxBytes: IPC_INVOKE_BODY_MAX_BYTES \}\)/);
   assert.match(serverSource, /CODEX_WEB_PICKED_FILES_MAX_TOTAL_BYTES \* 4/);
+  // 只读兼容快照必须在认证门之前处理，写入型 reports 路由仍由后面的受保护处理器接管。
+  assert.ok(
+    serverSource.indexOf("if (handlePublicRuntimeCompatibilityApi") <
+      serverSource.indexOf("const requestAuthForRefresh")
+  );
 });

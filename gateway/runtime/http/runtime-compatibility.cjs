@@ -5,6 +5,26 @@ const RUNTIME_COMPATIBILITY_REPORT_PATH = `${RUNTIME_COMPATIBILITY_API_PATH}/rep
 const RUNTIME_COMPATIBILITY_BODY_MAX_BYTES = 32 * 1024;
 const MAX_BROWSER_REPORTS_PER_REQUEST = 128;
 
+function sendRuntimeCompatibilitySnapshot(res, compatibilityService) {
+  sendJson(
+    res,
+    200,
+    { ok: true, compatibility: compatibilityService.snapshot() },
+    { "cache-control": "no-store" }
+  );
+}
+
+function handlePublicRuntimeCompatibilityApi(req, res, url, compatibilityService) {
+  // 匿名诊断只开放只读快照；浏览器命中回执仍留在认证门之后，避免外部伪造运行状态。
+  if (url.pathname !== RUNTIME_COMPATIBILITY_API_PATH || req.method !== "GET") return false;
+  if (!compatibilityService) {
+    sendJson(res, 503, { ok: false, error: "Runtime compatibility service is unavailable" }, { "cache-control": "no-store" });
+    return true;
+  }
+  sendRuntimeCompatibilitySnapshot(res, compatibilityService);
+  return true;
+}
+
 async function handleBrowserReports(req, res, compatibilityService) {
   let parsed;
   try {
@@ -61,12 +81,7 @@ async function handleRuntimeCompatibilityApi(req, res, url, compatibilityService
       sendJson(res, 405, { ok: false, error: "Method Not Allowed" }, { allow: "GET" });
       return true;
     }
-    sendJson(
-      res,
-      200,
-      { ok: true, compatibility: compatibilityService.snapshot() },
-      { "cache-control": "no-store" }
-    );
+    sendRuntimeCompatibilitySnapshot(res, compatibilityService);
     return true;
   }
   if (url.pathname === RUNTIME_COMPATIBILITY_REPORT_PATH) {
@@ -86,5 +101,6 @@ module.exports = {
   RUNTIME_COMPATIBILITY_BODY_MAX_BYTES,
   RUNTIME_COMPATIBILITY_REPORT_PATH,
   handleBrowserReports,
+  handlePublicRuntimeCompatibilityApi,
   handleRuntimeCompatibilityApi,
 };

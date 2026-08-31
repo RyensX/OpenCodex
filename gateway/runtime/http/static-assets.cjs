@@ -204,6 +204,11 @@ function patchOfficialAssetOffMainThread({ data, downloadMessage, host, locale, 
 const WEB_SHELL_STATIC_FILES = new Map([
   [FAVICON_PATH, path.join(WEB_SHELL_ASSETS_DIR, "icon.png")],
   [PWA_MANIFEST_PATH, path.join(WEB_SHELL_DIR, "manifest.webmanifest")],
+  // 调试页只读取已经脱敏的兼容性快照，登录前也允许从认证页设置入口打开。
+  [RUNTIME_COMPATIBILITY_PAGE_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.html")],
+  [RUNTIME_COMPATIBILITY_SETTINGS_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.html")],
+  [RUNTIME_COMPATIBILITY_SCRIPT_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.js")],
+  [RUNTIME_COMPATIBILITY_STYLE_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.css")],
   [OPENCODEX_PLUGIN_SYSTEM_PATH, path.join(WEB_SHELL_DIR, "opencodex-plugin-system.js")],
   [
     OPENCODEX_RUNTIME_COMPATIBILITY_PATH,
@@ -241,14 +246,6 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.css")],
   [CODEX_WORKSPACE_ROOT_PICKER_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.js")],
   [CODEX_TOOLTIP_DISMISS_GUARD_PATH, path.join(WEB_SHELL_DIR, "codex-tooltip-dismiss-guard.js")],
-]);
-
-// 兼容性页面本身不携带状态，但仍只在服务端认证门之后提供，避免暴露开发入口形状。
-const PROTECTED_WEB_SHELL_STATIC_FILES = new Map([
-  [RUNTIME_COMPATIBILITY_PAGE_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.html")],
-  [RUNTIME_COMPATIBILITY_SETTINGS_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.html")],
-  [RUNTIME_COMPATIBILITY_SCRIPT_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.js")],
-  [RUNTIME_COMPATIBILITY_STYLE_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.css")],
 ]);
 
 // 静态资源层把官方 renderer/web-shell 的路径差异统一隐藏起来，server 只需要按 URL 取文件。
@@ -1237,7 +1234,6 @@ ${pluginGatewayStateBootstrapScript()}
   /** 判断是否应该回退到 SPA shell；刷新 /local/:id 这类官方前端路由时不能返回 404。 */
   function isAppShellRoute(req, pathname) {
     if (req.method !== "GET" && req.method !== "HEAD") return false;
-    if (PROTECTED_WEB_SHELL_STATIC_FILES.has(pathname)) return false;
     if (pathname.startsWith("/api/") || pathname === "/ws") return false;
     if (pathname === "/" || pathname === "") return true;
     if (path.extname(pathname)) return false;
@@ -1516,10 +1512,6 @@ ${pluginGatewayStateBootstrapScript()}
     return null;
   }
 
-  function protectedStaticFile(reqPath) {
-    return PROTECTED_WEB_SHELL_STATIC_FILES.get(reqPath) || null;
-  }
-
   /** 静态资源缓存策略：hash asset 长缓存，入口 HTML/no-store 保持可更新。 */
   function cacheControlForRequestPath(reqPath, responsePatched = false) {
     if (process.env.CODEX_WEB_DISABLE_ASSET_CACHE === "1") return "no-store";
@@ -1725,7 +1717,6 @@ ${pluginGatewayStateBootstrapScript()}
     isPublicStaticPath,
     patchOfficialAssetData: patchOfficialAsset,
     prewarmRendererAssets,
-    protectedStaticFile,
     serveFile,
     servePluginLoader,
     serveRendererIndex,

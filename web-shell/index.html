@@ -548,6 +548,15 @@
             </span>
             <input id="setting-notification-permission" class="switch" type="checkbox" role="switch" />
           </div>
+          <div class="settings-section-title" data-i18n="web.settings.developerDiagnostics">开发者诊断</div>
+          <!-- 兼容性快照已经脱敏且只读，因此入口在认证前的设置侧栏中也可以直接使用。 -->
+          <a class="settings-row settings-link-row" href="/settings/developer/runtime-compatibility">
+            <span class="settings-row-content">
+              <span class="settings-row-title" data-i18n="web.settings.runtimeCompatibility">官方运行时兼容性</span>
+              <span class="settings-row-description" data-i18n="web.settings.runtimeCompatibilityDescription">查看修改点的定位、应用、验证和命中状态</span>
+            </span>
+            <span class="settings-row-trailing" aria-hidden="true">›</span>
+          </a>
           <!-- 关于入口固定放在插件列表前，避免插件较多时仓库链接被推到侧栏底部。 -->
           <div class="settings-section-title" data-i18n="web.settings.about">关于</div>
           <a class="settings-row settings-link-row" href="https://github.com/RyensX/OpenCodex" target="_blank" rel="noreferrer">
