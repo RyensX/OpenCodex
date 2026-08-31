@@ -22,6 +22,7 @@ const {
   PORT,
   PROJECT_ROOT,
   REPORTS_DIR,
+  RUNTIME_DIR,
   UNKNOWN_IPC_PATH,
   ensureDir,
   exists,
@@ -811,6 +812,22 @@ async function handleWsIpcInvoke(
   }
 }
 
+function gatewayCompatibilityPaths() {
+  return { runtimeDir: RUNTIME_DIR, reportsDir: REPORTS_DIR };
+}
+
+function createGatewayCompatibilityService(paths = gatewayCompatibilityPaths()) {
+  // 集中绑定运行目录，确保真实网关启动与测试都覆盖打包态的兼容性服务初始化链路。
+  return createCompatibilityService({
+    runtimeDir: paths.runtimeDir,
+    reportsDir: paths.reportsDir,
+    getRuntimeIdentity() {
+      const bundle = getOfficialBundle();
+      return { version: bundle?.version, build: bundle?.build };
+    },
+  });
+}
+
 async function createGateway() {
   /**
    * 启动顺序：
@@ -822,14 +839,7 @@ async function createGateway() {
   ensureDir(REPORTS_DIR);
   let compatibilityService = null;
   try {
-    compatibilityService = createCompatibilityService({
-      runtimeDir: RUNTIME_DIR,
-      reportsDir: REPORTS_DIR,
-      getRuntimeIdentity() {
-        const bundle = getOfficialBundle();
-        return { version: bundle?.version, build: bundle?.build };
-      },
-    });
+    compatibilityService = createGatewayCompatibilityService();
   } catch (error) {
     // 兼容骨架是旁路控制面，初始化失败不能阻断原 Gateway 启动链路。
     diagnosticWarn("gateway", "compatibility_service_unavailable", {
@@ -957,6 +967,8 @@ module.exports = {
   createGateway,
   createRequestHandler,
   __test: {
+    createGatewayCompatibilityService,
+    gatewayCompatibilityPaths,
     holdHiddenRuntimeGcmRequest,
     isHiddenRuntimeGcmHoldRequest,
   },

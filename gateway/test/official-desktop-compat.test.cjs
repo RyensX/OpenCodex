@@ -43,6 +43,26 @@ function writeFile(filePath, content = "fixture") {
   fs.writeFileSync(filePath, content);
 }
 
+test("gateway compatibility service initializes from configured runtime paths", (t) => {
+  const configuredPaths = hiddenRuntimeServerTest.gatewayCompatibilityPaths();
+  assert.equal(path.isAbsolute(configuredPaths.runtimeDir), true);
+  assert.equal(path.isAbsolute(configuredPaths.reportsDir), true);
+
+  // 使用临时目录走一遍真实初始化入口，避免测试污染开发态运行报告。
+  const root = temporaryDirectory(t);
+  const compatibilityService = hiddenRuntimeServerTest.createGatewayCompatibilityService({
+    runtimeDir: path.join(root, "runtime"),
+    reportsDir: path.join(root, "reports"),
+  });
+  try {
+    const snapshot = compatibilityService.snapshot();
+    assert.equal(snapshot.points.length, 102);
+    assert.equal(snapshot.features.length, 6);
+  } finally {
+    compatibilityService.dispose();
+  }
+});
+
 test("macOS default candidates prefer ChatGPT while retaining Codex paths", () => {
   const fileSystem = { normalizePath: (value) => value };
   const provider = new CodexAsarCandidateProvider({
