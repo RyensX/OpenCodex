@@ -38,6 +38,7 @@ const POINT_DEFINITIONS = Object.freeze(
       id: point.id,
       description: point.description,
       owner: point.owner,
+      plugin: point.plugin ? Object.freeze({ id: point.plugin.id, name: point.plugin.name }) : null,
       groupId: point.group.id,
       directAdapterIds: Object.freeze([...new Set(directAdapters.map((adapter) => adapter.id))]),
       adapterChainIds: Object.freeze([...new Set(chain.map((adapter) => adapter.id))]),

@@ -1,4 +1,5 @@
 const GROUP_BRAND: unique symbol = Symbol("opencodex.point-group");
+const PLUGIN_BRAND: unique symbol = Symbol("opencodex.plugin");
 const ADAPTER_BRAND: unique symbol = Symbol("opencodex.adapter");
 const CONTRIBUTION_BRAND: unique symbol = Symbol("opencodex.contribution");
 const POINT_BRAND: unique symbol = Symbol("opencodex.modification-point");
@@ -15,6 +16,12 @@ export interface PointGroupRef {
   readonly name: string;
   readonly description: string;
   readonly order: number;
+}
+
+export interface PluginRef {
+  readonly [PLUGIN_BRAND]: true;
+  readonly id: string;
+  readonly name: string;
 }
 
 export interface AdapterUse<TDeclaration = unknown> {
@@ -38,6 +45,7 @@ export interface ModificationPointDefinition {
   readonly id: string;
   readonly description: string;
   readonly owner: string;
+  readonly plugin: PluginRef | null;
   readonly group: PointGroupRef;
   readonly contributions: readonly AdapterUse<unknown>[];
 }
@@ -83,6 +91,14 @@ export function definePointGroup(definition: {
   });
 }
 
+export function definePlugin(definition: { id: string; name: string }): PluginRef {
+  return Object.freeze({
+    [PLUGIN_BRAND]: true as const,
+    id: stableId(definition.id, "插件 ID"),
+    name: normalizedText(definition.name, "插件名称"),
+  });
+}
+
 export function defineAdapter<TDeclaration>(definition: {
   id: string;
   name: string;
@@ -122,10 +138,14 @@ export function defineModificationPoint(definition: {
   id: string;
   description: string;
   owner: string;
+  plugin?: PluginRef | null;
   group: PointGroupRef;
   contributions: readonly AdapterUse<unknown>[];
 }): ModificationPointDefinition {
   if (!isPointGroupRef(definition.group)) throw new TypeError(`修改点 ${definition.id} 必须引用已定义的分类组对象`);
+  if (definition.plugin != null && !isPluginRef(definition.plugin)) {
+    throw new TypeError(`修改点 ${definition.id} 必须引用由 definePlugin 创建的插件对象`);
+  }
   if (!Array.isArray(definition.contributions) || definition.contributions.length === 0) {
     throw new TypeError(`修改点 ${definition.id} 至少需要一个适配器 Contribution`);
   }
@@ -137,6 +157,8 @@ export function defineModificationPoint(definition: {
     id: stableId(definition.id, "修改点 ID"),
     description: normalizedText(definition.description, "修改点说明"),
     owner: normalizedText(definition.owner, "修改点 owner"),
+    // 核心修改点显式归一化为 null，跨进程报告无需再通过 ID 或 owner 猜测来源。
+    plugin: definition.plugin || null,
     group: definition.group,
     contributions: Object.freeze([...definition.contributions]),
   });
@@ -152,6 +174,10 @@ export function defineCapability<TCapability>(id: string): CapabilityRef<TCapabi
 
 export function isPointGroupRef(value: unknown): value is PointGroupRef {
   return !!value && typeof value === "object" && (value as PointGroupRef)[GROUP_BRAND] === true;
+}
+
+export function isPluginRef(value: unknown): value is PluginRef {
+  return !!value && typeof value === "object" && (value as PluginRef)[PLUGIN_BRAND] === true;
 }
 
 export function isAdapterRef(value: unknown): value is AdapterRef<unknown> {

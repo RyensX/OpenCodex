@@ -61,6 +61,66 @@ function browserKernelPoint(id, { active = false } = {}) {
   return snapshot;
 }
 
+function externalPluginFixture() {
+  const plugin = { id: "example.runtime-plugin", name: "Runtime plugin" };
+  const pointDefinition = {
+    id: "example.runtime-plugin.mount",
+    description: "Mount plugin content",
+    owner: plugin.id,
+    plugin,
+    groupId: "example-runtime-plugin",
+    directAdapterIds: ["adapter.example-runtime-plugin"],
+    adapterChainIds: ["adapter.example-runtime-plugin", "adapter.runtime-view"],
+  };
+  return {
+    catalog: {
+      plugin,
+      groups: [{
+        id: "example-runtime-plugin",
+        name: "Runtime plugin",
+        description: "Plugin modification points",
+        order: 900,
+      }],
+      adapterTypes: [
+        {
+          id: "adapter.runtime-view",
+          name: "运行时视图",
+          description: "统一定位、观察、测量和修改浏览器视图。",
+          kind: "terminal",
+          dependencies: [],
+        },
+        {
+          id: "adapter.example-runtime-plugin",
+          name: "Plugin view",
+          description: "Semantic plugin view adapter",
+          kind: "composite",
+          dependencies: ["adapter.runtime-view"],
+        },
+      ],
+      points: [pointDefinition],
+    },
+    point: {
+      ...pointDefinition,
+      status: "ready",
+      contributions: [{
+        id: `${pointDefinition.id}::0.0`,
+        directAdapterId: "adapter.example-runtime-plugin",
+        adapterId: "adapter.runtime-view",
+        adapterChainIds: ["adapter.example-runtime-plugin", "adapter.runtime-view"],
+        location: "resolved",
+        application: "applied",
+        verification: "verified",
+        activation: "ready",
+        exercise: "not-exercised",
+        hitCount: 0,
+        fallbackActive: false,
+        fallbackReason: "",
+        reason: "",
+      }],
+    },
+  };
+}
+
 test("compatibility service exposes the Gateway production Kernel coordinator", () => {
   const service = createCompatibilityService();
   const calls = [];
@@ -307,5 +367,61 @@ test("authenticated API accepts only validated Browser Kernel reports", async ()
   );
   assert.equal(atomicResponse.status, 400);
   assert.equal(service.registry.point(untouched.id).status, "pending");
+  service.dispose();
+});
+
+test("authenticated Browser reports merge external Plugin SDK points into diagnostics", async () => {
+  const service = createCompatibilityService();
+  const fixture = externalPluginFixture();
+  const response = responseRecorder();
+  await handleRuntimeCompatibilityApi(
+    request("POST", {
+      clientId: "browser_plugin_123",
+      generation: 1,
+      catalogs: [fixture.catalog],
+      reports: [{ sequence: 1, point: fixture.point }],
+    }),
+    response,
+    new URL(`http://localhost${RUNTIME_COMPATIBILITY_REPORT_PATH}`),
+    service,
+  );
+
+  assert.equal(response.status, 200);
+  const snapshot = service.snapshot();
+  assert.equal(snapshot.points.length, 103);
+  assert.deepEqual(
+    snapshot.points.find((point) => point.id === fixture.point.id).plugin,
+    fixture.catalog.plugin,
+  );
+  assert.equal(snapshot.points.find((point) => point.id === fixture.point.id).status, "ready");
+
+  const spoofed = responseRecorder();
+  await handleRuntimeCompatibilityApi(
+    request("POST", {
+      clientId: "browser_plugin_123",
+      generation: 1,
+      catalogs: [{
+        ...fixture.catalog,
+        plugin: { id: "example.spoofed", name: "Spoofed" },
+      }],
+      reports: [{ sequence: 2, point: fixture.point }],
+    }),
+    spoofed,
+    new URL(`http://localhost${RUNTIME_COMPATIBILITY_REPORT_PATH}`),
+    service,
+  );
+  assert.equal(spoofed.status, 400);
+
+  const corePoint = browserKernelPoint("web.runtime.bridge.desktop-api");
+  assert.equal(service.browserKernelReport({
+    clientId: "browser_replacement_123",
+    generation: 1,
+    report: { sequence: 1, point: corePoint },
+  }), true);
+  assert.equal(
+    service.snapshot().points.find((point) => point.id === fixture.point.id).status,
+    "disabled",
+    "新页面未重新加载的外部插件不能残留为旧页面状态",
+  );
   service.dispose();
 });

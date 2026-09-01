@@ -154,6 +154,9 @@ export interface RuntimeSnapshot {
   }[];
   readonly points: readonly {
     id: string;
+    description: string;
+    owner: string;
+    plugin: Readonly<{ id: string; name: string }> | null;
     groupId: string;
     status: "pending" | "unavailable" | "degraded" | "ready" | "active" | "disabled";
     directAdapterIds: readonly string[];
@@ -893,6 +896,9 @@ export function createModificationRuntime(): ModificationRuntime {
       }));
     return Object.freeze({
       id: point.id,
+      description: point.description,
+      owner: point.owner,
+      plugin: point.plugin ? Object.freeze({ id: point.plugin.id, name: point.plugin.name }) : null,
       groupId: point.group.id,
       status: pointStatus(contributionStates),
       directAdapterIds: Object.freeze([...new Set(directAdapters.map((adapter) => adapter.id))]),

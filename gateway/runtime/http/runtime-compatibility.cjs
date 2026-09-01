@@ -4,6 +4,7 @@ const RUNTIME_COMPATIBILITY_API_PATH = "/api/opencodex/runtime-compatibility";
 const RUNTIME_COMPATIBILITY_REPORT_PATH = `${RUNTIME_COMPATIBILITY_API_PATH}/reports`;
 const RUNTIME_COMPATIBILITY_BODY_MAX_BYTES = 128 * 1024;
 const MAX_BROWSER_REPORTS_PER_REQUEST = 128;
+const MAX_BROWSER_PLUGIN_CATALOGS_PER_REQUEST = 1;
 
 function sendRuntimeCompatibilitySnapshot(res, compatibilityService) {
   sendJson(
@@ -40,18 +41,40 @@ async function handleBrowserReports(req, res, compatibilityService) {
     return;
   }
   const reports = Array.isArray(parsed.reports) ? parsed.reports : [];
+  const catalogs = Array.isArray(parsed.catalogs) ? parsed.catalogs : [];
   if (reports.length === 0 || reports.length > MAX_BROWSER_REPORTS_PER_REQUEST) {
     sendJson(res, 400, { ok: false, error: "Invalid compatibility reports" }, { "cache-control": "no-store" });
+    return;
+  }
+  if (catalogs.length > MAX_BROWSER_PLUGIN_CATALOGS_PER_REQUEST || !catalogs.every((catalog) =>
+    compatibilityService.canAcceptBrowserPluginCatalog({
+      clientId: parsed.clientId,
+      generation: parsed.generation,
+      catalog,
+    })
+  )) {
+    sendJson(res, 400, { ok: false, error: "Invalid compatibility plugin catalogs" }, { "cache-control": "no-store" });
     return;
   }
   const acceptedShape = reports.every((report) => compatibilityService.canAcceptBrowserKernelReport({
     clientId: parsed.clientId,
     generation: parsed.generation,
     report,
+    catalogs,
   }));
   if (!acceptedShape) {
     sendJson(res, 400, { ok: false, error: "One or more compatibility reports were rejected" }, { "cache-control": "no-store" });
     return;
+  }
+  for (const catalog of catalogs) {
+    if (!compatibilityService.registerBrowserPluginCatalog({
+      clientId: parsed.clientId,
+      generation: parsed.generation,
+      catalog,
+    })) {
+      sendJson(res, 400, { ok: false, error: "One or more compatibility plugin catalogs were rejected" }, { "cache-control": "no-store" });
+      return;
+    }
   }
   let accepted = 0;
   for (const report of reports) {
@@ -92,6 +115,7 @@ async function handleRuntimeCompatibilityApi(req, res, url, compatibilityService
 
 module.exports = {
   MAX_BROWSER_REPORTS_PER_REQUEST,
+  MAX_BROWSER_PLUGIN_CATALOGS_PER_REQUEST,
   RUNTIME_COMPATIBILITY_API_PATH,
   RUNTIME_COMPATIBILITY_BODY_MAX_BYTES,
   RUNTIME_COMPATIBILITY_REPORT_PATH,

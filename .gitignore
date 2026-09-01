@@ -20,6 +20,8 @@ reports/
 src/
 !gateway/src/
 !gateway/src/**
+!web-shell/src/
+!web-shell/src/**
 # v2 插件示例源码需要随仓库发布，避免通用上游源码规则误过滤。
 !examples/plugin-v2-hello/src/
 !examples/plugin-v2-hello/src/**

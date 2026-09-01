@@ -38,6 +38,7 @@ function normalizeCompatibilityReportForRead(value) {
   };
   const points = (Array.isArray(value.points) ? value.points : []).map((point) => ({
     ...point,
+    plugin: null,
     groupId: groupForPoint(point),
     directAdapterIds: [legacyAdapter.id],
     adapterChainIds: [legacyAdapter.id],

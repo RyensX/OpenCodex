@@ -7,9 +7,11 @@ import {
 import {
   AdapterRef,
   ModificationPointDefinition,
+  PluginRef,
   PointGroupRef,
   defineAdapter,
   defineModificationPoint,
+  definePlugin,
   definePointGroup,
 } from "./sdk";
 
@@ -39,6 +41,18 @@ export const POINT_GROUPS = Object.freeze({
   officialMain: group("official-main", "官方 main 优化", "对官方 main bundle 中的后台任务实施可验证优化。", 150),
   rendererResources: group("renderer-resources", "Renderer 静态资源", "对官方 Renderer HTML、CSP 和静态 chunk 实施可验证改写。", 160),
   runnerPackaging: group("runner-packaging", "Runner 打包", "生成、签名并组装各平台后台 Runner 产物。", 170),
+});
+
+/**
+ * 插件归属使用强类型对象显式绑定；这些 ID 与插件 manifest 对齐，但运行时绝不通过字符串反推归属。
+ */
+export const BUILTIN_PLUGINS = Object.freeze({
+  smartModelRouter: definePlugin({ id: "opencodex.smart-model-router", name: "智能调度" }),
+  projectRecentSort: definePlugin({ id: "opencodex.project-recent-sort", name: "项目最近更新排序" }),
+  tokenUsageInline: definePlugin({ id: "opencodex.token-usage-inline", name: "显示Token消耗" }),
+  mobileSidebarAutoCollapse: definePlugin({ id: "opencodex.mobile-sidebar-auto-collapse", name: "移动端侧栏优化" }),
+  mobileKeyboardOptimization: definePlugin({ id: "opencodex.mobile-keyboard-optimization", name: "移动端软键盘优化" }),
+  iosFix: definePlugin({ id: "opencodex.ios-fix", name: "iOS兼容修复" }),
 });
 
 function terminal<THost extends ModificationHost>(
@@ -194,11 +208,12 @@ function hostForPoint<TId extends string>(id: TId): HostForPointId<TId> {
 
 const pointTargets: ModificationTargetRef[] = [];
 
-function point<const TId extends string>(
+function pointWithPlugin<const TId extends string>(
   id: TId,
   description: string,
   owner: string,
   pointGroup: PointGroupRef,
+  plugin: PluginRef | null,
   ...pointAdapters: readonly AdapterRef<CatalogDeclaration<HostForPointId<TId>>>[]
 ): ModificationPointDefinition {
   const target = defineModificationTarget(id, hostForPoint(id));
@@ -207,14 +222,37 @@ function point<const TId extends string>(
     id,
     description,
     owner,
+    plugin,
     group: pointGroup,
     // 修改点只携带强类型语义目标；终端 Provider 由 AdapterRef 对象身份自动选择。
     contributions: pointAdapters.map((adapter) => adapter.use({ target })),
   });
 }
 
+function point<const TId extends string>(
+  id: TId,
+  description: string,
+  owner: string,
+  pointGroup: PointGroupRef,
+  ...pointAdapters: readonly AdapterRef<CatalogDeclaration<HostForPointId<TId>>>[]
+): ModificationPointDefinition {
+  return pointWithPlugin(id, description, owner, pointGroup, null, ...pointAdapters);
+}
+
+function pluginPoint<const TId extends string>(
+  id: TId,
+  description: string,
+  owner: string,
+  pointGroup: PointGroupRef,
+  plugin: PluginRef,
+  ...pointAdapters: readonly AdapterRef<CatalogDeclaration<HostForPointId<TId>>>[]
+): ModificationPointDefinition {
+  return pointWithPlugin(id, description, owner, pointGroup, plugin, ...pointAdapters);
+}
+
 const G = POINT_GROUPS;
 const A = ADAPTERS;
+const P = BUILTIN_PLUGINS;
 
 /**
  * 迁移矩阵是所有修改点的唯一目录：每个点必须显式绑定分类组和直接适配器。
@@ -247,15 +285,15 @@ export const POINT_DEFINITIONS = Object.freeze([
   point("web.runtime.dom.offscreen-animation", "暂停离屏官方动画", "web-shell", G.notificationPower, A.semanticView),
   point("web.runtime.dom.tooltip-dismiss", "适配官方 Tooltip 挂载和关闭", "web-shell", G.rendererUi, A.semanticView),
   point("web.runtime.dom.window-controls-overlay", "适配 PWA 标题栏和安全区", "web-shell", G.rendererUi, A.semanticView),
-  point("web.runtime.smart-router.composer", "定位并适配官方模型选择器", "smart-router", G.smartRouting, A.semanticView),
-  point("web.runtime.smart-router.settings", "向官方设置注入智能调度页面", "smart-router", G.smartRouting, A.semanticView),
-  point("web.runtime.smart-router.summary", "在官方线程界面展示调度结果", "smart-router", G.smartRouting, A.semanticView),
-  point("web.runtime.plugin.project-recent-sort", "调整项目和会话最近使用排序", "web-plugins", G.projectNavigation, A.projectOrdering),
+  pluginPoint("web.runtime.smart-router.composer", "定位并适配官方模型选择器", "smart-router", G.smartRouting, P.smartModelRouter, A.semanticView),
+  pluginPoint("web.runtime.smart-router.settings", "向官方设置注入智能调度页面", "smart-router", G.smartRouting, P.smartModelRouter, A.semanticView),
+  pluginPoint("web.runtime.smart-router.summary", "在官方线程界面展示调度结果", "smart-router", G.smartRouting, P.smartModelRouter, A.semanticView),
+  pluginPoint("web.runtime.plugin.project-recent-sort", "调整项目和会话最近使用排序", "web-plugins", G.projectNavigation, P.projectRecentSort, A.projectOrdering),
   point("web.runtime.protocol.token-usage", "从官方协议提取线程 Token 用量", "web-shell", G.tokenUsage, A.semanticProtocol),
-  point("web.runtime.dom.token-usage-inline", "在官方消息操作区插入 Token 用量", "web-plugins", G.tokenUsage, A.semanticView),
-  point("web.runtime.plugin.mobile-sidebar", "移动端新会话后自动收起侧栏", "web-plugins", G.mobileInteraction, A.mobileInteraction),
-  point("web.runtime.plugin.mobile-keyboard", "修正移动端发送后的键盘行为", "web-plugins", G.mobileInteraction, A.mobileInteraction),
-  point("web.runtime.plugin.ios-layout", "修正 iOS 视口和键盘避让", "web-plugins", G.mobileInteraction, A.mobileInteraction),
+  pluginPoint("web.runtime.dom.token-usage-inline", "在官方消息操作区插入 Token 用量", "web-plugins", G.tokenUsage, P.tokenUsageInline, A.semanticView),
+  pluginPoint("web.runtime.plugin.mobile-sidebar", "移动端新会话后自动收起侧栏", "web-plugins", G.mobileInteraction, P.mobileSidebarAutoCollapse, A.mobileInteraction),
+  pluginPoint("web.runtime.plugin.mobile-keyboard", "修正移动端发送后的键盘行为", "web-plugins", G.mobileInteraction, P.mobileKeyboardOptimization, A.mobileInteraction),
+  pluginPoint("web.runtime.plugin.ios-layout", "修正 iOS 视口和键盘避让", "web-plugins", G.mobileInteraction, P.iosFix, A.mobileInteraction),
   point("web.runtime.shell.legacy-document-replace", "兼容旧登录壳替换官方文档", "web-shell", G.rendererUi, A.semanticView),
 
   point("gateway.runtime.environment.official-app", "把 Gateway 环境对齐到官方桌面应用", "official-runtime", G.gatewayRuntime, A.officialEnvironment),
@@ -277,12 +315,12 @@ export const POINT_DEFINITIONS = Object.freeze([
   point("gateway.runtime.process.app-server-launch", "重定向官方 App Server 可执行文件", "official-runtime", G.gatewayRuntime, A.processBridge),
   point("gateway.runtime.process.remote-file-manager", "把系统文件管理器命令转换为远端下载", "official-runtime", G.remoteFiles, A.processBridge),
   point("gateway.runtime.process.computer-use-installer", "兼容 Computer Use Installer 执行合约", "official-runtime", G.gatewayRuntime, A.processBridge),
-  point("gateway.runtime.app-server.transport", "建立 App Server NDJSON 中间层", "smart-router", G.smartRouting, A.appServerProtocol),
-  point("gateway.runtime.app-server.virtual-model", "向官方协议注入 Auto 模型", "smart-router", G.smartRouting, A.appServerProtocol),
-  point("gateway.runtime.app-server.turn-router", "替换 turn/start 的真实模型和强度", "smart-router", G.smartRouting, A.appServerProtocol),
-  point("gateway.runtime.app-server.internal-session", "隔离智能分类内部会话", "smart-router", G.smartRouting, A.appServerProtocol),
-  point("gateway.runtime.app-server.route-metadata", "向官方通知注入调度元数据", "smart-router", G.smartRouting, A.appServerProtocol),
-  point("gateway.runtime.app-server.history-context", "维护智能分类的有界历史上下文", "smart-router", G.smartRouting, A.appServerProtocol),
+  pluginPoint("gateway.runtime.app-server.transport", "建立 App Server NDJSON 中间层", "smart-router", G.smartRouting, P.smartModelRouter, A.appServerProtocol),
+  pluginPoint("gateway.runtime.app-server.virtual-model", "向官方协议注入 Auto 模型", "smart-router", G.smartRouting, P.smartModelRouter, A.appServerProtocol),
+  pluginPoint("gateway.runtime.app-server.turn-router", "替换 turn/start 的真实模型和强度", "smart-router", G.smartRouting, P.smartModelRouter, A.appServerProtocol),
+  pluginPoint("gateway.runtime.app-server.internal-session", "隔离智能分类内部会话", "smart-router", G.smartRouting, P.smartModelRouter, A.appServerProtocol),
+  pluginPoint("gateway.runtime.app-server.route-metadata", "向官方通知注入调度元数据", "smart-router", G.smartRouting, P.smartModelRouter, A.appServerProtocol),
+  pluginPoint("gateway.runtime.app-server.history-context", "维护智能分类的有界历史上下文", "smart-router", G.smartRouting, P.smartModelRouter, A.appServerProtocol),
   point("gateway.runtime.app-host.relay", "中继浏览器与官方 app-host", "official-runtime", G.rendererCore, A.gatewayIpc),
   point("gateway.runtime.ipc.request-route", "按请求和客户端定向官方 IPC 响应", "official-runtime", G.gatewayIpc, A.gatewayIpc),
   point("gateway.runtime.ipc.chunked-message", "重组官方分块 IPC 并确认", "official-runtime", G.gatewayIpc, A.gatewayIpc),

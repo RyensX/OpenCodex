@@ -10,6 +10,7 @@ const modificationPoints = require("../modification/point-refs.cjs");
 
 const BROWSER_CLIENT_ID_RE = /^[a-zA-Z0-9_-]{8,96}$/;
 const BROWSER_REPORTER_STALE_MS = 30_000;
+const MAX_BROWSER_PLUGIN_POINTS = 512;
 
 function createCompatibilityService({
   runtimeDir,
@@ -28,6 +29,7 @@ function createCompatibilityService({
     })
   );
   const browserKernelReporters = new Map();
+  const browserPluginPointIds = new Set();
   let activeBrowserReporter = null;
   const store = reportStore || (
     runtimeDir && reportsDir
@@ -99,19 +101,54 @@ function createCompatibilityService({
     return { ...explicitRuntimeIdentity };
   }
 
-  function canAcceptBrowserKernelReport({ clientId, generation, report }) {
+  function validBrowserReporterIdentity(clientId, generation) {
     const normalizedClientId = String(clientId || "").trim();
     const normalizedGeneration = Number(generation);
-    const sequence = Number(report?.sequence);
-    const pointId = String(report?.point?.id || "");
     if (!BROWSER_CLIENT_ID_RE.test(normalizedClientId)) return false;
     if (!Number.isInteger(normalizedGeneration) || normalizedGeneration < 1) return false;
-    if (!Number.isInteger(sequence) || sequence < 1) return false;
-    if (!pointId.startsWith("web.runtime.")) return false;
+    return true;
+  }
+
+  function canAcceptBrowserPluginCatalog({ clientId, generation, catalog }) {
+    if (!validBrowserReporterIdentity(clientId, generation)) return false;
     try {
-      const definition = registry.point(pointId);
+      const prepared = registry.validatePluginCatalog(catalog);
+      const newPointCount = prepared.pointIds.filter((pointId) => !browserPluginPointIds.has(pointId)).length;
+      return browserPluginPointIds.size + newPointCount <= MAX_BROWSER_PLUGIN_POINTS;
+    } catch {
+      return false;
+    }
+  }
+
+  function registerBrowserPluginCatalog({ clientId, generation, catalog }) {
+    if (!canAcceptBrowserPluginCatalog({ clientId, generation, catalog })) return false;
+    try {
+      const registered = registry.registerPluginCatalog(catalog);
+      for (const pointId of registered.pointIds) browserPluginPointIds.add(pointId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function canAcceptBrowserKernelReport({ clientId, generation, report, catalogs = [] }) {
+    if (!validBrowserReporterIdentity(clientId, generation)) return false;
+    const sequence = Number(report?.sequence);
+    const pointId = String(report?.point?.id || "");
+    if (!Number.isInteger(sequence) || sequence < 1) return false;
+    try {
+      let definition;
+      try {
+        definition = registry.point(pointId);
+        if (!pointId.startsWith("web.runtime.") && !browserPluginPointIds.has(pointId)) return false;
+      } catch {
+        const preparedCatalogs = Array.from(catalogs || [], (catalog) => registry.validatePluginCatalog(catalog));
+        definition = preparedCatalogs.flatMap((catalog) => catalog.points).find((point) => point.id === pointId);
+        if (!definition) return false;
+      }
       return (
         String(report.point.groupId || "") === definition.groupId &&
+        JSON.stringify(report.point.plugin || null) === JSON.stringify(definition.plugin || null) &&
         Array.isArray(report.point.contributions) &&
         report.point.contributions.length > 0
       );
@@ -155,6 +192,9 @@ function createCompatibilityService({
       reporter.sequence = 0;
       activeBrowserReporter = { clientId: normalizedClientId, generation: normalizedGeneration };
       registry.resetPointsByPrefix("web.runtime.");
+      registry.resetPoints([...browserPluginPointIds].filter((pointId) => !pointId.startsWith("web.runtime.")));
+      // 新页面尚未重新上报的外部插件按“已关闭”展示，避免已卸载插件长期停留在待检测状态。
+      for (const pointId of browserPluginPointIds) registry.disablePoint(pointId, "Plugin not reported by current page");
     }
     if (normalizedGeneration < reporter.generation) return false;
     // 响应在网络中丢失时浏览器会重发同一批；旧 sequence 已经成功落入 Registry，可幂等确认。
@@ -184,6 +224,8 @@ function createCompatibilityService({
     setRuntimeIdentity,
     browserKernelReport,
     canAcceptBrowserKernelReport,
+    canAcceptBrowserPluginCatalog,
+    registerBrowserPluginCatalog,
     snapshot() {
       return registry.snapshot();
     },
@@ -219,5 +261,6 @@ function createCompatibilityService({
 module.exports = {
   BROWSER_CLIENT_ID_RE,
   BROWSER_REPORTER_STALE_MS,
+  MAX_BROWSER_PLUGIN_POINTS,
   createCompatibilityService,
 };

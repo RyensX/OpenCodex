@@ -455,8 +455,13 @@ test("builtin plugin activation keeps its provider owner after deferred registra
   assert.equal(disposed, 1);
 });
 
-test("browser plugin SDK v2 commits strong references and mounts virtual views", () => {
+test("browser plugin SDK v2 commits strong references and mounts virtual views", async () => {
   const harness = createHarness();
+  const diagnostics = [];
+  harness.window.OpenCodexRuntimeCompatibility = {
+    clientId: "browser_external_plugin",
+    ingestSnapshot(snapshot, options) { diagnostics.push({ snapshot, options }); },
+  };
   const mountedNodes = [];
   const target = {
     append(node) {
@@ -548,8 +553,17 @@ test("browser plugin SDK v2 commits strong references and mounts virtual views",
     ],
   });
   sdk.commit();
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].options.plugin.id, "example.virtual-view");
+  assert.equal(diagnostics[0].options.plugin.name, "example.virtual-view");
+  assert.equal(diagnostics[0].options.disabled, true);
+  assert.equal(
+    diagnostics[0].snapshot.points.every((point) => point.plugin?.id === "example.virtual-view"),
+    true,
+  );
   assert.equal(typeof registeredPlugin.activate, "function");
   const dispose = registeredPlugin.activate({ scope: "renderer" });
+  await Promise.resolve();
   assert.equal(mountedNodes.length, 1);
   let pluginSnapshot = root.snapshot()[0];
   const mountedPoint = pluginSnapshot.points.find((point) => point.id.endsWith(".mount"));
@@ -565,7 +579,15 @@ test("browser plugin SDK v2 commits strong references and mounts virtual views",
   });
   pluginSnapshot = root.snapshot()[0];
   assert.equal(pluginSnapshot.points.find((point) => point.id.endsWith("hook-and-protocol")).status, "active");
+  harness.window.OpenCodexRuntimeCompatibility = {
+    clientId: "browser_external_plugin_failure",
+    ingestSnapshot(snapshot, options) {
+      diagnostics.push({ snapshot, options });
+      throw new Error("diagnostics unavailable");
+    },
+  };
   dispose();
+  assert.equal(diagnostics.at(-1).options.disabled, true);
   assert.equal(mountedNodes.length, 0);
   assert.equal(harness.window.demoApi.calculate, originalCalculate);
 });

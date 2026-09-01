@@ -101,6 +101,58 @@ test("compatibility catalog declares groups and adapter chains for every stable 
   assert.equal(snapshot.groups.length, 17);
   assert.equal(snapshot.adapterTypes.length, 23);
   assert.equal(snapshot.status, "pending");
+  const pluginPoints = snapshot.points.filter((point) => point.plugin !== null);
+  assert.equal(pluginPoints.length, 14);
+  const pluginManifestIds = fs.readdirSync(path.resolve(__dirname, "..", "..", "web-shell", "plugins"))
+    .map((directory) => JSON.parse(fs.readFileSync(
+      path.resolve(__dirname, "..", "..", "web-shell", "plugins", directory, "plugin.json"),
+      "utf8",
+    )).id)
+    .sort();
+  assert.deepEqual([...new Set(pluginPoints.map((point) => point.plugin.id))].sort(), pluginManifestIds);
+  assert.equal(
+    snapshot.points.find((point) => point.id === "web.runtime.dom.token-usage-inline").plugin.id,
+    "opencodex.token-usage-inline",
+  );
+  assert.equal(
+    snapshot.points.find((point) => point.id === "web.runtime.protocol.token-usage").plugin,
+    null,
+    "共享 Token 协议能力是核心修改点，不能根据相关功能或 ID 猜测插件归属",
+  );
+});
+
+test("plugin catalogs register structured ownership without ID or owner inference", () => {
+  const registry = registerCompatibilityCatalog(createCompatibilityRegistry());
+  const catalog = {
+    plugin: { id: "example.diagnostics", name: "Diagnostics example" },
+    groups: [{ id: "example-diagnostics", name: "示例诊断", description: "外部插件修改点", order: 900 }],
+    adapterTypes: [{
+      id: "adapter.example-diagnostics",
+      name: "示例适配器",
+      description: "外部插件测试适配器",
+      kind: "terminal",
+      dependencies: [],
+    }],
+    points: [{
+      id: "example.diagnostics.point",
+      description: "外部插件修改点",
+      owner: "example.diagnostics",
+      plugin: { id: "example.diagnostics", name: "Diagnostics example" },
+      groupId: "example-diagnostics",
+      directAdapterIds: ["adapter.example-diagnostics"],
+      adapterChainIds: ["adapter.example-diagnostics"],
+    }],
+  };
+  registry.registerPluginCatalog(catalog);
+  assert.deepEqual(registry.point("example.diagnostics.point").plugin, {
+    id: "example.diagnostics",
+    name: "Diagnostics example",
+  });
+  assert.doesNotThrow(() => registry.registerPluginCatalog(catalog), "相同插件目录重发必须幂等");
+  assert.throws(() => registry.registerPluginCatalog({
+    ...catalog,
+    points: [{ ...catalog.points[0], id: "web.runtime.bridge.desktop-api" }],
+  }), /conflicts with compatibility point/);
 });
 
 test("every catalog point is wired into production code outside the catalog", () => {

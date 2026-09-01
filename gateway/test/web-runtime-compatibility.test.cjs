@@ -101,6 +101,66 @@ test("browser Kernel reporter starts a new monotonic generation after document r
   assert.deepEqual(calls.map((call) => call.reports[0].sequence), [1, 1]);
 });
 
+test("browser Kernel reporter sends structured catalogs for external plugin points", async () => {
+  const calls = [];
+  const { context } = createContext(async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return { ok: true, status: 200 };
+  });
+  const plugin = { id: "example.runtime-plugin", name: "Runtime plugin" };
+  const basePoint = pointSnapshot({ active: true, hitCount: 1 });
+  const point = {
+    ...basePoint,
+    id: "example.runtime-plugin.mount",
+    description: "Mount plugin content",
+    owner: plugin.id,
+    plugin,
+    groupId: "example-runtime-plugin",
+    directAdapterIds: ["adapter.example-runtime-plugin"],
+    adapterChainIds: ["adapter.example-runtime-plugin", "adapter.runtime-view"],
+    contributions: [{
+      ...basePoint.contributions[0],
+      id: "example.runtime-plugin.mount::0.0",
+      directAdapterId: "adapter.example-runtime-plugin",
+      adapterId: "adapter.runtime-view",
+      adapterChainIds: ["adapter.example-runtime-plugin", "adapter.runtime-view"],
+    }],
+  };
+  context.OpenCodexRuntimeCompatibility.ingestSnapshot({
+    groups: [{
+      id: "example-runtime-plugin",
+      name: "Runtime plugin",
+      description: "Plugin modification points",
+      order: 900,
+      pointIds: [point.id],
+    }],
+    adapterTypes: [
+      {
+        id: "adapter.runtime-view",
+        name: "Runtime View",
+        description: "Base view adapter",
+        kind: "terminal",
+        dependencies: [],
+      },
+      {
+        id: "adapter.example-runtime-plugin",
+        name: "Plugin view",
+        description: "Semantic plugin view adapter",
+        kind: "composite",
+        dependencies: ["adapter.runtime-view"],
+      },
+    ],
+    points: [point],
+  }, { plugin });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].catalogs.length, 1);
+  assert.deepEqual(calls[0].catalogs[0].plugin, plugin);
+  assert.equal(calls[0].reports[0].point.plugin.id, plugin.id);
+  assert.equal(calls[0].reports[0].point.id, point.id);
+});
+
 test("browser Kernel reporter moves its visibility listener to the replacement document", () => {
   const harness = createContext(async () => ({ ok: true, status: 200 }));
   assert.equal(harness.documentListeners.has("visibilitychange"), true);

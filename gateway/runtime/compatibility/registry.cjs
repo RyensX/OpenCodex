@@ -1,6 +1,6 @@
 const COMPATIBILITY_REPORT_SCHEMA_VERSION = 2;
 
-const POINT_ID_RE = /^(web\.runtime|gateway\.runtime|static\.cache)\.[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+const POINT_ID_RE = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const GROUP_ID_RE = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const ADAPTER_ID_RE = /^adapter\.[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const FINGERPRINT_RE = /^[a-zA-Z0-9._:-]{1,160}$/;
@@ -96,10 +96,20 @@ function normalizedPointDefinition(definition) {
     id,
     description: sanitizeCompatibilityText(definition.description),
     owner: sanitizeCompatibilityText(definition.owner || "opencodex"),
+    plugin: definition.plugin == null ? null : normalizedPluginDefinition(definition.plugin),
     groupId,
     directAdapterIds: Object.freeze(directAdapterIds),
     adapterChainIds: Object.freeze(adapterChainIds),
   });
+}
+
+function normalizedPluginDefinition(definition) {
+  if (!definition || typeof definition !== "object") throw new TypeError("Plugin definition is required");
+  const id = String(definition.id || "").trim();
+  if (!GROUP_ID_RE.test(id)) throw new TypeError(`Invalid compatibility plugin id: ${id || "<empty>"}`);
+  const name = sanitizeCompatibilityText(definition.name);
+  if (!name) throw new TypeError(`Compatibility plugin ${id} must declare a name`);
+  return Object.freeze({ id, name });
 }
 
 function normalizedGroupDefinition(definition) {
@@ -136,6 +146,7 @@ function freshPointState(definition, generation, at) {
     id: definition.id,
     description: definition.description,
     owner: definition.owner,
+    plugin: definition.plugin,
     groupId: definition.groupId,
     directAdapterIds: definition.directAdapterIds,
     adapterChainIds: definition.adapterChainIds,
@@ -240,6 +251,10 @@ function aggregateKernelHitCount(contributions) {
   }
   const completedCounts = [...countsByDirectContribution.values()];
   return completedCounts.length > 0 ? Math.min(...completedCounts) : 0;
+}
+
+function sameDefinition(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = () => Date.now() } = {}) {
@@ -516,6 +531,7 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
       id: state.id,
       description: state.description,
       owner: state.owner,
+      plugin: state.plugin ? { ...state.plugin } : null,
       groupId: state.groupId,
       directAdapterIds: [...state.directAdapterIds],
       adapterChainIds: [...state.adapterChainIds],
@@ -581,6 +597,100 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     }
     adapterTypes.set(normalized.id, normalized);
     return normalized;
+  }
+
+  function preparePluginCatalog(catalog) {
+    synchronizeRuntime();
+    const source = catalog && typeof catalog === "object" ? catalog : {};
+    const plugin = normalizedPluginDefinition(source.plugin);
+    const rawGroups = Array.isArray(source.groups) ? source.groups : [];
+    const rawAdapters = Array.isArray(source.adapterTypes) ? source.adapterTypes : [];
+    const rawPoints = Array.isArray(source.points) ? source.points : [];
+    if (rawGroups.length > 32 || rawAdapters.length > 64 || rawPoints.length === 0 || rawPoints.length > 128) {
+      throw new TypeError(`Compatibility plugin catalog has invalid bounds: ${plugin.id}`);
+    }
+    const normalizedGroups = rawGroups.map(normalizedGroupDefinition);
+    const normalizedAdapters = rawAdapters.map(normalizedAdapterDefinition);
+    const normalizedPoints = rawPoints.map(normalizedPointDefinition);
+    const assertUnique = (items, label) => {
+      if (new Set(items.map((item) => item.id)).size !== items.length) {
+        throw new TypeError(`Compatibility plugin catalog has duplicate ${label}: ${plugin.id}`);
+      }
+    };
+    assertUnique(normalizedGroups, "groups");
+    assertUnique(normalizedAdapters, "adapters");
+    assertUnique(normalizedPoints, "points");
+
+    const incomingGroups = new Map(normalizedGroups.map((item) => [item.id, item]));
+    const incomingAdapters = new Map(normalizedAdapters.map((item) => [item.id, item]));
+    for (const point of normalizedPoints) {
+      if (!point.plugin || point.plugin.id !== plugin.id || point.plugin.name !== plugin.name || point.owner !== plugin.id) {
+        throw new TypeError(`Compatibility point does not belong to plugin catalog: ${point.id}`);
+      }
+      if (!groups.has(point.groupId) && !incomingGroups.has(point.groupId)) {
+        throw new CompatibilityStateError(`Point ${point.id} references unknown group ${point.groupId}`);
+      }
+      for (const adapterId of point.adapterChainIds) {
+        if (!adapterTypes.has(adapterId) && !incomingAdapters.has(adapterId)) {
+          throw new CompatibilityStateError(`Point ${point.id} references unknown adapter ${adapterId}`);
+        }
+      }
+    }
+    for (const group of normalizedGroups) {
+      const existing = groups.get(group.id);
+      if (existing && !sameDefinition(existing, group)) {
+        throw new CompatibilityStateError(`Plugin ${plugin.id} conflicts with compatibility group ${group.id}`);
+      }
+    }
+    for (const adapter of normalizedAdapters) {
+      const existing = adapterTypes.get(adapter.id);
+      if (existing && !sameDefinition(existing, adapter)) {
+        throw new CompatibilityStateError(`Plugin ${plugin.id} conflicts with compatibility adapter ${adapter.id}`);
+      }
+      for (const dependency of adapter.dependencies) {
+        if (!adapterTypes.has(dependency) && !incomingAdapters.has(dependency)) {
+          throw new CompatibilityStateError(`Adapter ${adapter.id} references unknown dependency ${dependency}`);
+        }
+      }
+    }
+    for (const point of normalizedPoints) {
+      const existing = points.get(point.id)?.definition;
+      if (existing && !sameDefinition(existing, point)) {
+        throw new CompatibilityStateError(`Plugin ${plugin.id} conflicts with compatibility point ${point.id}`);
+      }
+    }
+
+    // 先在内存中完成依赖拓扑排序，确保失败时不会留下半注册的插件目录。
+    const availableAdapterIds = new Set(adapterTypes.keys());
+    const pendingAdapters = normalizedAdapters.filter((item) => !adapterTypes.has(item.id));
+    const orderedAdapters = [];
+    while (pendingAdapters.length > 0) {
+      const readyIndex = pendingAdapters.findIndex((item) => item.dependencies.every((id) => availableAdapterIds.has(id)));
+      if (readyIndex < 0) throw new CompatibilityStateError(`Plugin ${plugin.id} adapter dependencies form a cycle`);
+      const [adapter] = pendingAdapters.splice(readyIndex, 1);
+      orderedAdapters.push(adapter);
+      availableAdapterIds.add(adapter.id);
+    }
+
+    return Object.freeze({
+      plugin,
+      groups: Object.freeze(normalizedGroups),
+      adapters: Object.freeze(orderedAdapters),
+      points: Object.freeze(normalizedPoints),
+      pointIds: Object.freeze(normalizedPoints.map((point) => point.id)),
+    });
+  }
+
+  function registerPluginCatalog(catalog) {
+    const prepared = preparePluginCatalog(catalog);
+    for (const group of prepared.groups) {
+      if (!groups.has(group.id)) registerGroup(group);
+    }
+    for (const adapter of prepared.adapters) registerAdapterType(adapter);
+    for (const point of prepared.points) {
+      if (!points.has(point.id)) registerPoint(point);
+    }
+    return Object.freeze({ plugin: prepared.plugin, pointIds: prepared.pointIds });
   }
 
   function beginResolution(id, options = {}) {
@@ -867,6 +977,21 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     emit("points-reset", normalizedPrefix);
   }
 
+  function resetPoints(ids) {
+    const normalizedIds = new Set(Array.from(ids || [], String));
+    const at = timestamp();
+    for (const id of normalizedIds) {
+      const point = points.get(id);
+      if (!point) continue;
+      point.state = freshPointState(point.definition, point.state.generation + 1, at);
+      point.currentAttempt = null;
+      point.currentHandle = null;
+      point.lastHitEventAtMs = 0;
+      point.lastHitAtMs = 0;
+    }
+    if (normalizedIds.size > 0) emit("points-reset", "explicit");
+  }
+
   function useFallback(id, reason) {
     const point = requiredPoint(id);
     point.state.fallback.active = true;
@@ -963,9 +1088,14 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     registerPoints(definitions) {
       return Array.from(definitions || [], registerPoint);
     },
+    registerPluginCatalog,
+    validatePluginCatalog(catalog) {
+      return preparePluginCatalog(catalog);
+    },
     beginResolution,
     ingestKernelPoint,
     resetPointsByPrefix,
+    resetPoints,
     disablePoint,
     useFallback,
     setPointsEnabled,

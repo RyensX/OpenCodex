@@ -22,7 +22,14 @@ import {
   defineViewTarget,
 } from "./contracts";
 import { ProtocolDeclaration } from "./contracts";
-import { defineAdapter, defineCapability, defineSignal } from "./sdk";
+import {
+  defineAdapter,
+  defineCapability,
+  defineModificationPoint,
+  definePlugin,
+  definePointGroup,
+  defineSignal,
+} from "./sdk";
 import { ModificationTargetRef, defineModificationTarget } from "./implementation";
 
 const browserOnlyAdapter = defineAdapter<{ readonly target: ModificationTargetRef<"browser"> }>({
@@ -35,6 +42,31 @@ const gatewayTarget = defineModificationTarget("gateway.runtime.type-test", "gat
 browserOnlyAdapter.use({
   // @ts-expect-error Gateway 目标不能传给只允许浏览器宿主的适配器。
   target: gatewayTarget,
+});
+
+const pluginGroup = definePointGroup({
+  id: "type-test-plugin-group",
+  name: "插件类型测试",
+  description: "验证修改点只能引用强类型插件对象",
+  order: 1,
+});
+const pluginRef = definePlugin({ id: "type-test.plugin", name: "类型测试插件" });
+defineModificationPoint({
+  id: "type-test.plugin.point",
+  description: "强类型插件修改点",
+  owner: pluginRef.id,
+  plugin: pluginRef,
+  group: pluginGroup,
+  contributions: [browserOnlyAdapter.use({ target: defineModificationTarget("web.runtime.type-test-plugin", "browser") })],
+});
+defineModificationPoint({
+  id: "type-test.plugin.invalid-point",
+  description: "伪造插件引用",
+  owner: "type-test.plugin",
+  // @ts-expect-error 插件归属必须引用 definePlugin 返回的不可伪造对象。
+  plugin: { id: "type-test.plugin", name: "类型测试插件" },
+  group: pluginGroup,
+  contributions: [browserOnlyAdapter.use({ target: defineModificationTarget("web.runtime.type-test-plugin-invalid", "browser") })],
 });
 
 interface ThreadActionModel {
