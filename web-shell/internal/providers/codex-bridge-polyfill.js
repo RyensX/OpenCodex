@@ -1420,11 +1420,16 @@
     };
   }
 
-  /** 页面 focus 或可见性变化时持续更新 renderer 状态，避免后续快捷键和 onboarding 使用陈旧值。 */
+  /** 页面 focus 或可见性变化时持续更新 renderer 状态，并由共享事件 Provider 统一管理生命周期。 */
   function installBrowserWindowFocusBridge() {
-    w.addEventListener("focus", emitBrowserWindowFocusChanged);
-    w.addEventListener("blur", emitBrowserWindowFocusChanged);
-    document.addEventListener("visibilitychange", emitBrowserWindowFocusChanged);
+    adapterHost.events.observe({ key: {}, target: w, type: "focus", callback: emitBrowserWindowFocusChanged });
+    adapterHost.events.observe({ key: {}, target: w, type: "blur", callback: emitBrowserWindowFocusChanged });
+    adapterHost.events.observe({
+      key: {},
+      target: document,
+      type: "visibilitychange",
+      callback: emitBrowserWindowFocusChanged,
+    });
   }
 
   /** 官方 main 发给 renderer 的消息通常用 message-for-view 包一层，真实类型在 payload.type。 */

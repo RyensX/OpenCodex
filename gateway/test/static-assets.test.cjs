@@ -79,14 +79,24 @@ function createBrowserFocusHarness(bridge) {
   const documentListeners = new Map();
   const emitted = [];
   let hasFocus = true;
+  const document = {
+    visibilityState: "visible",
+    hasFocus: () => hasFocus,
+  };
+  const w = {};
   const context = {
-    document: {
-      visibilityState: "visible",
-      hasFocus: () => hasFocus,
-      addEventListener: (type, handler) => documentListeners.set(type, handler),
+    adapterHost: {
+      events: {
+        observe({ target, type, callback }) {
+          const listeners = target === w ? windowListeners : documentListeners;
+          listeners.set(type, callback);
+          return () => listeners.delete(type);
+        },
+      },
     },
+    document,
     emitWindowMessage: (channel, payload) => emitted.push({ channel, payload }),
-    w: { addEventListener: (type, handler) => windowListeners.set(type, handler) },
+    w,
   };
   const functionNames = [
     "browserWindowIsFocused",
