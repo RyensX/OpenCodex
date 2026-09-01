@@ -10,7 +10,7 @@ const MESSAGES = {
 };
 
 const RUNTIME_COMPATIBILITY_MESSAGES = {
-  // 102 个修改点的调试文案只在调试页注入，避免增加认证页和正式 Renderer 的启动配置。
+  // 103 个修改点的调试文案只在调试页注入，避免增加认证页和正式 Renderer 的启动配置。
   [ZH_CN]: require("./locales/runtime-compatibility-zh-CN.json"),
   [EN_US]: require("./locales/runtime-compatibility-en-US.json"),
 };

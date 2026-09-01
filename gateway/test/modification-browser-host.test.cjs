@@ -12,6 +12,9 @@ const BUNDLE = fs.readFileSync(
 class EventTargetStub {
   constructor() {
     this.listeners = new Map();
+    this.children = [];
+    this.isConnected = false;
+    this.parentNode = null;
   }
   addEventListener(type, callback) {
     if (!this.listeners.has(type)) this.listeners.set(type, new Set());
@@ -25,6 +28,19 @@ class EventTargetStub {
   }
   listenerCount(type) {
     return this.listeners.get(type)?.size || 0;
+  }
+  appendChild(child) {
+    child.parentNode = this;
+    child.isConnected = true;
+    this.children.push(child);
+    return child;
+  }
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+    child.parentNode = null;
+    child.isConnected = false;
+    return child;
   }
 }
 
@@ -66,6 +82,14 @@ function createHarness() {
   window.cancelAnimationFrame = cancel;
   const document = new EventTargetStub();
   document.documentElement = new EventTargetStub();
+  document.documentElement.isConnected = true;
+  document.head = new EventTargetStub();
+  document.head.isConnected = true;
+  document.createElement = (tagName) => {
+    const element = new EventTargetStub();
+    element.tagName = String(tagName || "").toUpperCase();
+    return element;
+  };
   window.window = window;
   vm.runInNewContext(BUNDLE, {
     console,
@@ -345,6 +369,69 @@ test("browser providers execute through Kernel and emit Contribution-level snaps
   point = snapshots.at(-1).points.find((item) => item.id === "web.runtime.dom.offscreen-animation");
   assert.equal(point.status, "active");
   assert.equal(point.contributions[0].hitCount, 1);
+});
+
+test("mobile sidebar touch scrolling is a separate v2 point owned by the plugin lifecycle", async () => {
+  const harness = createHarness();
+  const snapshots = [];
+  let registeredPlugin = null;
+  harness.window.OpenCodexRuntimeCompatibility = {
+    clientId: "browser_mobile_sidebar_touch_scroll",
+    ingestSnapshot(snapshot) {
+      snapshots.push(snapshot);
+    },
+  };
+  const pluginSystem = {
+    registerPlugin(plugin) {
+      registeredPlugin = plugin;
+    },
+  };
+  harness.host.providers.register("mobile-sidebar", () => {
+    harness.host.plugins.register(pluginSystem, {
+      id: "opencodex.mobile-sidebar-auto-collapse",
+      activate() {
+        return () => {};
+      },
+    });
+  });
+
+  await harness.host.providers.activate();
+  await Promise.resolve();
+  const pointId = "web.runtime.plugin.mobile-sidebar-touch-scroll";
+  let point = snapshots.at(-1).points.find((item) => item.id === pointId);
+  assert.equal(point.status, "disabled");
+  assert.equal(point.plugin.id, "opencodex.mobile-sidebar-auto-collapse");
+  assert.equal(point.directAdapterIds[0], "adapter.semantic-view");
+  assert.equal(point.contributions[0].adapterId, "adapter.runtime-view");
+  assert.equal(harness.document.head.children.length, 0);
+
+  const disposePlugin = registeredPlugin.activate({ scope: "renderer" });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(harness.document.head.children.length, 1);
+  const style = harness.document.head.children[0];
+  assert.equal(style.id, "opencodex-mobile-sidebar-touch-scroll-styles");
+  assert.match(style.textContent, /@media \(max-width: 820px\), \(pointer: coarse\)/);
+  assert.match(style.textContent, /\[data-app-action-sidebar-scroll\] \[role="listitem"\]/);
+  assert.match(style.textContent, /touch-action: pan-y !important/);
+  point = snapshots.at(-1).points.find((item) => item.id === pointId);
+  assert.equal(point.status, "active");
+  assert.equal(point.contributions[0].hitCount, 1);
+
+  disposePlugin();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(harness.document.head.children.length, 0);
+  point = snapshots.at(-1).points.find((item) => item.id === pointId);
+  assert.equal(point.status, "disabled");
+
+  const disposeReenabledPlugin = registeredPlugin.activate({ scope: "renderer" });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(harness.document.head.children.length, 1);
+  disposeReenabledPlugin();
+  await Promise.resolve();
+  assert.equal(harness.document.head.children.length, 0);
 });
 
 test("browser provider resources are released and reinstalled for each document generation", async () => {

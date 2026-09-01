@@ -1,6 +1,7 @@
 import {
   ADAPTER_DEFINITIONS,
   BASE_ADAPTERS,
+  BUILTIN_BROWSER_TARGETS,
   POINT_DEFINITIONS,
   POINT_GROUP_DEFINITIONS,
   registerModificationCatalog,
@@ -129,6 +130,7 @@ interface BrowserProviderState {
   readonly disposers: (() => void)[];
   readonly applications: Set<symbol>;
   readonly enabledCallbacks: Set<(enabled: boolean, reason: string) => void>;
+  readonly lifecycleCallbacks: Set<(enabled: boolean) => void>;
   scope: BrowserProviderScope | null;
   enabled: boolean | null;
   installed: boolean;
@@ -166,7 +168,13 @@ const BROWSER_PROVIDER_DEFINITIONS: readonly BrowserProviderDefinition[] = Objec
   { key: "offscreen-animation", points: { primary: "web.runtime.dom.offscreen-animation" } },
   { key: "mobile-keyboard", points: { primary: "web.runtime.plugin.mobile-keyboard" } },
   { key: "ios-layout", points: { primary: "web.runtime.plugin.ios-layout" } },
-  { key: "mobile-sidebar", points: { primary: "web.runtime.plugin.mobile-sidebar" } },
+  {
+    key: "mobile-sidebar",
+    points: {
+      primary: "web.runtime.plugin.mobile-sidebar",
+      touchScroll: "web.runtime.plugin.mobile-sidebar-touch-scroll",
+    },
+  },
   { key: "token-usage-inline", points: { primary: "web.runtime.dom.token-usage-inline" } },
   { key: "project-recent-sort", points: { primary: "web.runtime.plugin.project-recent-sort" } },
   { key: "smart-settings", points: { primary: "web.runtime.smart-router.settings" } },
@@ -205,6 +213,70 @@ const BROWSER_PROVIDER_DEFINITIONS: readonly BrowserProviderDefinition[] = Objec
   { key: "workspace-root-picker", points: { primary: "web.runtime.workspace.root-picker" } },
   { key: "tooltip-dismiss", points: { primary: "web.runtime.dom.tooltip-dismiss" } },
 ]);
+
+const MOBILE_SIDEBAR_TOUCH_SCROLL_STYLE_ID = "opencodex-mobile-sidebar-touch-scroll-styles";
+const MOBILE_SIDEBAR_TOUCH_SCROLL_CSS = `
+  @media (max-width: 820px), (pointer: coarse) {
+    /* 官方可排序列表项会设置 touch-action:none；必须在手势开始前允许纵向原生滚动。 */
+    [data-app-action-sidebar-scroll] [role="listitem"],
+    [data-app-action-sidebar-scroll] [data-app-action-sidebar-thread-row] {
+      touch-action: pan-y !important;
+    }
+  }
+`;
+
+interface ManagedBrowserContribution {
+  verify(): void;
+  dispose(): void;
+}
+
+function isMobileSidebarTouchScrollContribution(contribution: BoundContribution): boolean {
+  const declaration = contribution.declaration as { readonly target?: unknown };
+  return contribution.adapter === BASE_ADAPTERS.runtimeView &&
+    declaration.target === BUILTIN_BROWSER_TARGETS.mobileSidebarTouchScroll;
+}
+
+function installMobileSidebarTouchScrollContribution(
+  state: BrowserProviderState,
+  onHit: () => void,
+): ManagedBrowserContribution {
+  let active = true;
+  let style: HTMLStyleElement | null = null;
+
+  const unmount = () => {
+    style?.parentNode?.removeChild(style);
+    style = null;
+  };
+  const synchronize = (enabled: boolean) => {
+    if (!active || !enabled || style) {
+      if (!enabled) unmount();
+      return;
+    }
+    const node = document.createElement("style");
+    node.id = MOBILE_SIDEBAR_TOUCH_SCROLL_STYLE_ID;
+    node.textContent = MOBILE_SIDEBAR_TOUCH_SCROLL_CSS;
+    (document.head || document.documentElement).appendChild(node);
+    style = node;
+    onHit();
+  };
+
+  state.lifecycleCallbacks.add(synchronize);
+  if (state.enabled != null) synchronize(state.enabled);
+  return Object.freeze({
+    verify() {
+      if (!active) throw new Error("移动端侧栏触摸滚动 Contribution 已经释放");
+      if (state.enabled === true && !style?.isConnected) {
+        throw new Error("移动端侧栏触摸滚动样式没有连接到当前页面");
+      }
+    },
+    dispose() {
+      if (!active) return;
+      active = false;
+      state.lifecycleCallbacks.delete(synchronize);
+      unmount();
+    },
+  });
+}
 
 const observerEntries = new Map<Node, ObserverEntry>();
 const eventEntries = new Map<string, EventEntry>();
@@ -790,6 +862,7 @@ function createBrowserProviderRegistry() {
       disposers: [],
       applications: new Set(),
       enabledCallbacks: new Set(),
+      lifecycleCallbacks: new Set(),
       scope: null,
       enabled: null,
       installed: false,
@@ -875,7 +948,9 @@ function createBrowserProviderRegistry() {
       setEnabled(enabled: boolean, reason = "插件已关闭") {
         if (state.scope !== scope) return;
         state.enabled = enabled;
+        // Kernel 先恢复或关闭 Contribution 状态，随后资源层再挂载并上报真实命中。
         for (const callback of state.enabledCallbacks) callback(enabled, reason);
+        for (const callback of state.lifecycleCallbacks) callback(enabled);
         publishSnapshot();
       },
       close() {
@@ -947,6 +1022,7 @@ function createBrowserProviderRegistry() {
     return Object.freeze({
       adapter,
       compile(contributions: readonly BoundContribution[]) {
+        const managedContributions = new Map<symbol, ManagedBrowserContribution>();
         return {
           locate(reporter: AdapterExecutionReporter) {
             for (const contribution of contributions) {
@@ -960,12 +1036,17 @@ function createBrowserProviderRegistry() {
             const state = stateByPointId.get(contribution.point.id);
             if (!state) throw new Error(`修改点没有浏览器 Provider：${contribution.point.id}`);
             ensureInstalled(state);
+            if (isMobileSidebarTouchScrollContribution(contribution)) {
+              const managed = installMobileSidebarTouchScrollContribution(state, () => emit(contribution.point.id));
+              managedContributions.set(contribution.key, managed);
+            }
             state.applications.add(contribution.key);
             reporter.applied(contribution);
           },
           verify(contribution: BoundContribution, reporter: AdapterExecutionReporter) {
             const state = stateByPointId.get(contribution.point.id);
             if (!state?.installed || state.failure) throw state?.failure || new Error("浏览器 Provider 安装后验证失败");
+            managedContributions.get(contribution.key)?.verify();
             reporter.verified(contribution);
           },
           activate(contribution: BoundContribution, reporter: AdapterExecutionReporter) {
@@ -994,6 +1075,8 @@ function createBrowserProviderRegistry() {
           rollback(contribution: BoundContribution) {
             const state = stateByPointId.get(contribution.point.id);
             if (!state) return;
+            managedContributions.get(contribution.key)?.dispose();
+            managedContributions.delete(contribution.key);
             state.applications.delete(contribution.key);
             // 同一 Provider 可被多个修改点和多个底层适配器共享，最后一个引用回滚时才释放真实资源。
             if (state.applications.size === 0) releaseStateResources(state);
@@ -1003,6 +1086,8 @@ function createBrowserProviderRegistry() {
             for (const contribution of contributions) {
               const state = stateByPointId.get(contribution.point.id);
               if (!state) continue;
+              managedContributions.get(contribution.key)?.dispose();
+              managedContributions.delete(contribution.key);
               state.applications.delete(contribution.key);
               affectedStates.add(state);
             }

@@ -9,7 +9,7 @@ const PLUGIN_SOURCE = fs.readFileSync(
   "utf-8"
 );
 
-// 只模拟插件实际读取的 DOM 能力，让回归测试聚焦按钮识别和侧栏收起链路。
+// 只模拟插件实际读取的 DOM 能力，让回归测试聚焦侧栏触摸滚动和收起链路。
 function createElement(tagName, initialAttributes = {}) {
   const attributes = new Map(Object.entries(initialAttributes));
   const children = [];
@@ -189,6 +189,11 @@ function createHarness(iconPath) {
     toggleClickCount: () => toggleClickCount,
   };
 }
+
+test("mobile sidebar delegates touch styles to the v2 RuntimeView point", () => {
+  // 触摸样式属于独立修改点，功能 Provider 只保留会话识别和自动收起行为。
+  assert.doesNotMatch(PLUGIN_SOURCE, /createElement\(["']style["']\)|touch-action\s*:/);
+});
 
 test("mobile sidebar collapses after clicking new task icons from supported renderer versions", () => {
   // 旧版和当前版图标都必须触发收起，升级官方 renderer 时不能破坏移动端行为。

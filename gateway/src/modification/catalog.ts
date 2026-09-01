@@ -253,6 +253,22 @@ function pluginPoint<const TId extends string>(
 const G = POINT_GROUPS;
 const A = ADAPTERS;
 const P = BUILTIN_PLUGINS;
+let mobileSidebarTouchScrollTarget: ModificationTargetRef<"browser"> | null = null;
+
+function mobileSidebarTouchScrollPoint(): ModificationPointDefinition {
+  const definition = pluginPoint(
+    "web.runtime.plugin.mobile-sidebar-touch-scroll",
+    "允许移动端侧栏列表纵向触摸滚动",
+    "web-plugins",
+    G.mobileInteraction,
+    P.mobileSidebarAutoCollapse,
+    A.semanticView,
+  );
+  const declaration = definition.contributions[0]?.declaration as CatalogDeclaration<"browser"> | undefined;
+  if (!declaration) throw new Error("移动端侧栏触摸滚动修改点缺少语义目标");
+  mobileSidebarTouchScrollTarget = declaration.target;
+  return definition;
+}
 
 /**
  * 迁移矩阵是所有修改点的唯一目录：每个点必须显式绑定分类组和直接适配器。
@@ -292,6 +308,7 @@ export const POINT_DEFINITIONS = Object.freeze([
   point("web.runtime.protocol.token-usage", "从官方协议提取线程 Token 用量", "web-shell", G.tokenUsage, A.semanticProtocol),
   pluginPoint("web.runtime.dom.token-usage-inline", "在官方消息操作区插入 Token 用量", "web-plugins", G.tokenUsage, P.tokenUsageInline, A.semanticView),
   pluginPoint("web.runtime.plugin.mobile-sidebar", "移动端新会话后自动收起侧栏", "web-plugins", G.mobileInteraction, P.mobileSidebarAutoCollapse, A.mobileInteraction),
+  mobileSidebarTouchScrollPoint(),
   pluginPoint("web.runtime.plugin.mobile-keyboard", "修正移动端发送后的键盘行为", "web-plugins", G.mobileInteraction, P.mobileKeyboardOptimization, A.mobileInteraction),
   pluginPoint("web.runtime.plugin.ios-layout", "修正 iOS 视口和键盘避让", "web-plugins", G.mobileInteraction, P.iosFix, A.mobileInteraction),
   point("web.runtime.shell.legacy-document-replace", "兼容旧登录壳替换官方文档", "web-shell", G.rendererUi, A.semanticView),
@@ -367,6 +384,10 @@ export const POINT_DEFINITIONS = Object.freeze([
 
 export const POINT_GROUP_DEFINITIONS = Object.freeze(Object.values(POINT_GROUPS));
 export const POINT_TARGETS = Object.freeze(pointTargets);
+if (!mobileSidebarTouchScrollTarget) throw new Error("移动端侧栏触摸滚动语义目标没有完成注册");
+export const BUILTIN_BROWSER_TARGETS = Object.freeze({
+  mobileSidebarTouchScroll: mobileSidebarTouchScrollTarget,
+});
 export const ADAPTER_DEFINITIONS = Object.freeze(
   [...new Map(Object.values(ADAPTERS).map((adapter) => [adapter.id, adapter])).values()],
 );

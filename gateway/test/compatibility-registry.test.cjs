@@ -88,7 +88,7 @@ function sourceFiles(directory) {
 }
 
 test("compatibility catalog declares groups and adapter chains for every stable point", () => {
-  assert.equal(POINT_DEFINITIONS.length, 102);
+  assert.equal(POINT_DEFINITIONS.length, 103);
   assert.equal(POINT_GROUP_DEFINITIONS.length, 17);
   assert.equal(ADAPTER_DEFINITIONS.length, 23);
   assert.equal(new Set(POINT_DEFINITIONS.map((point) => point.id)).size, POINT_DEFINITIONS.length);
@@ -97,12 +97,12 @@ test("compatibility catalog declares groups and adapter chains for every stable 
   const registry = registerCompatibilityCatalog(createCompatibilityRegistry());
   const snapshot = registry.snapshot();
   assert.equal(snapshot.schemaVersion, 2);
-  assert.equal(snapshot.points.length, 102);
+  assert.equal(snapshot.points.length, 103);
   assert.equal(snapshot.groups.length, 17);
   assert.equal(snapshot.adapterTypes.length, 23);
   assert.equal(snapshot.status, "pending");
   const pluginPoints = snapshot.points.filter((point) => point.plugin !== null);
-  assert.equal(pluginPoints.length, 14);
+  assert.equal(pluginPoints.length, 15);
   const pluginDirectory = path.resolve(__dirname, "..", "..", "web-shell", "plugins");
   const pluginManifestIds = fs.readdirSync(pluginDirectory, { withFileTypes: true })
     // 插件目录可能混入系统元数据文件，测试应与生产枚举逻辑一样只读取真实目录。

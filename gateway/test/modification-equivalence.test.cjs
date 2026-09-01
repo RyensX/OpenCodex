@@ -14,7 +14,7 @@ function bindPoint(point, operation, snapshots) {
   return coordinator.bind(point, operation);
 }
 
-test("all 102 modification points preserve synchronous call contracts through the production Kernel", () => {
+test("all 103 modification points preserve synchronous call contracts through the production Kernel", () => {
   const calls = new Map();
   const wrappers = new Map();
   const snapshots = new Map();
@@ -41,7 +41,7 @@ test("all 102 modification points preserve synchronous call contracts through th
   }
 });
 
-test("all 102 modification points preserve Promise identity and thrown errors in production Kernel", async () => {
+test("all 103 modification points preserve Promise identity and thrown errors in production Kernel", async () => {
   const contracts = new Map();
   const snapshots = new Map();
   for (const [index, point] of POINT_DEFINITIONS.entries()) {

@@ -229,6 +229,7 @@
   "web.runtimeCompatibility.point.web.runtime.protocol.token-usage.description": "Extract per-thread Token usage from the official protocol.",
   "web.runtimeCompatibility.point.web.runtime.dom.token-usage-inline.description": "Insert Token usage into the official message action area.",
   "web.runtimeCompatibility.point.web.runtime.plugin.mobile-sidebar.description": "Collapse the sidebar after creating a conversation on mobile.",
+  "web.runtimeCompatibility.point.web.runtime.plugin.mobile-sidebar-touch-scroll.description": "Allow native vertical touch scrolling in the mobile sidebar list.",
   "web.runtimeCompatibility.point.web.runtime.plugin.mobile-keyboard.description": "Correct mobile keyboard behavior after sending.",
   "web.runtimeCompatibility.point.web.runtime.plugin.ios-layout.description": "Correct iOS viewport and keyboard avoidance.",
   "web.runtimeCompatibility.point.web.runtime.shell.legacy-document-replace.description": "Support legacy login-shell replacement of the official document.",
