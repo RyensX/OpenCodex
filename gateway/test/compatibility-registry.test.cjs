@@ -103,9 +103,12 @@ test("compatibility catalog declares groups and adapter chains for every stable 
   assert.equal(snapshot.status, "pending");
   const pluginPoints = snapshot.points.filter((point) => point.plugin !== null);
   assert.equal(pluginPoints.length, 14);
-  const pluginManifestIds = fs.readdirSync(path.resolve(__dirname, "..", "..", "web-shell", "plugins"))
-    .map((directory) => JSON.parse(fs.readFileSync(
-      path.resolve(__dirname, "..", "..", "web-shell", "plugins", directory, "plugin.json"),
+  const pluginDirectory = path.resolve(__dirname, "..", "..", "web-shell", "plugins");
+  const pluginManifestIds = fs.readdirSync(pluginDirectory, { withFileTypes: true })
+    // 插件目录可能混入系统元数据文件，测试应与生产枚举逻辑一样只读取真实目录。
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => JSON.parse(fs.readFileSync(
+      path.join(pluginDirectory, entry.name, "plugin.json"),
       "utf8",
     )).id)
     .sort();
