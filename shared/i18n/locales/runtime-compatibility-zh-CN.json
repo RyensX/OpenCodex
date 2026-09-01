@@ -3,6 +3,7 @@
   "web.runtimeCompatibility.title": "OpenCodex虚拟骨架调试",
   "web.runtimeCompatibility.loading": "正在读取运行时状态…",
   "web.runtimeCompatibility.autoRefresh": "自动刷新",
+  "web.runtimeCompatibility.pluginTag": "插件",
   "web.runtimeCompatibility.points": "修改点",
   "web.runtimeCompatibility.pointsDescription": "每个修改点按开发者功能组归类；分组只用于查看，不影响启用、回退或执行决策。",
   "web.runtimeCompatibility.filters": "修改点筛选",

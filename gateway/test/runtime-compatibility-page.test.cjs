@@ -143,3 +143,14 @@ test("injection category help describes only the Adapter chain", () => {
   assert.match(PAGE_SCRIPT, /完整适配器链路，包括直接使用的适配器及其依赖的适配器/);
   assert.match(PAGE_SCRIPT, /statuses: \[\]/);
 });
+
+test("plugin tag is rendered only from structured point ownership", () => {
+  const pointRowSource = PAGE_SCRIPT.slice(
+    PAGE_SCRIPT.indexOf("function pointRow"),
+    PAGE_SCRIPT.indexOf("function renderPoints"),
+  );
+  assert.match(pointRowSource, /if \(point\.plugin && typeof point\.plugin === "object"\)/);
+  assert.match(pointRowSource, /web\.runtimeCompatibility\.pluginTag/);
+  assert.doesNotMatch(pointRowSource, /point\.id\.(?:startsWith|includes|match)/);
+  assert.doesNotMatch(pointRowSource, /point\.owner/);
+});

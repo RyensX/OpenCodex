@@ -3,6 +3,7 @@
   "web.runtimeCompatibility.title": "OpenCodex Virtual Skeleton Diagnostics",
   "web.runtimeCompatibility.loading": "Reading runtime status…",
   "web.runtimeCompatibility.autoRefresh": "Auto refresh",
+  "web.runtimeCompatibility.pluginTag": "Plugin",
   "web.runtimeCompatibility.points": "Modification points",
   "web.runtimeCompatibility.pointsDescription": "Each modification point is organized by developer-facing feature group. Groups are for browsing only and do not affect enablement, fallback, or execution decisions.",
   "web.runtimeCompatibility.filters": "Modification point filters",

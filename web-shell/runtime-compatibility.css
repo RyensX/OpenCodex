@@ -116,8 +116,9 @@ button.help-button:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2
 .point-row { transition: background-color .12s ease; }
 .point-row:hover { background: color-mix(in srgb, var(--surface-muted) 52%, transparent); }
 .point-row td:not(:first-child) { vertical-align: middle; }
-.point-identity { display: flex; align-items: flex-start; gap: 7px; }
+.point-identity { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .point-identity code { color: #343941; }
+.point-plugin-tag { display: inline-flex; min-height: 19px; align-items: center; border: 1px solid color-mix(in srgb, #7656c7 28%, var(--border)); border-radius: 999px; padding: 0 7px; background: color-mix(in srgb, #7656c7 8%, var(--surface)); color: #6242ad; font-size: 10px; font-weight: 680; line-height: 17px; white-space: nowrap; }
 .point-description { margin-top: 4px; color: var(--text-muted); font-size: 12px; }
 .point-reason { max-width: 520px; margin: 5px 0 0; color: #a96009; font-size: 12px; overflow-wrap: anywhere; }
 .contribution-details { margin-top: 7px; color: var(--text-muted); font-size: 11px; }
@@ -220,6 +221,7 @@ button.help-dialog-close:hover, button.help-dialog-close:focus-visible { backgro
   button.help-button { border-color: #686f79; }
   button.help-button:hover, button.help-button:focus-visible { border-color: #d1d5db; }
   .point-identity code { color: #d9dce1; }
+  .point-plugin-tag { color: #cdbdff; }
   .adapter-chain-item--composite { color: #a9ccff; }
   .badge--healthy { background: #143b29; color: #bbf7d0; }
   .badge--ready { background: #172554; color: #bfdbfe; }

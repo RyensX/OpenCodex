@@ -312,6 +312,13 @@
     const code = document.createElement("code");
     code.textContent = point.id;
     identityLine.append(code);
+    if (point.plugin && typeof point.plugin === "object") {
+      const pluginTag = document.createElement("span");
+      pluginTag.className = "point-plugin-tag";
+      pluginTag.textContent = t("web.runtimeCompatibility.pluginTag", "插件");
+      pluginTag.title = String(point.plugin.name || point.plugin.id || "");
+      identityLine.append(pluginTag);
+    }
     const description = document.createElement("div");
     description.className = "point-description";
     description.textContent = metadataText("point", point.id, "description", point.description);
