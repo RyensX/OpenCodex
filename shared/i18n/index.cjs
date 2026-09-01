@@ -9,6 +9,12 @@ const MESSAGES = {
   [EN_US]: require("./locales/en-US.json"),
 };
 
+const RUNTIME_COMPATIBILITY_MESSAGES = {
+  // 102 个修改点的调试文案只在调试页注入，避免增加认证页和正式 Renderer 的启动配置。
+  [ZH_CN]: require("./locales/runtime-compatibility-zh-CN.json"),
+  [EN_US]: require("./locales/runtime-compatibility-en-US.json"),
+};
+
 function normalizeLocale(value, fallback = DEFAULT_LOCALE) {
   const raw = String(value || "").trim().replace(/_/g, "-").toLowerCase();
   if (!raw) return fallback;
@@ -20,6 +26,10 @@ function normalizeLocale(value, fallback = DEFAULT_LOCALE) {
 
 function messagesForLocale(locale) {
   return MESSAGES[normalizeLocale(locale)] || MESSAGES[DEFAULT_LOCALE];
+}
+
+function runtimeCompatibilityMessagesForLocale(locale) {
+  return RUNTIME_COMPATIBILITY_MESSAGES[normalizeLocale(locale)] || RUNTIME_COMPATIBILITY_MESSAGES[DEFAULT_LOCALE];
 }
 
 function formatMessage(messages, key, values) {
@@ -86,6 +96,7 @@ module.exports = {
   EN_US,
   MESSAGES,
   PREFERRED_LANGUAGES_ENV,
+  RUNTIME_COMPATIBILITY_MESSAGES,
   ZH_CN,
   formatMessage,
   messagesForLocale,
@@ -93,5 +104,6 @@ module.exports = {
   preferredLanguagesFromEnv,
   resolveOpenCodexI18n,
   resolveOpenCodexLocale,
+  runtimeCompatibilityMessagesForLocale,
   t,
 };
