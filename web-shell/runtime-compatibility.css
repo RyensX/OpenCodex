@@ -101,7 +101,7 @@ button.help-button:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2
 .feature-group { position: relative; padding: 12px 14px 11px 17px; border-bottom: 1px solid color-mix(in srgb, var(--feature-accent) 20%, var(--border)); border-radius: 8px 8px 0 0; background: linear-gradient(90deg, var(--feature-tint), transparent 58%); }
 .feature-group::before { content: ""; position: absolute; top: 11px; bottom: 11px; left: 0; width: 3px; border-radius: 999px; background: var(--feature-accent); }
 .feature-main { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
-.feature-identity { min-width: 0; }
+.feature-identity { min-width: 0; flex: 1; }
 .feature-title-line { display: flex; min-width: 0; align-items: baseline; flex-wrap: wrap; gap: 7px; }
 .feature-identity h3 { margin: 0; font-size: 15px; font-weight: 680; line-height: 21px; }
 .feature-identity code, td code { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
@@ -194,6 +194,7 @@ button.help-dialog-close:hover, button.help-dialog-close:focus-visible { backgro
   .auto-refresh-control { flex: 1 0 100%; justify-content: space-between; }
   .filter-controls { display: grid; grid-template-columns: 1fr; }
   .feature-main { align-items: flex-start; flex-direction: column; gap: 9px; }
+  .feature-identity { width: 100%; }
   .feature-overview { width: 100%; justify-content: space-between; }
   .feature-details { align-items: flex-start; flex-wrap: wrap; }
   .feature-visible { width: 100%; margin-left: 0; }

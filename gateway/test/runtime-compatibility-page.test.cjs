@@ -154,3 +154,13 @@ test("plugin tag is rendered only from structured point ownership", () => {
   assert.doesNotMatch(pointRowSource, /point\.id\.(?:startsWith|includes|match)/);
   assert.doesNotMatch(pointRowSource, /point\.owner/);
 });
+
+test("group overview is centered against the complete title and description block", () => {
+  const groupHeaderSource = PAGE_SCRIPT.slice(
+    PAGE_SCRIPT.indexOf("function groupHeader"),
+    PAGE_SCRIPT.indexOf("function renderPoints"),
+  );
+  assert.match(groupHeaderSource, /identity\.append\(titleLine, details\)/);
+  assert.match(groupHeaderSource, /section\.append\(main\)/);
+  assert.doesNotMatch(groupHeaderSource, /section\.append\(main, details\)/);
+});

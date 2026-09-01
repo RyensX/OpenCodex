@@ -433,7 +433,6 @@
     const titleLine = document.createElement("div");
     titleLine.className = "feature-title-line";
     titleLine.append(title, code);
-    identity.append(titleLine);
 
     const overview = document.createElement("div");
     overview.className = "feature-overview";
@@ -459,7 +458,9 @@
         { visible: visibleCount, total: group.entries.length }
       );
     details.append(description, visible);
-    section.append(main, details);
+    // 标题和说明共同组成左侧内容，让右侧状态相对整个分组头垂直居中。
+    identity.append(titleLine, details);
+    section.append(main);
     cell.append(section);
     row.append(cell);
     return row;
