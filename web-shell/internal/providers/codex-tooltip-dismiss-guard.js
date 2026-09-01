@@ -1,9 +1,13 @@
 (function () {
   const w = window;
-  if (w.__codexTooltipDismissGuardInstalled) return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const providerGeneration = modificationScope?.generation || document;
+  if (w.__codexTooltipDismissGuardInstalled === providerGeneration) return;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
-  w.__codexTooltipDismissGuardInstalled = true;
+  w.__codexTooltipDismissGuardInstalled = providerGeneration;
 
   const TOOLTIP_SELECTOR = '[role="tooltip"]';
   const TOOLTIP_DISMISS_EVENT = "codex:dismiss-tooltips";
@@ -101,7 +105,7 @@
 
   function scheduleDismissCheck() {
     if (pendingFrame) return;
-    pendingFrame = w.setTimeout(dismissIfPointerLeftTooltips, 16);
+    pendingFrame = scheduler.setTimeout(dismissIfPointerLeftTooltips, 16);
   }
 
   function rememberPointer(event) {
@@ -129,7 +133,7 @@
   function stopTooltipObservation() {
     disposeTooltipObservation?.();
     disposeTooltipObservation = null;
-    if (tooltipObserverExpiryTimer) w.clearTimeout(tooltipObserverExpiryTimer);
+    if (tooltipObserverExpiryTimer) scheduler.clearTimeout(tooltipObserverExpiryTimer);
     tooltipObserverExpiryTimer = 0;
     if (!tooltipPresent) lastPointer = null;
   }
@@ -140,7 +144,7 @@
         if (nodeHasTooltip(node)) {
           tooltipPresent = !!document.querySelector(TOOLTIP_SELECTOR);
           if (tooltipPresent) {
-            w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.tooltip-dismiss");
+            modificationEffects?.primary?.emit();
             stopTooltipObservation();
             scheduleDismissCheck();
           }
@@ -175,7 +179,7 @@
       callback: handleTooltipMutations,
     });
     // Tooltip 只会紧随 hover/focus 挂载；有限会话避免正文流式更新永久进入观察队列。
-    tooltipObserverExpiryTimer = w.setTimeout(stopTooltipObservation, TOOLTIP_OBSERVER_SESSION_MS);
+    tooltipObserverExpiryTimer = scheduler.setTimeout(stopTooltipObservation, TOOLTIP_OBSERVER_SESSION_MS);
     if (event?.type !== "focusin") rememberPointer(event);
   }
 
@@ -195,5 +199,4 @@
   adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: () => {
     if (document.visibilityState !== "visible") dispatchOfficialTooltipDismiss();
   } });
-  w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.tooltip-dismiss");
 })();

@@ -1,9 +1,12 @@
 (function () {
   const w = window;
-  if (w.__OpenCodexSmartSchedulingInjectionHealthInstalled) return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const providerGeneration = modificationScope?.generation || document;
+  if (w.__OpenCodexSmartSchedulingInjectionHealthInstalled === providerGeneration) return;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.events?.observe) return;
-  w.__OpenCodexSmartSchedulingInjectionHealthInstalled = true;
+  w.__OpenCodexSmartSchedulingInjectionHealthInstalled = providerGeneration;
 
   const ENDPOINT = "/api/opencodex/model-router/injections";
   const MOUNT_SELECTOR = "[data-opencodex-smart-scheduling-injection-health]";
@@ -21,7 +24,7 @@
   const locale = String(w.__CODEX_WEB_CONFIG__?.locale || document.documentElement.lang || "zh-CN");
   const isEnglish = locale.toLowerCase().startsWith("en");
   const clientId =
-    w.OpenCodexRuntimeCompatibility?.clientId ||
+    modificationScope?.clientId ||
     w.crypto?.randomUUID?.() ||
     `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
   const fallback = {
@@ -105,7 +108,7 @@
           return true;
         } catch {
           // renderer 初始化和认证状态可能有短暂竞态，有限重试后仍保持旁路失败。
-          if (attempt < 3) await new Promise((resolve) => w.setTimeout(resolve, 400 * 2 ** attempt));
+          if (attempt < 3) await new Promise((resolve) => scheduler.setTimeout(resolve, 400 * 2 ** attempt));
         }
       }
       return false;
@@ -205,9 +208,9 @@
       roots.some((root) => root.closest(".opencodex-router-settings-page")?.dataset.active === "true");
     if (active) {
       void refresh();
-      if (!pollTimer) pollTimer = w.setInterval(() => void refresh(), POLL_INTERVAL_MS);
+      if (!pollTimer) pollTimer = scheduler.setInterval(() => void refresh(), POLL_INTERVAL_MS);
     } else if (pollTimer) {
-      w.clearInterval(pollTimer);
+      scheduler.clearInterval(pollTimer);
       pollTimer = 0;
     }
   }
@@ -215,7 +218,7 @@
   function schedulePollingSync() {
     if (syncScheduled) return;
     syncScheduled = true;
-    w.requestAnimationFrame(syncPolling);
+    scheduler.requestAnimationFrame(syncPolling);
   }
 
   // 设置页由同仓脚本创建，直接消费其生命周期事件，避免为一个低频页面常驻整页 DOM observer。
@@ -223,7 +226,7 @@
   adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: () => {
     if (document.visibilityState === "hidden") {
       // 后台标签的 rAF 可能暂停，必须同步停掉分钟轮询，不能等待下一帧。
-      if (pollTimer) w.clearInterval(pollTimer);
+      if (pollTimer) scheduler.clearInterval(pollTimer);
       pollTimer = 0;
       return;
     }

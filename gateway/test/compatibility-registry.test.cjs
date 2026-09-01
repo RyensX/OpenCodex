@@ -13,6 +13,8 @@ const {
   createCompatibilityRegistry,
   sanitizeCompatibilityText,
 } = require("../runtime/compatibility/registry.cjs");
+const { POINT_DEFINITION_BY_ID } = require("../dist/modification/catalog.js");
+const { createProductionModificationCoordinator } = require("../dist/modification/production.js");
 
 function createClock() {
   let value = Date.parse("2026-08-28T00:00:00.000Z");
@@ -280,6 +282,50 @@ test("high-frequency hit tracking emits persistence events at a bounded rate", (
   handle.recordHit();
   assert.equal(events, 2);
   assert.equal(registry.point(id).exercise.hitCount, 4);
+});
+
+test("Kernel ingestion updates every hit count but throttles persistence events", () => {
+  const clock = createClock();
+  const registry = registerCompatibilityCatalog(createCompatibilityRegistry({ now: clock.now }));
+  const point = POINT_DEFINITION_BY_ID.get("gateway.runtime.electron.dialog-open");
+  const coordinator = createProductionModificationCoordinator({
+    host: "gateway",
+    publish(snapshot) { registry.ingestKernelPoint(snapshot.id, snapshot); },
+  });
+  const capability = coordinator.bind(point, () => true);
+  let events = 0;
+  registry.onChanged((event) => {
+    if (event.id === point.id) events += 1;
+  });
+
+  capability();
+  capability();
+  capability();
+  assert.equal(registry.point(point.id).exercise.hitCount, 3);
+  assert.equal(events, 1);
+  clock.tick(5000);
+  capability();
+  assert.equal(registry.point(point.id).exercise.hitCount, 4);
+  assert.equal(events, 2);
+});
+
+test("Kernel ingestion keeps Provider fallback degraded instead of unavailable", () => {
+  const registry = registerCompatibilityCatalog(createCompatibilityRegistry());
+  const point = POINT_DEFINITION_BY_ID.get("gateway.runtime.electron.notification");
+  const coordinator = createProductionModificationCoordinator({
+    host: "gateway",
+    publish(snapshot) { registry.ingestKernelPoint(snapshot.id, snapshot); },
+  });
+  coordinator.execute(point, () => undefined, { verify: () => true });
+  coordinator.locationFailure(point, "unsupported", new Error("official target is absent"));
+  coordinator.useFallback(point, "Official runtime behavior");
+
+  const snapshot = registry.point(point.id);
+  assert.equal(snapshot.status, "degraded");
+  assert.equal(snapshot.location.status, "unsupported");
+  assert.equal(snapshot.fallback.active, true);
+  assert.equal(snapshot.fallback.reason, "Official runtime behavior");
+  assert.equal(typeof snapshot.fallback.activatedAt, "string");
 });
 
 test("compatibility snapshot redacts paths and access tokens from failure reasons", () => {

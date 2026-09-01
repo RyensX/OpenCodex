@@ -1,9 +1,13 @@
 (function () {
   const w = window;
-  if (w.__codexWorkspaceRootPickerInstalled) return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const providerGeneration = modificationScope?.generation || document;
+  if (w.__codexWorkspaceRootPickerInstalled === providerGeneration) return;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.events?.observe) return;
-  w.__codexWorkspaceRootPickerInstalled = true;
+  w.__codexWorkspaceRootPickerInstalled = providerGeneration;
 
   // 这个模块只负责“远端浏览器输入路径”的交互，真正的 Electron/官方 IPC 仍由 bridge 转发。
   const WORKSPACE_ROOT_VALIDATE_CHANNEL = "opencodex:validate-workspace-root";
@@ -274,7 +278,7 @@
         } catch (error) {
           showErrorToast(error);
           setBusy(false);
-          w.requestAnimationFrame(() => {
+          scheduler.requestAnimationFrame(() => {
             input.focus();
             input.select();
           });
@@ -286,7 +290,7 @@
       document.body.appendChild(backdrop);
       dialogState.focusInput = () => input.focus();
       disposeKeydown = adapterHost.events.observe({ key: {}, target: w, type: "keydown", capture: true, callback: onKeyDown });
-      w.requestAnimationFrame(() => input.focus());
+      scheduler.requestAnimationFrame(() => input.focus());
     });
 
     return dialogState.promise;
@@ -345,5 +349,4 @@
     handleMessage,
     shouldHandleMessage,
   };
-  w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.workspace.root-picker");
 })();

@@ -30,6 +30,8 @@ class EventTargetStub {
 
 function createHarness() {
   const mutationObservers = [];
+  const scheduledCallbacks = new Map();
+  let schedulerSequence = 0;
   class MutationObserverStub {
     constructor(callback) {
       this.callback = callback;
@@ -50,6 +52,18 @@ function createHarness() {
     }
   }
   const window = new EventTargetStub();
+  const schedule = (callback) => {
+    const handle = ++schedulerSequence;
+    scheduledCallbacks.set(handle, callback);
+    return handle;
+  };
+  const cancel = (handle) => scheduledCallbacks.delete(handle);
+  window.setTimeout = schedule;
+  window.clearTimeout = cancel;
+  window.setInterval = schedule;
+  window.clearInterval = cancel;
+  window.requestAnimationFrame = schedule;
+  window.cancelAnimationFrame = cancel;
   const document = new EventTargetStub();
   document.documentElement = new EventTargetStub();
   window.window = window;
@@ -57,9 +71,21 @@ function createHarness() {
     console,
     document,
     MutationObserver: MutationObserverStub,
+    queueMicrotask,
     window,
   });
-  return { document, host: window.__OpenCodexAdapterHost, mutationObservers, window };
+  return {
+    document,
+    host: window.__OpenCodexAdapterHost,
+    mutationObservers,
+    scheduledCallbacks,
+    flushScheduled(handle) {
+      const callback = scheduledCallbacks.get(handle);
+      scheduledCallbacks.delete(handle);
+      callback?.(0);
+    },
+    window,
+  };
 }
 
 test("browser adapter bundle is idempotent across login-shell document replacement", () => {
@@ -74,10 +100,27 @@ test("browser adapter bundle is idempotent across login-shell document replaceme
   const firstDocument = new EventTargetStub();
   firstDocument.documentElement = new EventTargetStub();
   window.window = window;
-  const context = vm.createContext({ console, document: firstDocument, MutationObserver: MutationObserverStub, window });
+  const context = vm.createContext({ console, document: firstDocument, MutationObserver: MutationObserverStub, queueMicrotask, window });
   vm.runInContext(BUNDLE, context);
   const firstHost = window.__OpenCodexAdapterHost;
   const firstSdk = window.OpenCodexPluginSdk;
+  let pluginPageChanges = 0;
+  window.OpenCodexPluginSystem = {
+    beginPage() { pluginPageChanges += 1; },
+    registerPlugin() {},
+  };
+  const firstPlugin = firstSdk.createPluginScope({
+    id: "example.page-generation",
+    apiVersion: 2,
+    sdkVersion: "^2.0.0",
+  });
+  firstPlugin.groups.register({
+    id: "example.page-generation-group",
+    name: "页面代际测试",
+    description: "验证页面替换后插件声明可以重新注册",
+    order: 990,
+  });
+  firstPlugin.commit();
 
   const officialDocument = new EventTargetStub();
   officialDocument.documentElement = new EventTargetStub();
@@ -85,6 +128,18 @@ test("browser adapter bundle is idempotent across login-shell document replaceme
   assert.doesNotThrow(() => vm.runInContext(BUNDLE, context));
   assert.equal(window.__OpenCodexAdapterHost, firstHost);
   assert.equal(window.OpenCodexPluginSdk, firstSdk);
+  assert.equal(pluginPageChanges, 1);
+  const secondPlugin = firstSdk.createPluginScope({
+    id: "example.page-generation",
+    apiVersion: 2,
+    sdkVersion: "^2.0.0",
+  });
+  assert.doesNotThrow(() => secondPlugin.groups.register({
+    id: "example.page-generation-group",
+    name: "页面代际测试",
+    description: "新页面重新注册同一强类型声明",
+    order: 990,
+  }));
 });
 
 test("browser adapter host shares observers and event listeners", () => {
@@ -210,6 +265,28 @@ test("browser adapter host installs one ordered wrapper per hook target", () => 
   assert.equal(target.calculate, original);
 });
 
+test("browser RuntimeHook preserves constructor and prototype semantics", () => {
+  const { host } = createHarness();
+  class Example {
+    constructor(value) { this.value = value; }
+    read() { return this.value; }
+  }
+  const target = { Example };
+  const dispose = host.hooks.around({
+    key: {},
+    target,
+    property: "Example",
+    handle(_thisValue, args, proceed) {
+      return proceed([args[0] + 1]);
+    },
+  });
+  const instance = new target.Example(4);
+  assert.equal(instance instanceof Example, true);
+  assert.equal(instance.read(), 5);
+  dispose();
+  assert.equal(target.Example, Example);
+});
+
 test("browser protocol pipeline decodes each frame once and fans out by channel", () => {
   const { host } = createHarness();
   const values = [];
@@ -238,6 +315,144 @@ test("browser protocol pipeline decodes each frame once and fans out by channel"
   disposeFirst();
   disposeSecond();
   assert.equal(host.diagnostics().protocolSubscriberCount, 0);
+});
+
+test("browser providers execute through Kernel and emit Contribution-level snapshots", async () => {
+  const harness = createHarness();
+  const snapshots = [];
+  harness.window.OpenCodexRuntimeCompatibility = {
+    clientId: "browser_page_kernel",
+    ingestSnapshot(snapshot) {
+      snapshots.push(snapshot);
+    },
+  };
+  let installed = 0;
+  let scope = null;
+  harness.host.providers.register("offscreen-animation", () => {
+    installed += 1;
+    scope = harness.window.__OpenCodexCurrentProviderScope;
+  });
+  await harness.host.providers.activate();
+  await Promise.resolve();
+  assert.equal(installed, 1);
+  let point = snapshots.at(-1).points.find((item) => item.id === "web.runtime.dom.offscreen-animation");
+  assert.equal(point.status, "ready");
+  assert.equal(point.contributions.length, 1);
+  assert.equal(point.contributions[0].activation, "ready");
+  assert.equal(snapshots.at(-1).providerDiagnostics[0].metrics.contributionCount > 0, true);
+  scope.effects.primary.emit();
+  await Promise.resolve();
+  point = snapshots.at(-1).points.find((item) => item.id === "web.runtime.dom.offscreen-animation");
+  assert.equal(point.status, "active");
+  assert.equal(point.contributions[0].hitCount, 1);
+});
+
+test("browser provider resources are released and reinstalled for each document generation", async () => {
+  const harness = createHarness();
+  const generations = [];
+  let installCount = 0;
+  const installProvider = () => {
+    harness.host.providers.register("offscreen-animation", () => {
+      installCount += 1;
+      generations.push(harness.window.__OpenCodexCurrentProviderScope.generation);
+      harness.host.events.observe({
+        key: {},
+        target: harness.window,
+        type: "provider-generation-test",
+        callback() {},
+      });
+    });
+  };
+
+  installProvider();
+  await harness.host.providers.activate();
+  assert.equal(harness.window.listenerCount("provider-generation-test"), 1);
+
+  const nextRoot = new EventTargetStub();
+  harness.host.providers.beginPage(nextRoot);
+  assert.equal(harness.window.listenerCount("provider-generation-test"), 0);
+  installProvider();
+  await harness.host.providers.activate();
+
+  assert.equal(installCount, 2);
+  assert.deepEqual(generations, [1, 2]);
+  assert.equal(harness.window.listenerCount("provider-generation-test"), 1);
+});
+
+test("browser provider cleans partial resources when a later installer fails", async () => {
+  const harness = createHarness();
+  harness.host.providers.register("offscreen-animation", () => {
+    harness.host.events.observe({
+      key: {},
+      target: harness.window,
+      type: "partial-provider-resource",
+      callback() {},
+    });
+  });
+  harness.host.providers.register("offscreen-animation", () => {
+    throw new Error("provider install failed");
+  });
+
+  await harness.host.providers.activate();
+  assert.equal(harness.window.listenerCount("partial-provider-resource"), 0);
+  assert.equal(harness.host.diagnostics().eventListenerCount, 0);
+});
+
+test("provider timer ownership propagates through callbacks and is cancelled on page replacement", async () => {
+  const harness = createHarness();
+  harness.host.providers.register("offscreen-animation", () => {
+    const scheduler = harness.host.scheduler.capture();
+    scheduler.setTimeout(() => {
+      scheduler.setTimeout(() => {}, 1000);
+    }, 10);
+  });
+  await harness.host.providers.activate();
+  assert.equal(harness.scheduledCallbacks.size, 1);
+
+  harness.flushScheduled([...harness.scheduledCallbacks.keys()][0]);
+  assert.equal(harness.scheduledCallbacks.size, 1);
+  harness.host.providers.beginPage(new EventTargetStub());
+  assert.equal(harness.scheduledCallbacks.size, 0);
+});
+
+test("builtin plugin activation keeps its provider owner after deferred registration", async () => {
+  const harness = createHarness();
+  const snapshots = [];
+  harness.window.OpenCodexRuntimeCompatibility = {
+    clientId: "browser_plugin_state",
+    ingestSnapshot(snapshot) { snapshots.push(snapshot); },
+  };
+  let registeredPlugin = null;
+  let disposed = 0;
+  const pluginSystem = {
+    registerPlugin(plugin) { registeredPlugin = plugin; },
+  };
+  harness.host.providers.register("offscreen-animation", () => {
+    const scheduler = harness.host.scheduler.capture();
+    harness.host.plugins.register(pluginSystem, {
+      activate() {
+        scheduler.setTimeout(() => {}, 1000);
+        return () => { disposed += 1; };
+      },
+    });
+  });
+  await harness.host.providers.activate();
+  await Promise.resolve();
+  assert.equal(
+    snapshots.at(-1).points.find((point) => point.id === "web.runtime.dom.offscreen-animation").status,
+    "disabled",
+  );
+  registeredPlugin.activate();
+  await Promise.resolve();
+  assert.equal(
+    snapshots.at(-1).points.find((point) => point.id === "web.runtime.dom.offscreen-animation").status,
+    "ready",
+  );
+  assert.equal(harness.scheduledCallbacks.size, 1);
+
+  harness.host.providers.beginPage(new EventTargetStub());
+  assert.equal(harness.scheduledCallbacks.size, 0);
+  assert.equal(disposed, 1);
 });
 
 test("browser plugin SDK v2 commits strong references and mounts virtual views", () => {
@@ -337,7 +552,9 @@ test("browser plugin SDK v2 commits strong references and mounts virtual views",
   const dispose = registeredPlugin.activate({ scope: "renderer" });
   assert.equal(mountedNodes.length, 1);
   let pluginSnapshot = root.snapshot()[0];
-  assert.equal(pluginSnapshot.points.find((point) => point.id.endsWith(".mount")).status, "active");
+  const mountedPoint = pluginSnapshot.points.find((point) => point.id.endsWith(".mount"));
+  assert.equal(mountedPoint.status, "active");
+  assert.equal(mountedPoint.contributions[0].activation, "ready");
   assert.equal(pluginSnapshot.points.find((point) => point.id.endsWith("hook-and-protocol")).status, "ready");
   assert.equal(harness.window.demoApi.calculate(3), 6);
   pluginSnapshot = root.snapshot()[0];
@@ -351,4 +568,43 @@ test("browser plugin SDK v2 commits strong references and mounts virtual views",
   dispose();
   assert.equal(mountedNodes.length, 0);
   assert.equal(harness.window.demoApi.calculate, originalCalculate);
+});
+
+test("browser plugin SDK rejects undeclared adapter dependencies before registration", () => {
+  const harness = createHarness();
+  let registrationCount = 0;
+  harness.window.OpenCodexPluginSystem = {
+    registerPlugin() { registrationCount += 1; },
+  };
+  const sdk = harness.window.OpenCodexPluginSdk.createPluginScope({
+    id: "example.invalid-dependency",
+    apiVersion: 2,
+    sdkVersion: "^2.0.0",
+  });
+  const group = sdk.groups.register({
+    id: "example.invalid-dependency-group",
+    name: "无效依赖测试",
+    description: "验证插件批次在注册前完成依赖检查",
+    order: 901,
+  });
+  const locator = sdk.view.locators.css("locator.invalid-dependency", "[data-test-slot]");
+  const content = sdk.view.ui.text("invalid");
+  const adapter = sdk.adapters.compose({
+    id: "adapter.invalid-dependency",
+    name: "无效高级适配器",
+    description: "故意返回未声明的 RuntimeView 依赖",
+    dependencies: [sdk.adapters.runtimeHook.ref],
+    expand(declaration) {
+      return [sdk.adapters.runtimeView.mount(declaration)];
+    },
+  });
+  sdk.points.register({
+    id: "example.invalid-dependency.mount",
+    description: "无效依赖修改点",
+    group,
+    contributions: [adapter.use({ locator, placement: sdk.view.placements.append, content })],
+  });
+
+  assert.throws(() => sdk.commit(), /未声明依赖/);
+  assert.equal(registrationCount, 0);
 });

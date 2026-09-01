@@ -114,6 +114,9 @@ test("launcher and dev runner wire restart supervision without background pollin
   assert.match(launcherSource, /mainWindow\.on\("minimize", stopStatusPolling\)/);
   // 兼容报告失败只能影响诊断状态，不能把已经成功的 Runner 误判成启动失败。
   assert.match(launcherSource, /function writeRunnerCompatibilityReportSafely/);
+  assert.match(launcherSource, /failureRuntime\.coordinator\.setEnabled\(point, false, "Not applicable on the current platform"\)/);
+  assert.doesNotMatch(launcherSource, /service\.registry\.disablePoint\(/);
+  assert.doesNotMatch(launcherSource, /service\.disablePoint\(/);
   assert.match(
     launcherSource,
     /gatewayState\.officialRuntime = officialRuntime;\s+writeRunnerCompatibilityReportSafely\(paths, officialRuntime\)/

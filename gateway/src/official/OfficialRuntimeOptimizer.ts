@@ -2,6 +2,8 @@
 export {};
 
 const path = require("path");
+const { createHostModificationRuntime } = require("../../runtime/modification/production-runtime.cjs");
+const { staticMain: staticMainPoints } = require("../../runtime/modification/point-refs.cjs");
 
 const NATIVE_PET_LOG_MARKER = "Native pet material attachment completed";
 const MAC_PUSH_LOG_MARKER = "Failed to register macOS push notifications";
@@ -54,6 +56,10 @@ class OfficialRuntimeOptimizer {
   constructor({ fileSystem, compatibilityService = null }: { fileSystem: any; compatibilityService?: any }) {
     this.fileSystem = fileSystem;
     this.compatibilityService = compatibilityService;
+    this.modificationCoordinator = createHostModificationRuntime({
+      host: "static",
+      compatibilityService,
+    }).coordinator;
   }
 
   optimize(bundleDir: string): any {
@@ -108,7 +114,7 @@ class OfficialRuntimeOptimizer {
           prewarmReadyFileCount += 1;
         } else unsupportedParts.push("prewarm");
         optimized = this.runPatchPoint({
-          id: "static.cache.main.native-pet.factory",
+          point: staticMainPoints.nativePetFactory,
           source: optimized,
           fileName: entry.name,
           candidateCount: recognizedFactoryCount,
@@ -117,7 +123,7 @@ class OfficialRuntimeOptimizer {
           patcher: (value) => this.patchNativePetFactory(value),
         });
         optimized = this.runPatchPoint({
-          id: "static.cache.main.native-pet.prewarm",
+          point: staticMainPoints.nativePetPrewarm,
           source: optimized,
           fileName: entry.name,
           candidateCount: recognizedPrewarmCount,
@@ -127,7 +133,7 @@ class OfficialRuntimeOptimizer {
         });
         if (restoreMarkerCount > 0) {
           optimized = this.runPatchPoint({
-            id: "static.cache.main.native-pet.restore",
+            point: staticMainPoints.nativePetRestore,
             source: optimized,
             fileName: entry.name,
             candidateCount: recognizedRestoreCount,
@@ -148,7 +154,7 @@ class OfficialRuntimeOptimizer {
         if (supported) macPushReadyFileCount += 1;
         else unsupportedParts.push("mac-push");
         optimized = this.runPatchPoint({
-          id: "static.cache.main.macos-push-registration",
+          point: staticMainPoints.macosPushRegistration,
           source: optimized,
           fileName: entry.name,
           candidateCount: recognizedCount,
@@ -187,7 +193,7 @@ class OfficialRuntimeOptimizer {
         }
         // 只合并完全相同的 origin 探测；隐藏网关的侧栏后台任务使用保护时限，用户主动与远端 Git 操作仍保留官方超时。
         optimized = this.runPatchPoint({
-          id: "static.cache.main.git-background-command",
+          point: staticMainPoints.gitBackgroundCommand,
           source: optimized,
           fileName: entry.name,
           candidateCount: recognizedBackgroundTimeoutCount,
@@ -196,7 +202,7 @@ class OfficialRuntimeOptimizer {
           patcher: (value) => this.patchGitBackgroundTimeout(value),
         });
         optimized = this.runPatchPoint({
-          id: "static.cache.main.git-local-prefilter",
+          point: staticMainPoints.gitLocalPrefilter,
           source: optimized,
           fileName: entry.name,
           candidateCount: recognizedLocalPrefilterCount,
@@ -205,7 +211,7 @@ class OfficialRuntimeOptimizer {
           patcher: (value) => this.patchGitLocalPrefilter(value),
         });
         optimized = this.runPatchPoint({
-          id: "static.cache.main.git-origin-resolver",
+          point: staticMainPoints.gitOriginResolver,
           source: optimized,
           fileName: entry.name,
           candidateCount: recognizedOriginCount,
@@ -225,7 +231,7 @@ class OfficialRuntimeOptimizer {
         if (supported) worktreeShellEnvironmentReadyFileCount += 1;
         else unsupportedParts.push("worktree-shell-environment");
         optimized = this.runPatchPoint({
-          id: "static.cache.main.worktree-shell-environment",
+          point: staticMainPoints.worktreeShellEnvironment,
           source: optimized,
           fileName: entry.name,
           candidateCount: recognizedCount,
@@ -280,19 +286,19 @@ class OfficialRuntimeOptimizer {
           ? "gateway-coalesced"
           : "unsupported-layout";
     }
-    this.reportAbsentPoint("static.cache.main.native-pet.factory", markerFileCount);
-    this.reportAbsentPoint("static.cache.main.native-pet.prewarm", markerFileCount);
-    this.reportAbsentPoint("static.cache.main.native-pet.restore", nativePetRestoreMarkerCount);
-    this.reportAbsentPoint("static.cache.main.macos-push-registration", macPushMarkerFileCount);
-    this.reportAbsentPoint("static.cache.main.git-origin-resolver", gitDiscoveryMarkerFileCount);
-    this.reportAbsentPoint("static.cache.main.git-local-prefilter", gitDiscoveryMarkerFileCount);
-    this.reportAbsentPoint("static.cache.main.git-background-command", gitDiscoveryMarkerFileCount);
-    this.reportAbsentPoint("static.cache.main.worktree-shell-environment", worktreeShellEnvironmentMarkerFileCount);
+    this.reportAbsentPoint(staticMainPoints.nativePetFactory, markerFileCount);
+    this.reportAbsentPoint(staticMainPoints.nativePetPrewarm, markerFileCount);
+    this.reportAbsentPoint(staticMainPoints.nativePetRestore, nativePetRestoreMarkerCount);
+    this.reportAbsentPoint(staticMainPoints.macosPushRegistration, macPushMarkerFileCount);
+    this.reportAbsentPoint(staticMainPoints.gitOriginResolver, gitDiscoveryMarkerFileCount);
+    this.reportAbsentPoint(staticMainPoints.gitLocalPrefilter, gitDiscoveryMarkerFileCount);
+    this.reportAbsentPoint(staticMainPoints.gitBackgroundCommand, gitDiscoveryMarkerFileCount);
+    this.reportAbsentPoint(staticMainPoints.worktreeShellEnvironment, worktreeShellEnvironmentMarkerFileCount);
     return result;
   }
 
   private runPatchPoint({
-    id,
+    point,
     source,
     fileName,
     candidateCount,
@@ -300,7 +306,7 @@ class OfficialRuntimeOptimizer {
     supported,
     patcher,
   }: {
-    id: string;
+    point: any;
     source: string;
     fileName: string;
     candidateCount: number;
@@ -310,43 +316,39 @@ class OfficialRuntimeOptimizer {
   }): string {
     // 兼容骨架只增加状态和受控入口；布局部分变化时继续沿用旧版“安全命中部分仍应用”的行为。
     if (!supported || expectedCandidates < 1) {
-      if (this.compatibilityService) {
-        try {
-          const method = candidateCount > expectedCandidates ? "ambiguousPoint" : "unsupportedPoint";
-          this.compatibilityService[method](id, {
-            locatorRevision: "official-main-v1",
-            candidateCount,
-            expectedCandidates: Math.max(1, expectedCandidates),
-            reason: `Expected ${expectedCandidates} candidates but found ${candidateCount}`,
-          });
-        } catch {}
-      }
+      try {
+        this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
+        this.modificationCoordinator.locationFailure(
+          point,
+          candidateCount > expectedCandidates ? "ambiguous" : "unsupported",
+          new Error(`Expected ${expectedCandidates} candidates but found ${candidateCount}`),
+        );
+        this.modificationCoordinator.useFallback(point, "Official behavior");
+      } catch {}
       return patcher(source);
     }
-    if (!this.compatibilityService) return patcher(source);
+    void fileName;
+    let capability = patcher;
     try {
-      const capability = this.compatibilityService.bindCapability(id, patcher, {
-        locatorRevision: "official-main-v1",
-        candidateCount,
-        expectedCandidates,
-        targetKey: fileName,
-        fallback: patcher,
-        verify: () => typeof patcher === "function",
+      capability = this.modificationCoordinator.bind(point, patcher, {
+        hitWhen: (args, result) => result !== args[0],
       });
-      return capability(source);
     } catch {
       // 诊断骨架失败时直接执行原 patch，不能改变缓存生成结果或阻断 Gateway 启动。
-      return patcher(source);
     }
+    return capability(source);
   }
 
-  private reportAbsentPoint(id: string, markerFileCount: number): void {
-    if (!this.compatibilityService || markerFileCount > 0) return;
+  private reportAbsentPoint(point: any, markerFileCount: number): void {
+    if (markerFileCount > 0) return;
     try {
-      this.compatibilityService.unsupportedPoint(id, {
-        locatorRevision: "official-main-v1",
-        reason: "Official capability marker is not present",
-      });
+      this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
+      this.modificationCoordinator.locationFailure(
+        point,
+        "unsupported",
+        new Error("Official capability marker is not present"),
+      );
+      this.modificationCoordinator.useFallback(point, "Official behavior");
     } catch {}
   }
 

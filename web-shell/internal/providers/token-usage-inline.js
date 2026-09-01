@@ -1,7 +1,13 @@
 (function () {
   const w = window;
+  const modificationEffects = w.__OpenCodexCurrentProviderScope?.effects;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   const pluginSystem = w.OpenCodexPluginSystem || w.__OpenCodexPluginSystem;
   if (!pluginSystem || typeof pluginSystem.registerPlugin !== "function") return;
+  const registerPlugin = adapterHost?.plugins?.register
+    ? (plugin) => adapterHost.plugins.register(pluginSystem, plugin)
+    : pluginSystem.registerPlugin.bind(pluginSystem);
 
   const PLUGIN_ID = "opencodex.token-usage-inline";
   const BADGE_ATTR = "data-opencodex-token-usage-inline";
@@ -245,7 +251,7 @@
     }
   }
 
-  pluginSystem.registerPlugin({
+  registerPlugin({
     id: PLUGIN_ID,
     name: "Token usage inline",
     labelKey: "plugin.tokenUsageInline.label",
@@ -257,7 +263,6 @@
     order: 30,
     activate(context) {
       const tokenUsage = context.capabilities?.tokenUsage;
-      const adapterHost = w.__OpenCodexAdapterHost;
       if (
         context.scope !== "renderer" ||
         !document ||
@@ -271,7 +276,6 @@
         return null;
       }
       document.__opencodexTokenUsageInlineInstalled = true;
-      w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.token-usage-inline");
 
       const observedRows = new Set();
       const pendingScanRoots = new Set();
@@ -375,7 +379,7 @@
         if (!badge.isConnected) return;
         diagnostics.lastRenderText = usageCompactText(usage);
         diagnostics.rendered += 1;
-        w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.token-usage-inline");
+        modificationEffects?.primary?.emit();
       };
 
       const requestUsageForRow = (row, providedIds) => {
@@ -508,7 +512,7 @@
 
       const scheduleScanFlush = () => {
         if (scanTimer) return;
-        scanTimer = w.setTimeout(flushPendingScans, 80);
+        scanTimer = scheduler.setTimeout(flushPendingScans, 80);
       };
 
       const scheduleScan = (root) => {
@@ -555,7 +559,7 @@
           stopMutationObservation();
           intersectionObserver?.disconnect();
           deactivateConsumer();
-          if (scanTimer) w.clearTimeout(scanTimer);
+          if (scanTimer) scheduler.clearTimeout(scanTimer);
           scanTimer = null;
           pendingScanRoots.clear();
           return;
@@ -604,7 +608,7 @@
 
       return () => {
         disposed = true;
-        if (scanTimer) w.clearTimeout(scanTimer);
+        if (scanTimer) scheduler.clearTimeout(scanTimer);
         disposeUpdate();
         deactivateConsumer();
         stopMutationObservation();

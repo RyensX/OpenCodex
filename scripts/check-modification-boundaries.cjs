@@ -71,6 +71,33 @@ for (const file of filesBelow(browserProviderRoot).filter((entry) => entry.endsW
   if (/\b(?:document|window|w)\.addEventListener\s*\(/.test(source)) {
     violations.push(`${path.relative(projectRoot, file)} 绕过共享全局事件 Provider`);
   }
+  if (
+    /\bw\.(?:setTimeout|clearTimeout|setInterval|clearInterval|requestAnimationFrame|cancelAnimationFrame)\s*\(/.test(source) ||
+    /(?<![.\w])(?:setTimeout|clearTimeout|setInterval|clearInterval|requestAnimationFrame|cancelAnimationFrame)\s*\(/.test(source)
+  ) {
+    violations.push(`${path.relative(projectRoot, file)} 绕过 Provider Scheduler 生命周期`);
+  }
+  if (/OpenCodexRuntimeCompatibility/.test(source)) {
+    violations.push(`${path.relative(projectRoot, file)} 仍由业务代码手工写兼容状态`);
+  }
+}
+
+for (const root of [
+  path.join(projectRoot, "gateway", "runtime"),
+  path.join(projectRoot, "gateway", "runner"),
+  path.join(projectRoot, "gateway", "src"),
+  path.join(projectRoot, "launcher"),
+]) {
+  for (const file of filesBelow(root).filter((entry) => /\.(?:cjs|js|ts)$/.test(entry))) {
+    if (file.includes(`${path.sep}runtime${path.sep}compatibility${path.sep}`)) continue;
+    const source = fs.readFileSync(file, "utf8");
+    if (/\.(?:installPoint|bindCapability|recordHit|browserReport)\s*\(/.test(source)) {
+      violations.push(`${path.relative(projectRoot, file)} 绕过生产 Kernel 直接写兼容状态`);
+    }
+    if (/\.registry\.(?:disablePoint|setPointsEnabled|useFallback|beginResolution)\s*\(/.test(source)) {
+      violations.push(`${path.relative(projectRoot, file)} 绕过生产 Provider 直接修改 Registry 生命周期`);
+    }
+  }
 }
 
 for (const root of [
@@ -96,11 +123,11 @@ const catalogPath = path.join(projectRoot, "gateway", "dist", "modification", "c
 if (!fs.existsSync(catalogPath)) throw new Error("缺少已编译的虚拟骨架目录");
 const catalog = require(catalogPath);
 if (catalog.POINT_DEFINITIONS.length !== 102) throw new Error("修改点迁移矩阵不是 102 项");
-if (catalog.POINT_IMPLEMENTATIONS.length !== 102 || new Set(catalog.POINT_IMPLEMENTATIONS).size !== 102) {
-  throw new Error("102 个修改点没有各自独立的强类型实现引用");
+if (catalog.POINT_TARGETS.length !== 102 || new Set(catalog.POINT_TARGETS).size !== 102) {
+  throw new Error("102 个修改点没有各自独立的强类型语义目标");
 }
 if (catalog.MIGRATION_MATRIX.length !== 102 || catalog.MIGRATION_MATRIX.some((entry) => {
-  return entry.migrationStatus !== "migrated" || !entry.groupId || !entry.providerId || !entry.host;
+  return entry.migrationStatus !== "migrated" || !entry.groupId || !entry.targetId || !entry.host;
 })) {
   throw new Error("102 点迁移矩阵仍有 legacy 或 unassigned 项");
 }
@@ -108,7 +135,9 @@ if (catalog.POINT_DEFINITIONS.some((point) => !point.group || point.contribution
   throw new Error("存在未分组或没有适配器的修改点");
 }
 if (catalog.POINT_DEFINITIONS.some((point) => point.contributions.some((item) => {
-  return !item.declaration?.implementation || Object.prototype.hasOwnProperty.call(item.declaration, "pointId");
+  return !item.declaration?.target ||
+    Object.prototype.hasOwnProperty.call(item.declaration, "pointId") ||
+    Object.prototype.hasOwnProperty.call(item.declaration, "implementation");
 }))) {
-  throw new Error("修改点仍在用自由字符串绑定实现，而不是 Provider 实现引用");
+  throw new Error("修改点仍在绑定实现或自由字符串，而不是强类型语义目标");
 }

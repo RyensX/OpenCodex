@@ -1,61 +1,36 @@
-const PROVIDER_BINDING_BRAND: unique symbol = Symbol("opencodex.provider-binding");
-const IMPLEMENTATION_BRAND: unique symbol = Symbol("opencodex.point-implementation");
+const MODIFICATION_TARGET_BRAND: unique symbol = Symbol("opencodex.modification-target");
 
 export type ModificationHost = "browser" | "gateway" | "static" | "runner";
 
-export interface ProviderBindingRef {
-  readonly [PROVIDER_BINDING_BRAND]: true;
+/**
+ * 修改点声明只引用语义目标；具体 Provider 由终端 AdapterRef 在当前宿主中决定。
+ * target 不包含模块路径、DOM 选择器或文件路径，真实解析逻辑只能位于 internal Provider。
+ */
+export interface ModificationTargetRef<THost extends ModificationHost = ModificationHost> {
+  readonly [MODIFICATION_TARGET_BRAND]: true;
   readonly id: string;
-  readonly name: string;
-  readonly description: string;
-  readonly host: ModificationHost;
+  readonly host: THost;
 }
 
-export interface ModificationImplementationRef {
-  readonly [IMPLEMENTATION_BRAND]: true;
-  readonly id: string;
-  readonly provider: ProviderBindingRef;
-}
-
-function stableId(value: string, label: string): string {
+function stableId(value: string): string {
   const normalized = String(value || "").trim();
   if (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(normalized)) {
-    throw new TypeError(`${label} 必须是稳定的小写标识：${normalized || "<empty>"}`);
+    throw new TypeError(`修改目标 ID 必须是稳定的小写标识：${normalized || "<empty>"}`);
   }
   return normalized;
 }
 
-export function defineProviderBinding(definition: {
-  id: string;
-  name: string;
-  description: string;
-  host: ModificationHost;
-}): ProviderBindingRef {
-  return Object.freeze({
-    [PROVIDER_BINDING_BRAND]: true as const,
-    id: stableId(definition.id, "Provider Binding ID"),
-    name: String(definition.name || "").trim(),
-    description: String(definition.description || "").trim(),
-    host: definition.host,
-  });
-}
-
-export function defineModificationImplementation(
+export function defineModificationTarget<THost extends ModificationHost>(
   id: string,
-  provider: ProviderBindingRef,
-): ModificationImplementationRef {
-  if (!isProviderBindingRef(provider)) throw new TypeError("修改实现必须引用已定义的 Provider Binding 对象");
+  host: THost,
+): ModificationTargetRef<THost> {
   return Object.freeze({
-    [IMPLEMENTATION_BRAND]: true as const,
-    id: stableId(id, "修改实现 ID"),
-    provider,
+    [MODIFICATION_TARGET_BRAND]: true as const,
+    id: stableId(id),
+    host,
   });
 }
 
-export function isProviderBindingRef(value: unknown): value is ProviderBindingRef {
-  return !!value && typeof value === "object" && (value as ProviderBindingRef)[PROVIDER_BINDING_BRAND] === true;
-}
-
-export function isModificationImplementationRef(value: unknown): value is ModificationImplementationRef {
-  return !!value && typeof value === "object" && (value as ModificationImplementationRef)[IMPLEMENTATION_BRAND] === true;
+export function isModificationTargetRef(value: unknown): value is ModificationTargetRef {
+  return !!value && typeof value === "object" && (value as ModificationTargetRef)[MODIFICATION_TARGET_BRAND] === true;
 }

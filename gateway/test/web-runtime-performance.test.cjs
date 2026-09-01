@@ -256,6 +256,18 @@ function installAdapterHost(window, MutationObserverClass) {
         return () => {};
       },
     },
+    scheduler: {
+      capture() {
+        return {
+          setTimeout: (...args) => window.setTimeout(...args),
+          clearTimeout: (...args) => window.clearTimeout(...args),
+          setInterval: (...args) => (window.setInterval || window.setTimeout)(...args),
+          clearInterval: (...args) => (window.clearInterval || window.clearTimeout)(...args),
+          requestAnimationFrame: (...args) => window.requestAnimationFrame(...args),
+          cancelAnimationFrame: (...args) => window.cancelAnimationFrame(...args),
+        };
+      },
+    },
   };
 }
 
@@ -939,6 +951,10 @@ test("composer observer ignores streaming content and hidden-page mutations", ()
   }
   const window = {
     __OpenCodexSmartSchedulingInjectionHealth: { report: () => Promise.resolve() },
+    requestAnimationFrame(callback) {
+      frames.push(callback);
+      return frames.length;
+    },
   };
   window.window = window;
   window.__OpenCodexAdapterHost = {
@@ -955,6 +971,13 @@ test("composer observer ignores streaming content and hidden-page mutations", ()
       observe({ target, type, callback }) {
         target.addEventListener(type, callback);
         return () => target.removeEventListener(type, callback);
+      },
+    },
+    scheduler: {
+      capture() {
+        return {
+          requestAnimationFrame: window.requestAnimationFrame,
+        };
       },
     },
   };
@@ -1245,6 +1268,7 @@ test("gateway logout menu observes DOM only during an interaction session", () =
     `(() => {
       const w = window;
       const adapterHost = w.__OpenCodexAdapterHost;
+      const scheduler = adapterHost.scheduler.capture();
       function gatewayAuthLogoutItemFromEvent() { return null; }
       function handleGatewayAuthLogoutPointer() {}
       function handleGatewayAuthLogoutKeydown() {}
@@ -1471,6 +1495,7 @@ test("connector logo in-flight requests are bounded and expire with one sweep ti
       const connectorLogoRequestCacheKeys = new Map();
       const emitted = [];
       let connectorLogoSweepTimer = null;
+      const scheduler = w;
       function cloneConnectorLogoFetchResponse(payload, requestId) { return { ...payload, requestId }; }
       function emitFetchResponse(payload) { emitted.push(payload); }
       function logConnectorLogoDiagnostic() {}
@@ -1621,6 +1646,7 @@ test("terminal relay bounds per-session, session-count, and total pending work",
       const terminalMessageQueueDepths = new Map();
       let terminalMessagePendingCount = 0;
       const diagnostics = [];
+      const modificationEffects = { terminal: { emit() {} } };
       function clientDiagnostic(event, data) { diagnostics.push({ event, data }); }
       function invoke() { return new Promise(() => {}); }
       ${sourceSection(
@@ -1664,6 +1690,7 @@ test("Statsig telemetry fetch messages complete locally without gateway work", (
   const responses = vm.runInNewContext(
     `(() => {
       const responses = [];
+      const modificationEffects = { telemetry: { emit() {} } };
       function isTelemetryRegisterUrl(url) {
         const parsed = new URL(String(url));
         return parsed.hostname === "chatgpt.com" && parsed.pathname === "/ces/v1/rgstr";
@@ -1710,11 +1737,14 @@ test("token usage passive parsing bounds wide and cyclic payload traversal", () 
   const window = {
     clearTimeout,
     location: { origin: "http://127.0.0.1", pathname: "/" },
-    OpenCodexRuntimeCompatibility: {
-      active(id) {
-        compatibilityHits.push(id);
+    __OpenCodexCurrentProviderScope: {
+      effects: {
+        primary: {
+          emit() {
+            compatibilityHits.push("web.runtime.protocol.token-usage");
+          },
+        },
       },
-      installed() {},
     },
     setTimeout,
   };
@@ -1783,6 +1813,23 @@ test("token usage passive parsing bounds wide and cyclic payload traversal", () 
   release();
 });
 
+test("token usage capability factory follows the current document generation", () => {
+  const document = {};
+  const window = {
+    __OpenCodexCurrentProviderScope: { generation: 1, effects: {} },
+  };
+  window.window = window;
+  const context = vm.createContext({ console, document, window });
+  vm.runInContext(TOKEN_USAGE_CAPABILITY_SOURCE, context);
+  const firstFactory = window.__OpenCodexCreateTokenUsageCapability;
+  vm.runInContext(TOKEN_USAGE_CAPABILITY_SOURCE, context);
+  assert.equal(window.__OpenCodexCreateTokenUsageCapability, firstFactory);
+
+  window.__OpenCodexCurrentProviderScope = { generation: 2, effects: {} };
+  vm.runInContext(TOKEN_USAGE_CAPABILITY_SOURCE, context);
+  assert.notEqual(window.__OpenCodexCreateTokenUsageCapability, firstFactory);
+});
+
 test("smart scheduling protocol traversal shares one batch budget", () => {
   const traversal = vm.runInNewContext(
     `(() => {
@@ -1826,6 +1873,7 @@ test("smart scheduling protocol traversal shares one batch budget", () => {
 
 test("whole-document observer filters stay scoped to their feature mounts", () => {
   // 这些源码约束覆盖不适合完整 DOM 模拟的 portal/app-shell 边界，防止后续又引入 closest 全树放大。
+  assert.match(MOBILE_VIEWPORT_SOURCE, /__OpenCodexViewportCoordinatorGeneration !== providerGeneration/);
   assert.match(IOS_FIX_SOURCE, /adapterHost\.dom\.observe\(\{[\s\S]*root: target,[\s\S]*options: \{ childList: true \}/);
   assert.match(IOS_FIX_SOURCE, /const target = observedRoot \|\| document\.body/);
   assert.match(IOS_FIX_SOURCE, /document\.visibilityState === "hidden"[\s\S]*disposeMutationObservation\?\.\(\)/);
@@ -1841,11 +1889,13 @@ test("whole-document observer filters stay scoped to their feature mounts", () =
     /adapterHost\.dom\.observe\(/
   );
   assert.match(BRIDGE_SOURCE, /reconnectDeferredUntilVisible = true/);
+  assert.match(BRIDGE_SOURCE, /const releaseSocket = modificationScope\?\.own/);
+  assert.match(BRIDGE_SOURCE, /closeAppHostRelay\(state, "page_replaced", false\)/);
   assert.match(BRIDGE_SOURCE, /document\.visibilityState === "hidden"/);
   assert.match(BRIDGE_SOURCE, /if \(!CLIENT_DIAGNOSTICS_ENABLED\) return/);
   assert.match(BRIDGE_SOURCE, /CLIENT_DIAGNOSTICS_ENABLED \? ipcDiagnosticSummary/);
   assert.match(BRIDGE_SOURCE, /IPC_INVOKE_TIMEOUT_MS = 65_000/);
-  assert.match(BRIDGE_SOURCE, /w\.setTimeout\(\(\) => controller\.abort\(\), IPC_INVOKE_TIMEOUT_MS\)/);
+  assert.match(BRIDGE_SOURCE, /scheduler\.setTimeout\(\(\) => controller\.abort\(\), IPC_INVOKE_TIMEOUT_MS\)/);
   assert.match(BRIDGE_SOURCE, /signal: controller\?\.signal/);
   assert.match(BRIDGE_SOURCE, /CONNECTOR_LOGO_WAITERS_MAX_ENTRIES/);
   assert.match(BRIDGE_SOURCE, /activeBrowserNotifications\.size > BROWSER_NOTIFICATION_MAX_ACTIVE/);
@@ -1867,8 +1917,8 @@ test("whole-document observer filters stay scoped to their feature mounts", () =
   assert.match(BRIDGE_SOURCE, /w\.__opencodexPluginImageUrl = localPluginImageUrl/);
   assert.match(BRIDGE_SOURCE, /return `\/api\/plugin-image\?path=\$\{encodeURIComponent\(filePath\)\}`/);
   assert.match(BRIDGE_SOURCE, /activeBrowserFilePickerCancel\?\.\(\)/);
-  assert.match(BRIDGE_SOURCE, /sessionTimeout = w\.setTimeout\(cancelPicker, FILE_PICKER_SESSION_TIMEOUT_MS\)/);
-  assert.match(HEALTH_SOURCE, /document\.visibilityState === "hidden"[\s\S]*w\.clearInterval\(pollTimer\)/);
+  assert.match(BRIDGE_SOURCE, /sessionTimeout = scheduler\.setTimeout\(cancelPicker, FILE_PICKER_SESSION_TIMEOUT_MS\)/);
+  assert.match(HEALTH_SOURCE, /document\.visibilityState === "hidden"[\s\S]*scheduler\.clearInterval\(pollTimer\)/);
   assert.doesNotMatch(HEALTH_SOURCE, /new MutationObserver/);
   assert.match(HEALTH_SOURCE, /type: SETTINGS_VISIBILITY_EVENT, callback: schedulePollingSync/);
   assert.match(SETTINGS_SOURCE, /w\.dispatchEvent\(new CustomEvent\(HEALTH_VISIBILITY_EVENT\)\)/);
@@ -1888,7 +1938,7 @@ test("whole-document observer filters stay scoped to their feature mounts", () =
   assert.doesNotMatch(TOOLTIP_SOURCE, /querySelectorAll\("\[aria-describedby\]"\)/);
   assert.match(TOOLTIP_SOURCE, /function observeForTooltipMount\(event\)/);
   assert.match(TOOLTIP_SOURCE, /if \(tooltipObserverExpiryTimer\) \{/);
-  assert.match(TOOLTIP_SOURCE, /tooltipObserverExpiryTimer = w\.setTimeout/);
+  assert.match(TOOLTIP_SOURCE, /tooltipObserverExpiryTimer = scheduler\.setTimeout/);
   assert.doesNotMatch(BRIDGE_SOURCE, /renderBridgeErrorToast\(payload\), 0/);
   assert.match(BRIDGE_SOURCE, /retryCount >= BRIDGE_TOAST_BODY_RETRY_MAX/);
   assert.match(BRIDGE_SOURCE, /type: "error", capture: true, callback: handleAppFsImageError/);
@@ -1930,7 +1980,7 @@ test("whole-document observer filters stay scoped to their feature mounts", () =
       "    function setTokenUsageCacheEntry",
       "\n\n    function setTokenUsageNegativeCache"
     ),
-    /OpenCodexRuntimeCompatibility\?\.active\?\.\("web\.runtime\.protocol\.token-usage"\)/
+    /modificationEffects\?\.primary\?\.emit\(\)/
   );
   assert.doesNotMatch(
     sourceSection(TOKEN_USAGE_INLINE_SOURCE, "      const observeRow =", "\n\n      const pruneObservedRows"),

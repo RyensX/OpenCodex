@@ -644,8 +644,10 @@ async function executeIpcInvoke(
   const openFileTarget = openFileTargetFromIpc(channel, payload);
   const ipcWorkspaceRoots = workspaceRootsFromIpcPayload(channel, payload);
   try {
-    if (openFileTarget) compatibilityService?.recordHit("gateway.runtime.ipc.open-file-context");
-    if (ipcWorkspaceRoots.length > 0) compatibilityService?.recordHit("gateway.runtime.ipc.workspace-context");
+    const modifications = compatibilityService?.modifications;
+    const points = compatibilityService?.modificationPoints?.gateway;
+    if (openFileTarget) modifications?.effect(points.openFileContext).emit();
+    if (ipcWorkspaceRoots.length > 0) modifications?.effect(points.workspaceContext).emit();
   } catch {
     // IPC 上下文提取已经完成，命中统计失败不能改变后续官方调用。
   }

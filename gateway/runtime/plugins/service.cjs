@@ -8,21 +8,21 @@ const { createPluginConfigStore } = require("./config-store.cjs");
 
 const PLUGIN_CONFIG_FILE = "opencodex-plugin-settings.json";
 const SMART_ROUTER_STATE_FILE = "smart-model-router-state.json";
-const SMART_ROUTER_COMPATIBILITY_POINTS = Object.freeze([
-  "gateway.runtime.app-server.transport",
-  "gateway.runtime.app-server.virtual-model",
-  "gateway.runtime.app-server.turn-router",
-  "gateway.runtime.app-server.internal-session",
-  "gateway.runtime.app-server.route-metadata",
-  "gateway.runtime.app-server.history-context",
-]);
-
 function createGatewayPluginService({
   runtimeDir = RUNTIME_DIR,
   classifierOptions,
   compatibilityService,
   getRuntimeIdentity,
 } = {}) {
+  const gatewayPoints = compatibilityService?.modificationPoints?.gateway;
+  const smartRouterPoints = Object.freeze([
+    gatewayPoints?.appServerTransport,
+    gatewayPoints?.virtualModel,
+    gatewayPoints?.turnRouter,
+    gatewayPoints?.internalSession,
+    gatewayPoints?.routeMetadata,
+    gatewayPoints?.historyContext,
+  ].filter(Boolean));
   const manifests = listPluginManifests();
   const configStore = createPluginConfigStore({
     filePath: path.join(runtimeDir, PLUGIN_CONFIG_FILE),
@@ -37,20 +37,24 @@ function createGatewayPluginService({
     compatibilityService,
   });
   function syncSmartRouterCompatibilityPoints(enabled) {
-    try {
-      compatibilityService?.registry.setPointsEnabled(
-        SMART_ROUTER_COMPATIBILITY_POINTS,
-        enabled,
-        "Smart scheduling is disabled"
-      );
-    } catch {}
-    if (!enabled) return;
-    for (const id of SMART_ROUTER_COMPATIBILITY_POINTS) {
+    for (const point of smartRouterPoints) {
       try {
-        compatibilityService?.installPoint(id, {
-          locatorRevision: "app-server-protocol-v1",
-        });
-      } catch {}
+        try {
+          compatibilityService?.modifications.setEnabled(
+            point,
+            enabled,
+            "Smart scheduling is disabled"
+          );
+        } catch {
+          compatibilityService?.modifications.execute(point, () => undefined, { verify: () => true });
+          if (!enabled) {
+            // 初始即关闭时先建立正式 Provider 状态，再由同一 Kernel 状态机标记为 disabled。
+            compatibilityService?.modifications.setEnabled(point, false, "Smart scheduling is disabled");
+          }
+        }
+      } catch {
+        // 设置同步仅用于诊断；失败不能改变智能调度开关本身。
+      }
     }
   }
   // 分类组不再承担启停语义；插件开关直接作用于对应修改点。
@@ -77,7 +81,9 @@ function createGatewayPluginService({
         ...options,
       });
       injectionHealth.reportGateway("route-presentation");
-      compatibilityService?.recordHit("gateway.runtime.app-server.route-metadata");
+      try {
+        compatibilityService?.modifications.effect(gatewayPoints.routeMetadata).emit();
+      } catch {}
       return smartSchedulingPresentation;
     },
     get smartSchedulingPresentation() {

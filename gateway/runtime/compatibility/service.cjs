@@ -1,22 +1,15 @@
-const crypto = require("crypto");
 const path = require("path");
 const { registerCompatibilityCatalog } = require("./catalog.cjs");
 const {
-  CompatibilityStateError,
   createCompatibilityRegistry,
   normalizedRuntimeIdentity,
 } = require("./registry.cjs");
 const { createCompatibilityReportStore } = require("./report-store.cjs");
+const { createProductionModificationCoordinator } = require("../../dist/modification/production.js");
+const modificationPoints = require("../modification/point-refs.cjs");
 
 const BROWSER_CLIENT_ID_RE = /^[a-zA-Z0-9_-]{8,96}$/;
-const BROWSER_REPORT_PHASES = new Set(["installed", "active", "failed", "fallback", "disabled"]);
-
-function capabilityFingerprint(id, locatorRevision, runtimeIdentity, targetKey = "") {
-  return crypto
-    .createHash("sha256")
-    .update([id, locatorRevision, runtimeIdentity.version, runtimeIdentity.build, runtimeIdentity.bundleHash, targetKey].join("\0"))
-    .digest("hex");
-}
+const BROWSER_REPORTER_STALE_MS = 30_000;
 
 function createCompatibilityService({
   runtimeDir,
@@ -24,6 +17,7 @@ function createCompatibilityService({
   getRuntimeIdentity = () => ({}),
   reportStore,
   persistDelayMs = 25,
+  now = () => Date.now(),
 } = {}) {
   let explicitRuntimeIdentity = null;
   const registry = registerCompatibilityCatalog(
@@ -33,8 +27,8 @@ function createCompatibilityService({
       },
     })
   );
-  const handles = new Map();
-  const browserReporters = new Map();
+  const browserKernelReporters = new Map();
+  let activeBrowserReporter = null;
   const store = reportStore || (
     runtimeDir && reportsDir
       ? createCompatibilityReportStore({
@@ -46,6 +40,16 @@ function createCompatibilityService({
   let persistTimer = null;
   let disposed = false;
   let cachedSummary = null;
+  const modifications = createProductionModificationCoordinator({
+    host: "gateway",
+    publish(point) {
+      try {
+        registry.ingestKernelPoint(point.id, point);
+      } catch {
+        // Kernel 报告属于诊断输出；聚合失败不能改变 Gateway Provider 行为。
+      }
+    },
+  });
 
   function persistNow() {
     if (!store) return registry.snapshot();
@@ -84,200 +88,88 @@ function createCompatibilityService({
       previousIdentity.version !== nextIdentity.version ||
       previousIdentity.build !== nextIdentity.build ||
       previousIdentity.bundleHash !== nextIdentity.bundleHash;
-    // 相同身份的重复同步必须幂等，否则 Registry 状态未重置但能力句柄会被单独清空。
-    if (identityChanged) handles.clear();
+    // 相同身份的重复同步必须幂等；身份变化由 Registry generation 统一使旧 Kernel 报告失效。
+    if (identityChanged) {
+      browserKernelReporters.clear();
+      activeBrowserReporter = null;
+    }
     cachedSummary = null;
     registry.snapshot();
     schedulePersist();
     return { ...explicitRuntimeIdentity };
   }
 
-  function resolveHandle(id, options, implementation) {
-    const locatorRevision = String(options.locatorRevision || "legacy-v1");
-    // 执行策略由修改点声明的强类型适配器决定，调用点不能再自由拼写策略名称。
-    const adapterId = String(registry.point(id).directAdapterIds[0]);
-    const targetFingerprint = String(
-      options.targetFingerprint || capabilityFingerprint(id, locatorRevision, currentIdentity(), options.targetKey)
-    );
-    const getCurrentFingerprint = typeof options.getCurrentFingerprint === "function"
-      ? options.getCurrentFingerprint
-      : () => targetFingerprint;
-    const handle = registry
-      .beginResolution(id, {
-        locatorRevision,
-        adapterId,
-        expectedCandidates: options.expectedCandidates || 1,
-      })
-      .resolve({
-        candidateCount: options.candidateCount ?? 1,
-        constraintsPassed: options.constraintsPassed !== false,
-        targetFingerprint,
-        contextHash: options.contextHash,
-        getCurrentFingerprint,
-        apply: implementation,
-        verify: options.verify || (() => true),
-      });
-    if (!handle) return null;
-    handles.set(id, handle);
-    return handle;
-  }
-
-  function installPoint(id, options = {}) {
-    const existing = handles.get(id);
-    if (existing && registry.point(id).location.status === "resolved") return existing;
-    const handle = resolveHandle(id, options, () => undefined);
-    if (!handle) return null;
-    handle.apply();
-    handle.verify();
-    if (options.active) handle.recordHit(options.hitCount || 1);
-    return handle;
-  }
-
-  function bindCapability(id, implementation, options = {}) {
-    if (typeof implementation !== "function") throw new TypeError(`Compatibility capability ${id} must be a function`);
-    let handle = resolveHandle(id, options, () => implementation);
-    if (!handle) {
-      const fallback = typeof options.fallback === "function" ? options.fallback : implementation;
-      registry.useFallback(id, options.failureReason || "Locator did not resolve");
-      return fallback;
-    }
-    let capability;
-    try {
-      capability = handle.apply();
-      if (isPromiseLike(capability)) {
-        throw new TypeError(`Compatibility capability ${id} must install synchronously`);
-      }
-      if (!handle.verify()) throw new CompatibilityStateError(`Compatibility capability ${id} failed verification`);
-    } catch (error) {
-      registry.useFallback(id, error);
-      const fallback = typeof options.fallback === "function" ? options.fallback : implementation;
-      return fallback;
-    }
-    return function compatibilityCapability(...args) {
-      try {
-        const value = capability.apply(this, args);
-        try {
-          handle.recordHit();
-        } catch {
-          // 运行时身份刚切换时旧句柄会失效；观测失败不能改变能力函数的原始返回值。
-          handles.delete(id);
-        }
-        return value;
-      } catch (error) {
-        // 能力函数已经开始执行后不能自动重试 fallback，否则可能重复产生文件或 IPC 副作用。
-        throw error;
-      }
-    };
-  }
-
-  function isPromiseLike(value) {
-    return !!value && typeof value.then === "function";
-  }
-
-  function failPoint(id, error, options = {}) {
-    handles.delete(id);
-    registry
-      .beginResolution(id, {
-        locatorRevision: options.locatorRevision || "legacy-v1",
-        adapterId: String(registry.point(id).directAdapterIds[0]),
-        expectedCandidates: options.expectedCandidates || 1,
-      })
-      .fail(error, { candidateCount: options.candidateCount || 0, reason: options.reason });
-    if (options.fallback !== false) registry.useFallback(id, options.fallbackReason || "Official behavior");
-  }
-
-  function unsupportedPoint(id, options = {}) {
-    handles.delete(id);
-    registry
-      .beginResolution(id, {
-        locatorRevision: options.locatorRevision || "legacy-v1",
-        adapterId: String(registry.point(id).directAdapterIds[0]),
-        expectedCandidates: options.expectedCandidates || 1,
-      })
-      .unsupported({
-        candidateCount: options.candidateCount || 0,
-        reason: options.reason || "Current official runtime does not expose this point",
-      });
-    if (options.fallback !== false) registry.useFallback(id, options.fallbackReason || "Official behavior");
-  }
-
-  function ambiguousPoint(id, options = {}) {
-    handles.delete(id);
-    registry
-      .beginResolution(id, {
-        locatorRevision: options.locatorRevision || "legacy-v1",
-        adapterId: String(registry.point(id).directAdapterIds[0]),
-        expectedCandidates: options.expectedCandidates || 1,
-      })
-      .ambiguous({
-        candidateCount: options.candidateCount || 0,
-        reason: options.reason || "Locator produced multiple candidates",
-      });
-    if (options.fallback !== false) registry.useFallback(id, options.fallbackReason || "Official behavior");
-  }
-
-  function recordHit(id, count = 1) {
-    const handle = handles.get(id);
-    if (!handle) return false;
-    try {
-      handle.recordHit(count);
-      return true;
-    } catch {
-      handles.delete(id);
-      return false;
-    }
-  }
-
-  function disablePoint(id, reason) {
-    handles.delete(id);
-    registry.disablePoint(id, reason);
-  }
-
-  function browserReport({ clientId, id, phase, reason }) {
+  function canAcceptBrowserKernelReport({ clientId, generation, report }) {
     const normalizedClientId = String(clientId || "").trim();
-    const normalizedId = String(id || "").trim();
-    const normalizedPhase = String(phase || "").trim();
-    if (!canAcceptBrowserReport({ clientId: normalizedClientId, id: normalizedId, phase: normalizedPhase })) return false;
-    // 只保存页面 ID 和时间，不接受浏览器上传选择器、源码片段或本机路径。
-    browserReporters.set(normalizedClientId, Date.now());
-    if (browserReporters.size > 64) browserReporters.delete(browserReporters.keys().next().value);
-    if (normalizedPhase === "failed") {
-      failPoint(normalizedId, reason || "Browser locator failed", {
-        locatorRevision: "browser-v1",
-      });
-      return true;
-    }
-    if (normalizedPhase === "disabled") {
-      handles.delete(normalizedId);
-      registry.disablePoint(normalizedId, reason || "Disabled in browser");
-      return true;
-    }
-    const handle = installPoint(normalizedId, {
-      locatorRevision: "browser-v1",
-      targetKey: normalizedClientId,
-    });
-    if (!handle) return false;
-    if (
-      (normalizedPhase === "installed" || normalizedPhase === "active") &&
-      registry.point(normalizedId).fallback.active
-    ) {
-      handle.clearFallback();
-    }
-    if (normalizedPhase === "active") handle.recordHit();
-    if (normalizedPhase === "fallback") handle.useFallback(reason || "Official browser behavior");
-    return true;
-  }
-
-  function canAcceptBrowserReport({ clientId, id, phase }) {
-    const normalizedClientId = String(clientId || "").trim();
-    const normalizedId = String(id || "").trim();
-    const normalizedPhase = String(phase || "").trim();
+    const normalizedGeneration = Number(generation);
+    const sequence = Number(report?.sequence);
+    const pointId = String(report?.point?.id || "");
     if (!BROWSER_CLIENT_ID_RE.test(normalizedClientId)) return false;
-    if (!normalizedId.startsWith("web.runtime.") || !BROWSER_REPORT_PHASES.has(normalizedPhase)) return false;
+    if (!Number.isInteger(normalizedGeneration) || normalizedGeneration < 1) return false;
+    if (!Number.isInteger(sequence) || sequence < 1) return false;
+    if (!pointId.startsWith("web.runtime.")) return false;
     try {
-      registry.point(normalizedId);
+      const definition = registry.point(pointId);
+      return (
+        String(report.point.groupId || "") === definition.groupId &&
+        Array.isArray(report.point.contributions) &&
+        report.point.contributions.length > 0
+      );
     } catch {
       return false;
+    }
+  }
+
+  function browserKernelReport({ clientId, generation, report }) {
+    if (!canAcceptBrowserKernelReport({ clientId, generation, report })) return false;
+    const normalizedClientId = String(clientId).trim();
+    const normalizedGeneration = Number(generation);
+    const sequence = Number(report.sequence);
+    let reporter = browserKernelReporters.get(normalizedClientId);
+    const isNewClient = !reporter;
+    if (!reporter) {
+      reporter = { generation: normalizedGeneration, sequence: 0, updatedAt: now() };
+      browserKernelReporters.set(normalizedClientId, reporter);
+    }
+    const activeReporterState = activeBrowserReporter
+      ? browserKernelReporters.get(activeBrowserReporter.clientId)
+      : null;
+    const activeReporterIsFresh = !!activeReporterState && now() - activeReporterState.updatedAt <= BROWSER_REPORTER_STALE_MS;
+    if (
+      activeBrowserReporter &&
+      activeBrowserReporter.clientId !== normalizedClientId &&
+      !isNewClient &&
+      activeReporterIsFresh
+    ) {
+      // 已被新页面替代的旧标签页仍可能补发请求；确认但忽略，避免它覆盖当前页面快照并无限重试。
+      reporter.updatedAt = now();
+      return true;
+    }
+    if (
+      !activeBrowserReporter ||
+      activeBrowserReporter.clientId !== normalizedClientId ||
+      normalizedGeneration > reporter.generation
+    ) {
+      if (normalizedGeneration < reporter.generation) return false;
+      reporter.generation = normalizedGeneration;
+      reporter.sequence = 0;
+      activeBrowserReporter = { clientId: normalizedClientId, generation: normalizedGeneration };
+      registry.resetPointsByPrefix("web.runtime.");
+    }
+    if (normalizedGeneration < reporter.generation) return false;
+    // 响应在网络中丢失时浏览器会重发同一批；旧 sequence 已经成功落入 Registry，可幂等确认。
+    if (sequence <= reporter.sequence) return true;
+    try {
+      registry.ingestKernelPoint(report.point.id, report.point);
+    } catch {
+      return false;
+    }
+    reporter.sequence = sequence;
+    reporter.updatedAt = now();
+    if (browserKernelReporters.size > 64) {
+      const oldest = [...browserKernelReporters.entries()]
+        .sort((left, right) => left[1].updatedAt - right[1].updatedAt)[0]?.[0];
+      if (oldest) browserKernelReporters.delete(oldest);
     }
     return true;
   }
@@ -286,17 +178,12 @@ function createCompatibilityService({
 
   return Object.freeze({
     registry,
+    modifications,
+    modificationPoints,
     reportStore: store,
     setRuntimeIdentity,
-    installPoint,
-    bindCapability,
-    failPoint,
-    unsupportedPoint,
-    ambiguousPoint,
-    recordHit,
-    disablePoint,
-    browserReport,
-    canAcceptBrowserReport,
+    browserKernelReport,
+    canAcceptBrowserKernelReport,
     snapshot() {
       return registry.snapshot();
     },
@@ -323,13 +210,14 @@ function createCompatibilityService({
           store.write(registry.snapshot());
         } catch {}
       }
+      // 先保留最后一次可运行快照，再释放 Provider；销毁态只属于进程退出过程，不覆盖离线诊断。
+      void modifications.dispose().catch(() => undefined);
     },
   });
 }
 
 module.exports = {
   BROWSER_CLIENT_ID_RE,
-  BROWSER_REPORT_PHASES,
-  capabilityFingerprint,
+  BROWSER_REPORTER_STALE_MS,
   createCompatibilityService,
 };

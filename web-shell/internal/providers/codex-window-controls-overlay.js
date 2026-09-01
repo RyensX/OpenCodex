@@ -1,6 +1,9 @@
 (function () {
   const w = window;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
   const activeRoot = document.documentElement || null;
   const previousInstallState = w.__opencodexWindowControlsOverlayState;
@@ -551,12 +554,12 @@
       if (rightHeaderSlotMetricsQueued) return;
       rightHeaderSlotMetricsQueued = true;
       if (typeof w.requestAnimationFrame === "function") {
-        metricFrameId = w.requestAnimationFrame(() => {
+        metricFrameId = scheduler.requestAnimationFrame(() => {
           metricFrameId = null;
           syncHeaderAndPanelMetrics();
         });
       } else {
-        metricTimeoutId = w.setTimeout(() => {
+        metricTimeoutId = scheduler.setTimeout(() => {
           metricTimeoutId = null;
           syncHeaderAndPanelMetrics();
         }, 0);
@@ -565,9 +568,9 @@
 
     function cancelQueuedMetrics() {
       if (metricFrameId != null && typeof w.cancelAnimationFrame === "function") {
-        w.cancelAnimationFrame(metricFrameId);
+        scheduler.cancelAnimationFrame(metricFrameId);
       }
-      if (metricTimeoutId != null) w.clearTimeout(metricTimeoutId);
+      if (metricTimeoutId != null) scheduler.clearTimeout(metricTimeoutId);
       metricFrameId = null;
       metricTimeoutId = null;
       rightHeaderSlotMetricsQueued = false;
@@ -656,7 +659,7 @@
       if (visible && overlay && typeof overlay.getTitlebarAreaRect === "function") {
         if (!compatibilityHitReported) {
           compatibilityHitReported = true;
-          w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.window-controls-overlay");
+          modificationEffects?.primary?.emit();
         }
         startHeavyObservers();
         const rect = overlay.getTitlebarAreaRect();
@@ -667,7 +670,7 @@
       if (visible) {
         if (!compatibilityHitReported) {
           compatibilityHitReported = true;
-          w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.window-controls-overlay");
+          modificationEffects?.primary?.emit();
         }
         startHeavyObservers();
         setInsets(true, null);
@@ -697,16 +700,16 @@
     addCleanup(adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: syncInsets }));
     syncInsets();
     const initialFrameId =
-      typeof w.requestAnimationFrame === "function" ? w.requestAnimationFrame(syncInsets) : null;
-    const initialTimeoutId = w.setTimeout(syncInsets, 250);
+      typeof w.requestAnimationFrame === "function" ? scheduler.requestAnimationFrame(syncInsets) : null;
+    const initialTimeoutId = scheduler.setTimeout(syncInsets, 250);
     return () => {
       setWindowControlsThemeColor("");
       setImagePreviewThemeColor("");
       stopHeavyObservers();
       if (initialFrameId != null && typeof w.cancelAnimationFrame === "function") {
-        w.cancelAnimationFrame(initialFrameId);
+        scheduler.cancelAnimationFrame(initialFrameId);
       }
-      w.clearTimeout(initialTimeoutId);
+      scheduler.clearTimeout(initialTimeoutId);
       for (const cleanup of cleanupHandlers.splice(0).reverse()) {
         try {
           cleanup();
@@ -720,5 +723,13 @@
   }
 
   installState.cleanup = installWindowControlsOverlaySafeArea() || null;
-  w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.window-controls-overlay");
+  if (installState.cleanup && modificationScope?.own) {
+    const cleanup = installState.cleanup;
+    installState.cleanup = modificationScope.own(() => {
+      cleanup();
+      if (w.__opencodexWindowControlsOverlayState === installState) {
+        w.__opencodexWindowControlsOverlayState = null;
+      }
+    });
+  }
 })();

@@ -163,6 +163,11 @@ function freshPointState(definition, generation, at) {
       verifiedAt: null,
       lastError: "",
     },
+    activation: {
+      status: "inactive",
+      activatedAt: null,
+      lastError: "",
+    },
     exercise: {
       status: "not-exercised",
       hitCount: 0,
@@ -173,6 +178,7 @@ function freshPointState(definition, generation, at) {
       reason: "",
       activatedAt: null,
     },
+    contributions: [],
     updatedAt: at,
   };
 }
@@ -183,14 +189,16 @@ function pointSummaryStatus(state) {
   if (
     ["unsupported", "ambiguous", "failed", "stale"].includes(state.location.status) ||
     state.application.status === "failed" ||
-    state.verification.status === "failed"
+    state.verification.status === "failed" ||
+    state.activation.status === "failed"
   ) {
     return "unavailable";
   }
   if (
     ["unresolved", "resolving"].includes(state.location.status) ||
     ["pending", "applying"].includes(state.application.status) ||
-    state.verification.status === "pending"
+    state.verification.status === "pending" ||
+    (state.contributions.length > 0 && ["inactive", "activating", "disposed"].includes(state.activation.status))
   ) {
     return "pending";
   }
@@ -217,6 +225,21 @@ function verificationOutcome(value) {
     return { ok: value.ok === true, reason: sanitizeCompatibilityText(value.reason) };
   }
   return { ok: value === true, reason: "" };
+}
+
+function aggregateKernelHitCount(contributions) {
+  const countsByDirectContribution = new Map();
+  for (const contribution of contributions) {
+    const path = String(contribution.id || "").split("::")[1] || "";
+    const directIndex = path.split(".")[0] || path;
+    const current = countsByDirectContribution.get(directIndex);
+    countsByDirectContribution.set(
+      directIndex,
+      current == null ? contribution.hitCount : Math.min(current, contribution.hitCount),
+    );
+  }
+  const completedCounts = [...countsByDirectContribution.values()];
+  return completedCounts.length > 0 ? Math.min(...completedCounts) : 0;
 }
 
 function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = () => Date.now() } = {}) {
@@ -289,6 +312,11 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
       verifiedAt: null,
       lastError: "",
     };
+    point.state.activation = {
+      status: "inactive",
+      activatedAt: null,
+      lastError: "",
+    };
     point.state.exercise = {
       status: "not-exercised",
       hitCount: 0,
@@ -299,6 +327,7 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
       reason: "",
       activatedAt: null,
     };
+    point.state.contributions = [];
   }
 
   function setLocationFailure(point, attemptToken, status, details = {}) {
@@ -495,12 +524,17 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
       location: { ...state.location },
       application: { ...state.application },
       verification: { ...state.verification },
+      activation: { ...state.activation },
       exercise: {
         ...state.exercise,
         // 高频命中只记录数值时间，生成快照时再格式化，避免每次 IPC 都分配 ISO 字符串。
         lastHitAt: point.lastHitAtMs ? new Date(point.lastHitAtMs).toISOString() : state.exercise.lastHitAt,
       },
       fallback: { ...state.fallback },
+      contributions: state.contributions.map((contribution) => ({
+        ...contribution,
+        adapterChainIds: [...contribution.adapterChainIds],
+      })),
       updatedAt: state.updatedAt,
     };
   }
@@ -645,6 +679,194 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     });
   }
 
+  function ingestKernelPoint(id, snapshot) {
+    const point = requiredPoint(id);
+    const previousLifecycleKey = JSON.stringify({
+      location: point.state.location.status,
+      application: point.state.application.status,
+      verification: point.state.verification.status,
+      activation: point.state.activation.status,
+      exercise: point.state.exercise.status,
+      fallback: point.state.fallback.active,
+      contributions: point.state.contributions.map((item) => [
+        item.id,
+        item.location,
+        item.application,
+        item.verification,
+        item.activation,
+        item.exercise,
+        item.fallbackActive,
+        item.fallbackReason,
+        item.reason,
+      ]),
+    });
+    const source = snapshot && typeof snapshot === "object" ? snapshot : {};
+    if (String(source.id || "") !== point.definition.id) {
+      throw new TypeError(`Kernel point id does not match catalog: ${id}`);
+    }
+    if (String(source.groupId || "") !== point.definition.groupId) {
+      throw new TypeError(`Kernel point group does not match catalog: ${id}`);
+    }
+    const directAdapterIds = Array.isArray(source.directAdapterIds) ? source.directAdapterIds.map(String) : [];
+    const adapterChainIds = Array.isArray(source.adapterChainIds) ? source.adapterChainIds.map(String) : [];
+    if (JSON.stringify(directAdapterIds) !== JSON.stringify(point.definition.directAdapterIds)) {
+      throw new TypeError(`Kernel point direct adapters do not match catalog: ${id}`);
+    }
+    if (JSON.stringify(adapterChainIds) !== JSON.stringify(point.definition.adapterChainIds)) {
+      throw new TypeError(`Kernel point adapter chain does not match catalog: ${id}`);
+    }
+    const locationStatuses = new Set(["unresolved", "resolving", "resolved", "unsupported", "ambiguous", "failed", "stale"]);
+    const applicationStatuses = new Set(["pending", "applying", "applied", "rolled-back", "failed", "disabled"]);
+    const verificationStatuses = new Set(["pending", "verified", "not-required", "failed"]);
+    const activationStatuses = new Set(["inactive", "activating", "ready", "failed", "disposed"]);
+    const exerciseStatuses = new Set(["not-exercised", "active", "disabled"]);
+    const rawContributions = Array.isArray(source.contributions) ? source.contributions : [];
+    if (rawContributions.length === 0) throw new TypeError(`Kernel point has no contributions: ${id}`);
+    const contributionIds = new Set();
+    const contributions = rawContributions.map((raw) => {
+      const contribution = raw && typeof raw === "object" ? raw : {};
+      const contributionId = String(contribution.id || "");
+      if (!contributionId.startsWith(`${point.definition.id}::`) || contributionIds.has(contributionId)) {
+        throw new TypeError(`Kernel contribution id is invalid or duplicated: ${contributionId || "<empty>"}`);
+      }
+      contributionIds.add(contributionId);
+      const directAdapterId = String(contribution.directAdapterId || "");
+      const adapterId = String(contribution.adapterId || "");
+      const chain = Array.isArray(contribution.adapterChainIds) ? contribution.adapterChainIds.map(String) : [];
+      if (!point.definition.directAdapterIds.includes(directAdapterId) || !point.definition.adapterChainIds.includes(adapterId)) {
+        throw new TypeError(`Kernel contribution adapters do not match catalog: ${contributionId}`);
+      }
+      if (chain.length === 0 || chain.some((item) => !point.definition.adapterChainIds.includes(item))) {
+        throw new TypeError(`Kernel contribution chain does not match catalog: ${contributionId}`);
+      }
+      const normalized = {
+        id: contributionId,
+        directAdapterId,
+        adapterId,
+        adapterChainIds: Object.freeze(chain),
+        location: String(contribution.location || "unresolved"),
+        application: String(contribution.application || "pending"),
+        verification: String(contribution.verification || "pending"),
+        activation: String(contribution.activation || "inactive"),
+        exercise: String(contribution.exercise || "not-exercised"),
+        hitCount: normalizedNonNegativeInteger(contribution.hitCount || 0, "hitCount"),
+        fallbackActive: contribution.fallbackActive === true,
+        fallbackReason: sanitizeCompatibilityText(contribution.fallbackReason),
+        reason: sanitizeCompatibilityText(contribution.reason),
+      };
+      if (
+        !locationStatuses.has(normalized.location) ||
+        !applicationStatuses.has(normalized.application) ||
+        !verificationStatuses.has(normalized.verification) ||
+        !activationStatuses.has(normalized.activation) ||
+        !exerciseStatuses.has(normalized.exercise)
+      ) {
+        throw new TypeError(`Kernel contribution contains an invalid phase status: ${contributionId}`);
+      }
+      return Object.freeze(normalized);
+    });
+    const choose = (field, priority, fallback) => {
+      const values = contributions.map((contribution) => contribution[field]);
+      return priority.find((status) => values.includes(status)) || fallback;
+    };
+    const at = timestamp();
+    point.currentAttempt = null;
+    point.currentHandle = null;
+    point.state.generation += 1;
+    point.state.location = {
+      status: choose("location", ["failed", "stale", "ambiguous", "unsupported", "resolving", "unresolved"], "resolved"),
+      locatorRevision: "kernel-v2",
+      adapterId: String(contributions[0].adapterId),
+      expectedCandidates: contributions.length,
+      candidateCount: contributions.filter((item) => item.location === "resolved").length,
+      targetHash: "kernel-managed",
+      contextHash: "",
+      reason: contributions.find((item) => item.reason)?.reason || "",
+      startedAt: at,
+      resolvedAt: at,
+    };
+    point.state.application = {
+      status: choose("application", ["failed", "rolled-back", "disabled", "applying", "pending"], "applied"),
+      attemptCount: 1,
+      appliedAt: at,
+      lastError: contributions.find((item) => item.reason)?.reason || "",
+    };
+    point.state.verification = {
+      status: choose("verification", ["failed", "pending", "not-required"], "verified"),
+      verifiedAt: at,
+      lastError: contributions.find((item) => item.reason)?.reason || "",
+    };
+    point.state.activation = {
+      status: choose("activation", ["failed", "disposed", "activating", "inactive"], "ready"),
+      activatedAt: at,
+      lastError: contributions.find((item) => item.reason)?.reason || "",
+    };
+    point.state.exercise = {
+      status: contributions.every((item) => item.exercise === "disabled")
+        ? "disabled"
+        : contributions.every((item) => item.exercise === "active")
+          ? "active"
+          : "not-exercised",
+      // 高级适配器可能展开多个底层叶子；一次高层语义效果不能按叶子数量重复计数。
+      hitCount: aggregateKernelHitCount(contributions),
+      lastHitAt: contributions.some((item) => item.exercise === "active") ? at : null,
+    };
+    const fallbackContribution = contributions.find((item) => item.fallbackActive);
+    point.state.fallback = {
+      active: !!fallbackContribution,
+      reason: fallbackContribution?.fallbackReason || "",
+      activatedAt: fallbackContribution ? at : null,
+    };
+    point.state.contributions = contributions;
+    const nextLifecycleKey = JSON.stringify({
+      location: point.state.location.status,
+      application: point.state.application.status,
+      verification: point.state.verification.status,
+      activation: point.state.activation.status,
+      exercise: point.state.exercise.status,
+      fallback: point.state.fallback.active,
+      contributions: contributions.map((item) => [
+        item.id,
+        item.location,
+        item.application,
+        item.verification,
+        item.activation,
+        item.exercise,
+        item.fallbackActive,
+        item.fallbackReason,
+        item.reason,
+      ]),
+    });
+    const currentTime = now();
+    if (point.state.exercise.status === "active") point.lastHitAtMs = currentTime;
+    point.state.updatedAt = at;
+    if (
+      previousLifecycleKey !== nextLifecycleKey ||
+      (
+        point.state.exercise.status === "active" &&
+        currentTime - point.lastHitEventAtMs >= HIT_EVENT_INTERVAL_MS
+      )
+    ) {
+      point.lastHitEventAtMs = currentTime;
+      emit("kernel-point-changed", point.definition.id);
+    }
+    return pointSnapshot(point);
+  }
+
+  function resetPointsByPrefix(prefix) {
+    const normalizedPrefix = String(prefix || "");
+    const at = timestamp();
+    for (const point of points.values()) {
+      if (!point.definition.id.startsWith(normalizedPrefix)) continue;
+      point.state = freshPointState(point.definition, point.state.generation + 1, at);
+      point.currentAttempt = null;
+      point.currentHandle = null;
+      point.lastHitEventAtMs = 0;
+      point.lastHitAtMs = 0;
+    }
+    emit("points-reset", normalizedPrefix);
+  }
+
   function useFallback(id, reason) {
     const point = requiredPoint(id);
     point.state.fallback.active = true;
@@ -742,6 +964,8 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
       return Array.from(definitions || [], registerPoint);
     },
     beginResolution,
+    ingestKernelPoint,
+    resetPointsByPrefix,
     disablePoint,
     useFallback,
     setPointsEnabled,

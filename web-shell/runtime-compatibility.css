@@ -113,6 +113,13 @@ button.help-button:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2
 .point-identity code { color: #343941; }
 .point-description { margin-top: 4px; color: var(--text-muted); font-size: 12px; }
 .point-reason { max-width: 520px; margin: 5px 0 0; color: #a96009; font-size: 12px; overflow-wrap: anywhere; }
+.contribution-details { margin-top: 7px; color: var(--text-muted); font-size: 11px; }
+.contribution-details summary { width: fit-content; cursor: pointer; user-select: none; }
+.contribution-list { display: grid; gap: 6px; margin-top: 7px; }
+.contribution-item { display: grid; gap: 3px; padding: 7px 8px; border: 1px solid var(--border-subtle); border-radius: 7px; background: var(--surface-soft); }
+.contribution-item > code { color: var(--text); font-size: 10px; }
+.contribution-phases, .contribution-reason { overflow-wrap: anywhere; }
+.contribution-reason { color: #a96009; }
 
 .adapter-chain { display: flex; max-width: 390px; align-items: center; flex-wrap: wrap; gap: 4px; }
 .adapter-chain-arrow { color: var(--text-muted); font-size: 13px; }
@@ -131,12 +138,12 @@ button.help-button:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2
 /* 阶段状态使用圆点和文字，避免每个单元格都是胶囊标签造成视觉噪音。 */
 .phase-status { display: inline-flex; align-items: center; gap: 6px; color: #5f6670; font-size: 12px; white-space: nowrap; }
 .phase-status::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: #aeb4bd; }
-.phase-status--resolved, .phase-status--applied, .phase-status--verified, .phase-status--active { color: #267044; }
-.phase-status--resolved::before, .phase-status--applied::before, .phase-status--verified::before, .phase-status--active::before { background: #37a460; }
-.phase-status--resolving, .phase-status--applying { color: #2864b7; }
-.phase-status--resolving::before, .phase-status--applying::before { background: #4b8de5; }
-.phase-status--unsupported, .phase-status--ambiguous, .phase-status--failed, .phase-status--stale { color: #aa3030; }
-.phase-status--unsupported::before, .phase-status--ambiguous::before, .phase-status--failed::before, .phase-status--stale::before { background: #dc4c4c; }
+.phase-status--resolved, .phase-status--applied, .phase-status--verified, .phase-status--ready, .phase-status--active { color: #267044; }
+.phase-status--resolved::before, .phase-status--applied::before, .phase-status--verified::before, .phase-status--ready::before, .phase-status--active::before { background: #37a460; }
+.phase-status--resolving, .phase-status--applying, .phase-status--activating { color: #2864b7; }
+.phase-status--resolving::before, .phase-status--applying::before, .phase-status--activating::before { background: #4b8de5; }
+.phase-status--unsupported, .phase-status--ambiguous, .phase-status--failed, .phase-status--stale, .phase-status--rolled-back { color: #aa3030; }
+.phase-status--unsupported::before, .phase-status--ambiguous::before, .phase-status--failed::before, .phase-status--stale::before, .phase-status--rolled-back::before { background: #dc4c4c; }
 .phase-status--disabled { color: #737a84; }
 
 .empty, .error { margin: 16px 0 0; padding: 14px; border-radius: 10px; }
@@ -207,9 +214,9 @@ button.help-dialog-close:hover, button.help-dialog-close:focus-visible { backgro
   .badge--degraded { background: #49330f; color: #fde7a7; }
   .badge--unavailable { background: #451a1a; color: #fecaca; }
   .phase-status { color: #aeb4bd; }
-  .phase-status--resolved, .phase-status--applied, .phase-status--verified, .phase-status--active { color: #a7e7bd; }
-  .phase-status--resolving, .phase-status--applying { color: #a9ccff; }
-  .phase-status--unsupported, .phase-status--ambiguous, .phase-status--failed, .phase-status--stale { color: #f3abab; }
+  .phase-status--resolved, .phase-status--applied, .phase-status--verified, .phase-status--ready, .phase-status--active { color: #a7e7bd; }
+  .phase-status--resolving, .phase-status--applying, .phase-status--activating { color: #a9ccff; }
+  .phase-status--unsupported, .phase-status--ambiguous, .phase-status--failed, .phase-status--stale, .phase-status--rolled-back { color: #f3abab; }
   .point-reason { color: #e4a851; }
   .error { background: #451a1a; color: #fecaca; }
 }

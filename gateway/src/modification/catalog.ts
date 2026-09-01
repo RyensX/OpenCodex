@@ -1,9 +1,8 @@
 import { ModificationRuntime } from "./kernel";
 import {
-  ModificationImplementationRef,
-  ProviderBindingRef,
-  defineModificationImplementation,
-  defineProviderBinding,
+  ModificationHost,
+  ModificationTargetRef,
+  defineModificationTarget,
 } from "./implementation";
 import {
   AdapterRef,
@@ -14,8 +13,8 @@ import {
   definePointGroup,
 } from "./sdk";
 
-interface CatalogDeclaration {
-  readonly implementation: ModificationImplementationRef;
+interface CatalogDeclaration<THost extends ModificationHost = ModificationHost> {
+  readonly target: ModificationTargetRef<THost>;
 }
 
 function group(id: string, name: string, description: string, order: number): PointGroupRef {
@@ -42,121 +41,125 @@ export const POINT_GROUPS = Object.freeze({
   runnerPackaging: group("runner-packaging", "Runner 打包", "生成、签名并组装各平台后台 Runner 产物。", 170),
 });
 
-function terminal(id: string, name: string, description: string): AdapterRef<CatalogDeclaration> {
+function terminal<THost extends ModificationHost>(
+  id: string,
+  name: string,
+  description: string,
+): AdapterRef<CatalogDeclaration<THost>> {
   return defineAdapter({ id, name, description, kind: "terminal" });
 }
 
-function composite(
+function composite<THost extends ModificationHost>(
   id: string,
   name: string,
   description: string,
   dependencies: readonly AdapterRef<unknown>[],
-): AdapterRef<CatalogDeclaration> {
+): AdapterRef<CatalogDeclaration<THost>> {
   return defineAdapter({ id, name, description, kind: "composite", dependencies });
 }
 
 export const BASE_ADAPTERS = Object.freeze({
-  runtimeView: terminal("adapter.runtime-view", "运行时视图", "统一定位、观察、测量和修改浏览器视图。"),
-  protocolPipeline: terminal("adapter.protocol-pipeline", "协议管线", "统一解析、观察、转换和路由运行时消息。"),
-  runtimeHook: terminal("adapter.runtime-hook", "运行时 Hook", "统一包装函数、属性、构造器和模块导出。"),
-  staticResource: terminal("adapter.static-resource", "静态资源改写", "统一定位、事务修改和验证静态资源。"),
-  runtimeEnvironment: terminal("adapter.runtime-environment", "运行环境覆盖", "统一管理环境、启动开关和全局能力。"),
-  processInterception: terminal("adapter.process-interception", "进程行为接管", "统一拦截子进程和系统打开行为。"),
-  artifactBuild: terminal("adapter.artifact-build", "产物构建", "统一暂存、组装、签名和提交 Runner 产物。"),
+  runtimeView: terminal<"browser">("adapter.runtime-view", "运行时视图", "统一定位、观察、测量和修改浏览器视图。"),
+  protocolPipeline: terminal<"browser" | "gateway">("adapter.protocol-pipeline", "协议管线", "统一解析、观察、转换和路由运行时消息。"),
+  runtimeHook: terminal<"browser" | "gateway">("adapter.runtime-hook", "运行时 Hook", "统一包装函数、属性、构造器和模块导出。"),
+  staticResource: terminal<"static">("adapter.static-resource", "静态资源改写", "统一定位、事务修改和验证静态资源。"),
+  runtimeEnvironment: terminal<"gateway">("adapter.runtime-environment", "运行环境覆盖", "统一管理环境、启动开关和全局能力。"),
+  processInterception: terminal<"gateway">("adapter.process-interception", "进程行为接管", "统一拦截子进程和系统打开行为。"),
+  artifactBuild: terminal<"runner">("adapter.artifact-build", "产物构建", "统一暂存、组装、签名和提交 Runner 产物。"),
 });
 
 export const SEMANTIC_ADAPTERS = Object.freeze({
-  semanticView: composite(
+  semanticView: composite<"browser">(
     "adapter.semantic-view",
     "语义视图",
     "以稳定视图、槽位和虚拟内容描述界面修改。",
     [BASE_ADAPTERS.runtimeView],
   ),
-  desktopBridge: composite(
+  desktopBridge: composite<"browser">(
     "adapter.desktop-bridge",
     "桌面 Bridge",
     "把官方桌面接口映射到浏览器和 Gateway 能力。",
     [BASE_ADAPTERS.runtimeHook, BASE_ADAPTERS.protocolPipeline],
   ),
-  browserNative: composite(
+  browserNative: composite<"browser">(
     "adapter.browser-native",
     "浏览器原生能力",
     "使用浏览器视图和 Hook 模拟桌面原生能力。",
     [BASE_ADAPTERS.runtimeHook, BASE_ADAPTERS.runtimeView],
   ),
-  networkRequest: composite(
+  networkRequest: composite<"browser">(
     "adapter.network-request",
     "网络请求适配",
     "通过共享 Hook 和协议管线接管网络请求。",
     [BASE_ADAPTERS.runtimeHook, BASE_ADAPTERS.protocolPipeline],
   ),
-  mobileInteraction: composite(
+  mobileInteraction: composite<"browser">(
     "adapter.mobile-interaction",
     "移动端交互适配",
     "在语义视图之上统一移动端事件、视口和键盘行为。",
     [],
   ),
-  officialRuntime: composite(
+  officialRuntime: composite<"gateway">(
     "adapter.official-runtime",
     "官方 Runtime 适配",
     "组合环境、Hook 和进程能力以承载隐藏官方 Runtime。",
     [BASE_ADAPTERS.runtimeEnvironment, BASE_ADAPTERS.runtimeHook, BASE_ADAPTERS.processInterception],
   ),
-  officialEnvironment: composite(
+  officialEnvironment: composite<"gateway">(
     "adapter.official-environment",
     "官方运行环境",
     "以官方 Runtime 语义声明启动前环境和 Chromium 开关。",
     [BASE_ADAPTERS.runtimeEnvironment],
   ),
-  electronApi: composite(
+  electronApi: composite<"gateway">(
     "adapter.electron-api",
     "Electron API",
     "以 Electron 模块和 API 语义声明运行时 Hook。",
     [BASE_ADAPTERS.runtimeHook],
   ),
-  projectOrdering: composite(
+  projectOrdering: composite<"browser">(
     "adapter.project-ordering",
     "项目排序",
     "以项目和会话排序语义声明 Bridge Hook。",
     [BASE_ADAPTERS.runtimeHook],
   ),
-  gatewayIpc: composite(
+  gatewayIpc: composite<"gateway">(
     "adapter.gateway-ipc",
     "Gateway IPC 适配",
     "组合 Hook 与协议管线处理官方 IPC。",
     [BASE_ADAPTERS.runtimeHook, BASE_ADAPTERS.protocolPipeline],
   ),
-  appServerProtocol: composite(
+  appServerProtocol: composite<"gateway">(
     "adapter.app-server-protocol",
     "App Server 协议适配",
     "在统一协议管线上实现 App Server 观察与转换。",
     [BASE_ADAPTERS.protocolPipeline],
   ),
-  processBridge: composite(
+  processBridge: composite<"gateway">(
     "adapter.process-bridge",
     "进程桥接",
     "组合进程接管和运行时 Hook 处理系统行为。",
     [BASE_ADAPTERS.processInterception, BASE_ADAPTERS.runtimeHook],
   ),
-  semanticProtocol: composite(
+  semanticProtocol: composite<"browser">(
     "adapter.semantic-protocol",
     "语义协议",
     "把原始协议帧归一化为稳定的领域消息。",
     [BASE_ADAPTERS.protocolPipeline],
   ),
-  officialMainPatch: composite(
+  officialMainPatch: composite<"static">(
     "adapter.official-main-patch",
     "官方 main 补丁",
     "在静态资源事务上定位并改写官方 main bundle。",
     [BASE_ADAPTERS.staticResource],
   ),
-  officialRendererPatch: composite(
+  officialRendererPatch: composite<"static">(
     "adapter.official-renderer-patch",
     "官方 Renderer 补丁",
     "在静态资源事务上定位并改写 Renderer HTML 和 chunk。",
     [BASE_ADAPTERS.staticResource],
   ),
-  runnerArtifact: composite(
+  runnerArtifact: composite<"runner">(
     "adapter.runner-artifact",
     "Runner 产物",
     "在产物构建事务上组装各平台 Runner。",
@@ -165,7 +168,7 @@ export const SEMANTIC_ADAPTERS = Object.freeze({
 });
 
 // 移动端高级适配器依赖语义视图；单独赋值可避免对象初始化时引用尚未完成的字段。
-const mobileInteractionAdapter = defineAdapter<CatalogDeclaration>({
+const mobileInteractionAdapter = defineAdapter<CatalogDeclaration<"browser">>({
   ...SEMANTIC_ADAPTERS.mobileInteraction,
   dependencies: [SEMANTIC_ADAPTERS.semanticView],
 });
@@ -176,95 +179,37 @@ export const ADAPTERS = Object.freeze({
   mobileInteraction: mobileInteractionAdapter,
 });
 
-export const PROVIDER_BINDINGS = Object.freeze({
-  browserCore: defineProviderBinding({
-    id: "provider.browser-core",
-    name: "浏览器核心 Provider",
-    description: "承接 Bridge、平台能力和通用 Renderer 运行时修改。",
-    host: "browser",
-  }),
-  browserView: defineProviderBinding({
-    id: "provider.browser-view",
-    name: "浏览器视图 Provider",
-    description: "承接 Renderer 语义视图定位、观察和挂载。",
-    host: "browser",
-  }),
-  browserSmartRouting: defineProviderBinding({
-    id: "provider.browser-smart-routing",
-    name: "浏览器智能调度 Provider",
-    description: "承接 Composer、设置页和摘要视图。",
-    host: "browser",
-  }),
-  browserPlugins: defineProviderBinding({
-    id: "provider.browser-plugins",
-    name: "浏览器内置扩展 Provider",
-    description: "承接移动端、排序和 Token 展示等内置扩展。",
-    host: "browser",
-  }),
-  gatewayRuntime: defineProviderBinding({
-    id: "provider.gateway-runtime",
-    name: "Gateway Runtime Provider",
-    description: "承接官方 Electron、IPC、环境和进程修改。",
-    host: "gateway",
-  }),
-  gatewaySmartRouting: defineProviderBinding({
-    id: "provider.gateway-smart-routing",
-    name: "Gateway 智能调度 Provider",
-    description: "承接 App Server 协议与路由修改。",
-    host: "gateway",
-  }),
-  staticMain: defineProviderBinding({
-    id: "provider.static-main",
-    name: "官方 Main 静态 Provider",
-    description: "承接官方 main bundle 的事务改写。",
-    host: "static",
-  }),
-  staticRenderer: defineProviderBinding({
-    id: "provider.static-renderer",
-    name: "官方 Renderer 静态 Provider",
-    description: "承接 Renderer HTML、CSP 和 chunk 的事务改写。",
-    host: "static",
-  }),
-  runner: defineProviderBinding({
-    id: "provider.runner",
-    name: "Runner 产物 Provider",
-    description: "承接跨平台 Runner 组装、签名和提交。",
-    host: "runner",
-  }),
-});
+type HostForPointId<TId extends string> =
+  TId extends `static.cache.runner.${string}` ? "runner" :
+  TId extends `static.cache.${string}` ? "static" :
+  TId extends `gateway.runtime.${string}` ? "gateway" :
+  TId extends `web.runtime.${string}` ? "browser" : never;
 
-function providerForPoint(id: string, owner: string): ProviderBindingRef {
-  if (id.startsWith("static.cache.runner.")) return PROVIDER_BINDINGS.runner;
-  if (id.startsWith("static.cache.main.")) return PROVIDER_BINDINGS.staticMain;
-  if (id.startsWith("static.cache.renderer.")) return PROVIDER_BINDINGS.staticRenderer;
-  if (id.startsWith("gateway.runtime.app-server.")) return PROVIDER_BINDINGS.gatewaySmartRouting;
-  if (id.startsWith("gateway.runtime.")) return PROVIDER_BINDINGS.gatewayRuntime;
-  if (id.startsWith("web.runtime.smart-router.")) return PROVIDER_BINDINGS.browserSmartRouting;
-  if (owner === "web-plugins" || id.includes("token-usage")) return PROVIDER_BINDINGS.browserPlugins;
-  if (id.startsWith("web.runtime.dom.") || id.startsWith("web.runtime.workspace.")) {
-    return PROVIDER_BINDINGS.browserView;
-  }
-  return PROVIDER_BINDINGS.browserCore;
+function hostForPoint<TId extends string>(id: TId): HostForPointId<TId> {
+  if (id.startsWith("static.cache.runner.")) return "runner" as HostForPointId<TId>;
+  if (id.startsWith("static.cache.")) return "static" as HostForPointId<TId>;
+  if (id.startsWith("gateway.runtime.")) return "gateway" as HostForPointId<TId>;
+  return "browser" as HostForPointId<TId>;
 }
 
-const pointImplementations: ModificationImplementationRef[] = [];
+const pointTargets: ModificationTargetRef[] = [];
 
-function point(
-  id: string,
+function point<const TId extends string>(
+  id: TId,
   description: string,
   owner: string,
   pointGroup: PointGroupRef,
-  ...pointAdapters: readonly AdapterRef<CatalogDeclaration>[]
+  ...pointAdapters: readonly AdapterRef<CatalogDeclaration<HostForPointId<TId>>>[]
 ): ModificationPointDefinition {
-  const implementation = defineModificationImplementation(id, providerForPoint(id, owner));
-  pointImplementations.push(implementation);
+  const target = defineModificationTarget(id, hostForPoint(id));
+  pointTargets.push(target);
   return defineModificationPoint({
     id,
     description,
     owner,
     group: pointGroup,
-    // Adapter 参数只携带不可伪造的实现引用；稳定字符串只保留在引用内部用于报告和跨进程序列化。
-    contributions: pointAdapters.map((adapter) => adapter.use({ implementation })),
+    // 修改点只携带强类型语义目标；终端 Provider 由 AdapterRef 对象身份自动选择。
+    contributions: pointAdapters.map((adapter) => adapter.use({ target })),
   });
 }
 
@@ -383,38 +328,48 @@ export const POINT_DEFINITIONS = Object.freeze([
 ]);
 
 export const POINT_GROUP_DEFINITIONS = Object.freeze(Object.values(POINT_GROUPS));
-export const POINT_IMPLEMENTATIONS = Object.freeze(pointImplementations);
+export const POINT_TARGETS = Object.freeze(pointTargets);
 export const ADAPTER_DEFINITIONS = Object.freeze(
   [...new Map(Object.values(ADAPTERS).map((adapter) => [adapter.id, adapter])).values()],
 );
 
 export const MIGRATION_MATRIX = Object.freeze(
   POINT_DEFINITIONS.map((definition, index) => {
-    const implementation = POINT_IMPLEMENTATIONS[index];
-    if (!implementation) throw new Error(`修改点缺少实现引用：${definition.id}`);
+    const target = POINT_TARGETS[index];
+    if (!target) throw new Error(`修改点缺少语义目标：${definition.id}`);
     return Object.freeze({
       pointId: definition.id,
       groupId: definition.group.id,
       directAdapterIds: Object.freeze(definition.contributions.map((item) => item.adapter.id)),
-      providerId: implementation.provider.id,
-      host: implementation.provider.host,
+      targetId: target.id,
+      host: target.host,
       migrationStatus: "migrated" as const,
     });
   }),
 );
 
-export function registerModificationCatalog(runtime: ModificationRuntime): ModificationRuntime {
+export const POINT_DEFINITION_BY_ID: ReadonlyMap<string, ModificationPointDefinition> = new Map(
+  POINT_DEFINITIONS.map((definition) => [definition.id, definition]),
+);
+
+export function registerModificationCatalog(
+  runtime: ModificationRuntime,
+  options: { readonly pointIds?: ReadonlySet<string> } = {},
+): ModificationRuntime {
   for (const pointGroup of POINT_GROUP_DEFINITIONS) runtime.registerGroup(pointGroup);
   for (const adapter of ADAPTER_DEFINITIONS) runtime.registerAdapter(adapter);
   for (const adapter of ADAPTER_DEFINITIONS) {
     if (adapter.kind !== "composite") continue;
+    const compositeAdapter = adapter as AdapterRef<unknown>;
     runtime.expand({
-      adapter,
+      adapter: compositeAdapter,
       expand(declaration) {
-        return adapter.dependencies.map((dependency) => dependency.use(declaration));
+        return compositeAdapter.dependencies.map((dependency) => dependency.use(declaration));
       },
     });
   }
-  for (const definition of POINT_DEFINITIONS) runtime.registerPoint(definition);
+  for (const definition of POINT_DEFINITIONS) {
+    if (!options.pointIds || options.pointIds.has(definition.id)) runtime.registerPoint(definition);
+  }
   return runtime;
 }

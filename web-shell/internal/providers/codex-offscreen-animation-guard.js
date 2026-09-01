@@ -1,9 +1,13 @@
 (function () {
   const w = window;
-  if (w.__opencodexOffscreenAnimationGuardInstalled) return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const providerGeneration = modificationScope?.generation || document;
+  if (w.__opencodexOffscreenAnimationGuardInstalled === providerGeneration) return;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
-  w.__opencodexOffscreenAnimationGuardInstalled = true;
+  w.__opencodexOffscreenAnimationGuardInstalled = providerGeneration;
 
   const REGION_CONFIGS = [
     {
@@ -47,7 +51,7 @@
       });
       // 先同步暂停，IntersectionObserver 下一帧确认可见后再恢复，避免离屏动画抢跑一帧。
       target.style.setProperty("animation-play-state", "paused", "important");
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.offscreen-animation");
+      modificationEffects?.primary?.emit();
       visibilityObserver.observe(target);
     }
 
@@ -97,7 +101,7 @@
         return;
       }
       // 用户滚动和 React 批量提交都折叠到同一帧，每个动画目标最多读取一次几何信息。
-      visibilityFrame = w.requestAnimationFrame(syncVisibility);
+      visibilityFrame = scheduler.requestAnimationFrame(syncVisibility);
     }
 
     function teardown() {
@@ -210,7 +214,7 @@
       refreshRoots();
       return;
     }
-    discoveryFrame = w.requestAnimationFrame(refreshRoots);
+    discoveryFrame = scheduler.requestAnimationFrame(refreshRoots);
   }
 
   function installDiscoveryObserver() {
@@ -225,5 +229,4 @@
   }
 
   refreshRoots();
-  w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.dom.offscreen-animation");
 })();

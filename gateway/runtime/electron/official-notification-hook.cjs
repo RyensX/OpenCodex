@@ -119,6 +119,13 @@ function installOfficialNotificationHook(electronModule, options = {}) {
   }
 
   publishNotification = options.publishNotification;
+  const reportIntercept = () => {
+    try {
+      options.onIntercept?.();
+    } catch {
+      // 命中诊断不能改变官方 Notification 构造语义。
+    }
+  };
 
   /**
    * 官方 main 会直接创建系统通知。gateway 是后台服务，不应该自己弹系统通知；
@@ -148,6 +155,7 @@ function installOfficialNotificationHook(electronModule, options = {}) {
       trackNotification(this);
       state.createdCount += 1;
       state.lastCreatedAt = new Date().toISOString();
+      reportIntercept();
     }
 
     show() {

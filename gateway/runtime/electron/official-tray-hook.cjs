@@ -21,6 +21,13 @@ function installOfficialTrayHook(electronModule, options = {}) {
     diagnosticWarn("official-tray", "tray_unavailable");
     return hiddenTrayHookStatus();
   }
+  const reportIntercept = () => {
+    try {
+      options.onIntercept?.();
+    } catch {
+      // 命中诊断不能改变官方 Tray 构造语义。
+    }
+  };
 
   /**
    * 官方 main 会创建托盘图标来承载桌面端菜单和窗口唤起能力。
@@ -41,6 +48,7 @@ function installOfficialTrayHook(electronModule, options = {}) {
       this.destroyed = false;
       state.createdCount += 1;
       state.lastCreatedAt = new Date().toISOString();
+      reportIntercept();
       diagnosticLog("official-tray", "hidden_tray_created", {
         createdCount: state.createdCount,
       });

@@ -1,7 +1,13 @@
 (function () {
   const w = window;
+  const modificationEffects = w.__OpenCodexCurrentProviderScope?.effects;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   const pluginSystem = w.OpenCodexPluginSystem || w.__OpenCodexPluginSystem;
   if (!pluginSystem || typeof pluginSystem.registerPlugin !== "function") return;
+  const registerPlugin = adapterHost?.plugins?.register
+    ? (plugin) => adapterHost.plugins.register(pluginSystem, plugin)
+    : pluginSystem.registerPlugin.bind(pluginSystem);
 
   const ROOT_DATA_ATTR = "opencodexIosFix";
   const KEYBOARD_DATA_ATTR = "opencodexIosKeyboardVisible";
@@ -64,7 +70,7 @@
     return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
   }
 
-  pluginSystem.registerPlugin({
+  registerPlugin({
     id: "opencodex.ios-fix",
     name: "iOS fix",
     labelKey: "plugin.iosFix.label",
@@ -77,7 +83,6 @@
     builtin: true,
     order: 15,
     activate(context) {
-      const adapterHost = w.__OpenCodexAdapterHost;
       if (
         context.scope !== "renderer" ||
         !document ||
@@ -91,7 +96,6 @@
       const viewportCoordinator = w.__OpenCodexViewportCoordinator;
       if (!viewportCoordinator || typeof viewportCoordinator.subscribe !== "function") return null;
       document.__opencodexIosFixInstalled = true;
-      w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.plugin.ios-layout");
 
       let keyboardOpeningUntilMs = 0;
       let disposeMutationObservation = null;
@@ -471,7 +475,7 @@
         setStyleValue(root, "--opencodex-ios-visual-viewport-offset-top", cssPixel(metrics.offsetTop));
         setStyleValue(root, "--opencodex-ios-keyboard-inset-bottom", cssPixel(metrics.keyboardInset));
         syncAppShellMark(true);
-        w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.ios-layout");
+        modificationEffects?.primary?.emit();
 
         lastDebugState = {
           keyboardInset: roundedNumber(metrics.keyboardInset),
@@ -509,9 +513,9 @@
           const wasWaitingForRoot = !observedRoot;
           const hasRoot = observeCurrentRoot();
           if (!hasRoot || (!wasWaitingForRoot && !records.some((record) => record.target === observedRoot))) return;
-          if (mutationSettleTimer) w.clearTimeout(mutationSettleTimer);
+          if (mutationSettleTimer) scheduler.clearTimeout(mutationSettleTimer);
           // 顶层容器批量替换后稍后统一定位 app shell，避免在 React 提交中间态重复测量。
-          mutationSettleTimer = w.setTimeout(() => scheduleViewportUpdate("ios-dom"), 50);
+          mutationSettleTimer = scheduler.setTimeout(() => scheduleViewportUpdate("ios-dom"), 50);
         };
         const observeCurrentRoot = () => {
           const nextRoot = rootElement();
@@ -535,7 +539,7 @@
       const handleDocumentVisibility = () => {
         if (document.visibilityState === "hidden") {
           // 隐藏页不需要追踪 React 顶层容器替换；前台恢复时重新定位当前根节点即可。
-          if (mutationSettleTimer) w.clearTimeout(mutationSettleTimer);
+          if (mutationSettleTimer) scheduler.clearTimeout(mutationSettleTimer);
           mutationSettleTimer = 0;
           disposeMutationObservation?.();
           disposeMutationObservation = null;
@@ -561,7 +565,7 @@
         disposePreference();
         disposeViewport();
         disposeVisibility();
-        if (mutationSettleTimer) w.clearTimeout(mutationSettleTimer);
+        if (mutationSettleTimer) scheduler.clearTimeout(mutationSettleTimer);
         disposeMutationObservation?.();
         if (style.parentNode) style.parentNode.removeChild(style);
         if (w[DEBUG_GLOBAL] === debugSnapshot) delete w[DEBUG_GLOBAL];

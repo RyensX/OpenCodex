@@ -7,6 +7,8 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { prepareOfficialElectronRuntime } = require("../gateway/runner/index.cjs");
 const { createCompatibilityService } = require("../gateway/runtime/compatibility/service.cjs");
+const { runner: runnerPoints } = require("../gateway/runtime/modification/point-refs.cjs");
+const { createHostModificationRuntime } = require("../gateway/runtime/modification/production-runtime.cjs");
 const {
   createInitialLatestReleaseState,
   fetchLatestReleaseState,
@@ -139,20 +141,24 @@ function ensureRuntimeLayout(paths) {
 
 function writeRunnerCompatibilityReport(paths, officialRuntime, error = null) {
   const service = createCompatibilityService({ runtimeDir: paths.runtimeDir, reportsDir: paths.reportsDir });
+  const failureRuntime = createHostModificationRuntime({ host: "runner", compatibilityService: service });
   try {
     const applicable = new Set(
       officialRuntime?.compatibilityPoints ||
         (process.platform === "darwin"
           ? [
-              "static.cache.runner.macos-background-bundle",
-              "static.cache.runner.macos-entry-signature",
-              "static.cache.runner.gateway-asar",
+              runnerPoints.macosBackgroundBundle.id,
+              runnerPoints.macosEntrySignature.id,
+              runnerPoints.gatewayAsar.id,
             ]
           : [
-              "static.cache.runner.portable-layout",
-              "static.cache.runner.gateway-asar",
-              ...(process.platform === "win32" ? ["static.cache.runner.windows-asar-integrity"] : []),
+              runnerPoints.portableLayout.id,
+              runnerPoints.gatewayAsar.id,
+              ...(process.platform === "win32" ? [runnerPoints.windowsAsarIntegrity.id] : []),
             ])
+    );
+    const snapshots = new Map(
+      (officialRuntime?.modificationPoints || []).map((point) => [point.id, point])
     );
     let asarStat = null;
     try {
@@ -163,30 +169,31 @@ function writeRunnerCompatibilityReport(paths, officialRuntime, error = null) {
       build: "unknown",
       bundleHash: asarStat ? `asar-${asarStat.size}-${Math.trunc(asarStat.mtimeMs)}` : "runner-bootstrap",
     });
-    for (const id of [
-      "static.cache.runner.macos-background-bundle",
-      "static.cache.runner.macos-entry-signature",
-      "static.cache.runner.portable-layout",
-      "static.cache.runner.gateway-asar",
-      "static.cache.runner.windows-asar-integrity",
+    for (const point of [
+      runnerPoints.macosBackgroundBundle,
+      runnerPoints.macosEntrySignature,
+      runnerPoints.portableLayout,
+      runnerPoints.gatewayAsar,
+      runnerPoints.windowsAsarIntegrity,
     ]) {
-      if (!applicable.has(id)) {
-        service.disablePoint(id, "Not applicable on the current platform");
+      if (!applicable.has(point.id)) {
+        try {
+          failureRuntime.coordinator.execute(point, () => undefined, { verify: () => true });
+          failureRuntime.coordinator.setEnabled(point, false, "Not applicable on the current platform");
+        } catch {}
       } else if (error) {
-        service.failPoint(id, error, {
-          locatorRevision: "runner-cache-v1",
-          fallback: false,
-        });
+        try {
+          failureRuntime.coordinator.execute(point, () => { throw error; });
+        } catch {}
       } else {
-        service.installPoint(id, {
-          locatorRevision: "runner-cache-v1",
-          // compatibilityPoints 是 Runner 成功执行后的回执，此处可以直接记录一次真实命中。
-          active: true,
-        });
+        const snapshot = snapshots.get(point.id);
+        if (!snapshot) throw new Error(`Runner Kernel 缺少修改点快照：${point.id}`);
+        service.registry.ingestKernelPoint(point.id, snapshot);
       }
     }
   } finally {
     service.dispose();
+    void failureRuntime.coordinator.dispose().catch(() => undefined);
   }
   gatewayState.compatibilityReportCache = null;
 }
@@ -848,8 +855,8 @@ async function startGatewayOnce() {
   const childEnv = {
     ...process.env,
     OPENCODEX_GATEWAY_ENTRY: paths.gatewayScriptPath,
-    // Runner 在 Gateway 启动前已经完成构建，把成功点作为只含固定 ID 的回执交给统一兼容骨架。
-    OPENCODEX_RUNNER_COMPATIBILITY_POINTS: JSON.stringify(officialRuntime.compatibilityPoints || []),
+    // Runner 在 Gateway 启动前已经完成构建，把适用点和平台关闭点的完整 Kernel 快照交给 Gateway。
+    OPENCODEX_RUNNER_MODIFICATION_POINTS: JSON.stringify(officialRuntime.modificationPoints || []),
     [PREFERRED_LANGUAGES_ENV]: preferredLanguagesEnvValue(),
     // runner 的 Info.plist 已经用 LSBackgroundOnly 隐藏；该标记让业务入口不要再调用 Dock API。
     OPENCODEX_GATEWAY_AGENT_MODE: "1",

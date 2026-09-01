@@ -1,9 +1,13 @@
 (function () {
   const w = window;
-  if (w.__OpenCodexSmartModelRouterSettingsInstalled) return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const providerGeneration = modificationScope?.generation || document;
+  if (w.__OpenCodexSmartModelRouterSettingsInstalled === providerGeneration) return;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
-  w.__OpenCodexSmartModelRouterSettingsInstalled = true;
+  w.__OpenCodexSmartModelRouterSettingsInstalled = providerGeneration;
 
   const FEATURE = "smart-model-router";
   const NAV_SLUG = "opencodex-smart-model-router";
@@ -123,7 +127,7 @@
     void w.__OpenCodexSmartSchedulingInjectionHealth?.report("settings-page");
     if (!compatibilityHitReported) {
       compatibilityHitReported = true;
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.smart-router.settings");
+      modificationEffects?.primary?.emit();
     }
   }
 
@@ -346,7 +350,7 @@
       adapterHost.events.observe({ key: {}, target: window, type: "resize", callback: reposition })
     );
     activeChoicePopover = { button, close };
-    requestAnimationFrame(() => {
+    scheduler.requestAnimationFrame(() => {
       if (activeChoicePopover?.button === button) setHighlighted(highlightedIndex);
     });
   }
@@ -543,8 +547,8 @@
     if (!node) return;
     node.textContent = text;
     node.dataset.error = error ? "true" : "false";
-    if (statusTimer) clearTimeout(statusTimer);
-    if (text && !error) statusTimer = setTimeout(() => setStatus(""), 2_000);
+    if (statusTimer) scheduler.clearTimeout(statusTimer);
+    if (text && !error) statusTimer = scheduler.setTimeout(() => setStatus(""), 2_000);
   }
 
   function renderTierSection(content, plugin) {
@@ -1028,7 +1032,7 @@
     // 设置页后台已断开 observer；其它生命周期事件也不能重新排入 rAF。
     if (observerScheduled || document.visibilityState === "hidden") return;
     observerScheduled = true;
-    requestAnimationFrame(syncWithOfficialSettings);
+    scheduler.requestAnimationFrame(syncWithOfficialSettings);
   }
 
   function nodeTouchesSettings(node, includeDescendants = false) {

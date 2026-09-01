@@ -31,6 +31,7 @@ const {
 const { __test: layoutTest } = require("../runner/official-layout.cjs");
 const { MANIFEST_SCHEMA_VERSION } = require("../dist/official/constants.js");
 const { createCompatibilityService } = require("../runtime/compatibility/service.cjs");
+const { staticMain: staticMainPoints } = require("../runtime/modification/point-refs.cjs");
 
 function temporaryDirectory(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-desktop-compat-"));
@@ -489,6 +490,25 @@ test("compatibility capability preserves official main optimization bytes", (t) 
   );
   assert.equal(compatibilityService.registry.point("static.cache.main.native-pet.factory").status, "healthy");
   compatibilityService.dispose();
+});
+
+test("official optimizer never retries a patcher that throws through the Kernel wrapper", () => {
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+  const expected = new Error("expected patch failure");
+  let calls = 0;
+  assert.throws(() => optimizer.runPatchPoint({
+    point: staticMainPoints.nativePetFactory,
+    source: "fixture",
+    fileName: "main.js",
+    candidateCount: 1,
+    expectedCandidates: 1,
+    supported: true,
+    patcher() {
+      calls += 1;
+      throw expected;
+    },
+  }), (error) => error === expected);
+  assert.equal(calls, 1);
 });
 
 test("runtime optimizer is idempotent for an already optimized cache", (t) => {

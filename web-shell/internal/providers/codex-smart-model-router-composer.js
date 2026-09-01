@@ -1,9 +1,13 @@
 (function () {
   const w = window;
-  if (w.__OpenCodexSmartModelRouterComposerInstalled) return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const providerGeneration = modificationScope?.generation || document;
+  if (w.__OpenCodexSmartModelRouterComposerInstalled === providerGeneration) return;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
-  w.__OpenCodexSmartModelRouterComposerInstalled = true;
+  w.__OpenCodexSmartModelRouterComposerInstalled = providerGeneration;
 
   const TRIGGER_SELECTOR = '[data-codex-intelligence-trigger="true"]';
   const MODEL_TEXT_SELECTOR = '[class*="_ModelPickerTriggerModelText_"]';
@@ -79,7 +83,7 @@
     const triggers = Array.from(document.querySelectorAll(TRIGGER_SELECTOR));
     if (triggers.length > 0 && !compatibilityHitReported) {
       compatibilityHitReported = true;
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.smart-router.composer");
+      modificationEffects?.primary?.emit();
     }
     stopTriggerTextObservation();
     for (const trigger of triggers) {
@@ -125,7 +129,7 @@
   function scheduleSync() {
     if (syncScheduled) return;
     syncScheduled = true;
-    requestAnimationFrame(syncComposer);
+    scheduler.requestAnimationFrame(syncComposer);
   }
 
   function elementTouchesComposer(element, includeDescendants = false) {

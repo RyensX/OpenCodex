@@ -1,7 +1,13 @@
 (function () {
   const w = window;
+  const modificationEffects = w.__OpenCodexCurrentProviderScope?.effects;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   const pluginSystem = w.OpenCodexPluginSystem || w.__OpenCodexPluginSystem;
   if (!pluginSystem || typeof pluginSystem.registerPlugin !== "function") return;
+  const registerPlugin = adapterHost?.plugins?.register
+    ? (plugin) => adapterHost.plugins.register(pluginSystem, plugin)
+    : pluginSystem.registerPlugin.bind(pluginSystem);
 
   const FLAT_SIDEBAR_PREFERENCES_KEY = "flat-project-sidebar-preferences-v1";
   const LEGACY_SIDEBAR_SORT_MODE_KEY = "codex-sidebar-sort-mode-v1";
@@ -51,7 +57,7 @@
     return { ...bootstrap, globalStateEntries };
   }
 
-  pluginSystem.registerPlugin({
+  registerPlugin({
     id: "opencodex.project-recent-sort",
     name: "Project recent sort",
     labelKey: "plugin.projectRecentSort.label",
@@ -64,9 +70,7 @@
     order: 40,
     activate(context) {
       if (context.scope !== "renderer") return null;
-      const adapterHost = w.__OpenCodexAdapterHost;
       if (!adapterHost?.hooks?.around) return null;
-      w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.plugin.project-recent-sort");
 
       const persistedSnapshot =
         w.__CODEX_WEB_CONFIG__?.persistedAtomSnapshot &&
@@ -156,7 +160,7 @@
               updateSidebarPreference(payload);
               if (usesRecentProjectSort() && isProjectOrderFetch(payload)) {
                 emitProjectOrderFetchResponse(payload.requestId);
-                w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.project-recent-sort");
+                modificationEffects?.primary?.emit();
                 return Promise.resolve(true);
               }
               return proceed(args);
@@ -173,7 +177,7 @@
             handle(_thisValue, args, proceed) {
               const bootstrap = proceed(args);
               if (!usesRecentProjectSort()) return bootstrap;
-              w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.project-recent-sort");
+              modificationEffects?.primary?.emit();
               return cloneBootstrapWithRecentProjectOrder(bootstrap);
             },
           }));
@@ -198,7 +202,7 @@
         for (const bridge of bridges) installed = patchBridge(bridge) || installed;
         if (!installed) {
           if (installAttempts < BRIDGE_INSTALL_MAX_ATTEMPTS && typeof w.setTimeout === "function") {
-            installTimer = w.setTimeout(installBridgePatches, BRIDGE_INSTALL_RETRY_MS);
+            installTimer = scheduler.setTimeout(installBridgePatches, BRIDGE_INSTALL_RETRY_MS);
           }
           return;
         }
@@ -220,7 +224,7 @@
 
       return () => {
         disposed = true;
-        if (installTimer != null && typeof w.clearTimeout === "function") w.clearTimeout(installTimer);
+        if (installTimer != null && typeof w.clearTimeout === "function") scheduler.clearTimeout(installTimer);
         unsubscribePersistedAtom?.();
         restoreBridges();
         // 停用插件后让官方重新读取真实项目顺序，避免虚拟空顺序残留在 query 缓存中。

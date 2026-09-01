@@ -23,6 +23,19 @@ import {
 } from "./contracts";
 import { ProtocolDeclaration } from "./contracts";
 import { defineAdapter, defineCapability, defineSignal } from "./sdk";
+import { ModificationTargetRef, defineModificationTarget } from "./implementation";
+
+const browserOnlyAdapter = defineAdapter<{ readonly target: ModificationTargetRef<"browser"> }>({
+  id: "adapter.type-test-browser-host",
+  name: "浏览器宿主约束",
+  description: "只接受浏览器语义目标",
+  kind: "terminal",
+});
+const gatewayTarget = defineModificationTarget("gateway.runtime.type-test", "gateway");
+browserOnlyAdapter.use({
+  // @ts-expect-error Gateway 目标不能传给只允许浏览器宿主的适配器。
+  target: gatewayTarget,
+});
 
 interface ThreadActionModel {
   readonly turnId: string;
@@ -51,6 +64,16 @@ view.mount({
   source: usageSignal,
   render({ data, model, ui }) {
     return ui.text(`${model.turnId}:${data.input}`);
+  },
+});
+
+view.mountLowLevel({
+  locator: defineViewLocator<ThreadActionModel>("locator.low-level-thread"),
+  // @ts-expect-error 挂载位置必须由工厂创建，不能伪造同形字符串对象。
+  placement: { id: "slot.fake" },
+  source: usageSignal,
+  render({ ui }) {
+    return ui.text("invalid placement");
   },
 });
 

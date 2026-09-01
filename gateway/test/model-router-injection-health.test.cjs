@@ -45,19 +45,12 @@ test("injection health resets receipts when the Codex runtime version changes", 
   assert.equal(registry.snapshot({ clientId: "browser_page_123", enabled: false }).status, "disabled");
 });
 
-test("browser injection receipts install smart-router points without claiming a semantic hit", () => {
+test("feature-health receipts do not synthesize modification lifecycle states", () => {
   const compatibilityService = createCompatibilityService();
   const registry = createInjectionHealthRegistry({ compatibilityService });
   const clientId = "browser_page_123";
   registry.reportBrowser("summary-adapter", clientId);
-  assert.equal(compatibilityService.registry.point("web.runtime.smart-router.summary").status, "ready");
-
-  // 只有摘要 Provider 真正挂载 section 后发送 active，状态才进入已命中。
-  compatibilityService.browserReport({
-    clientId,
-    id: "web.runtime.smart-router.summary",
-    phase: "active",
-  });
-  assert.equal(compatibilityService.registry.point("web.runtime.smart-router.summary").status, "healthy");
+  // 健康卡片只判断脚本是否互相可见；修改点状态只能由 Browser Kernel 快照改变。
+  assert.equal(compatibilityService.registry.point("web.runtime.smart-router.summary").status, "pending");
   compatibilityService.dispose();
 });

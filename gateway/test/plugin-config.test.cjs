@@ -310,6 +310,36 @@ test("browser plugin descriptors preserve typed default values", () => {
   assert.equal(window.OpenCodexPluginSystem.preferences.get("mode"), "b");
 });
 
+test("browser plugin system releases scopes and accepts the same plugin on a new document generation", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "..", "..", "web-shell", "opencodex-plugin-system.js"), "utf-8");
+  const firstRoot = {};
+  const document = { documentElement: firstRoot };
+  const window = {
+    localStorage: { getItem: () => null, setItem() {} },
+  };
+  window.window = window;
+  vm.runInNewContext(source, { window, document, localStorage: window.localStorage, console });
+  let activations = 0;
+  let disposals = 0;
+  const plugin = {
+    id: "generation-test",
+    activate() {
+      activations += 1;
+      return () => { disposals += 1; };
+    },
+  };
+  window.OpenCodexPluginSystem.registerPlugin(plugin);
+  window.OpenCodexPluginSystem.activate("renderer", {});
+  assert.deepEqual([activations, disposals], [1, 0]);
+
+  window.OpenCodexPluginSystem.beginPage({});
+  assert.deepEqual([activations, disposals], [1, 1]);
+  assert.equal(window.OpenCodexPluginSystem.plugins.list().length, 0);
+  window.OpenCodexPluginSystem.registerPlugin(plugin);
+  window.OpenCodexPluginSystem.activate("renderer", {});
+  assert.deepEqual([activations, disposals], [2, 1]);
+});
+
 test("gateway plugin switch keeps anonymous intent pending and syncs it after authentication", async () => {
   const source = fs.readFileSync(
     path.resolve(__dirname, "..", "..", "web-shell", "opencodex-gateway-plugin-switches.js"),

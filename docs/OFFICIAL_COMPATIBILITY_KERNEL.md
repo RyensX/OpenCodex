@@ -3,6 +3,8 @@
 > Schema：v2
 > 适用范围：官方 Renderer、Electron Main、App Server、静态资源和 Runner 产物
 
+新增修改点、选择适配器和实现 Provider 的具体步骤见 [虚拟修改骨架开发指南](./MODIFICATION_SKELETON.md)。
+
 ## 1. 不可变约束
 
 虚拟骨架只改变代码边界、执行编排和诊断方式。102 个修改点原有的触发条件、参数、`this`、返回值、异常、Promise、事件顺序、缓存、节流、回退和 UI 表现不得变化。
@@ -36,8 +38,9 @@ ModificationPointRef
 - `gateway/src/modification/sdk.ts`：不可伪造引用和声明对象。
 - `gateway/src/modification/contracts.ts`：七类底层适配器的严格 TypeScript 参数契约。
 - `gateway/src/modification/kernel.ts`：依赖展开、批量编译、修改点原子事务、故障隔离和快照。
-- `gateway/src/modification/catalog.ts`：102 点、17 个分类组、23 个适配器及强类型 Provider 实现引用的唯一目录。
-- `web-shell/src/modification-browser-host.ts`：共享 DOM Observer、全局事件、函数 Wrapper 和协议解码。
+- `gateway/src/modification/catalog.ts`：102 点、17 个分类组、23 个适配器及带宿主约束的语义目标唯一目录。
+- `gateway/src/modification/production.ts`：Gateway、静态资源和 Runner 的生产批次协调器。
+- `web-shell/src/modification-browser-host.ts`：共享 DOM Observer、全局事件、函数 Wrapper、协议解码、Scheduler 和页面代际。
 - `gateway/runtime/compatibility/*`：跨进程 Schema v2 状态、脱敏报告和只读 v1 兼容读取。
 
 ## 3. 底层与高级适配器
@@ -74,6 +77,8 @@ Kernel 分为注册、`compile`、`activate`：
 - 同一 target/type/capture 只有一个真实事件 Listener；passive 需求合并为兼容的单层 Listener。
 - 同一函数目标只有一层 Wrapper，内部按 order 执行拦截器链。
 - 同一协议帧只进行一次 JSON/NDJSON 解码，再向 Channel 订阅者分发同一对象。
+- Provider 定时器和动画帧属于当前页面代际，页面替换时统一取消。
+- 延迟激活的内置插件保留原 Provider 所有权，关闭时修改点直接显示为 disabled。
 
 ## 5. 迁移目录
 
@@ -90,8 +95,7 @@ Kernel 分为注册、`compile`、`activate`：
 - 一个 `PointGroupRef`；
 - 一个或多个直接 `AdapterRef`；
 - 完整适配器依赖链；
-- 一个独立 `ModificationImplementationRef`；
-- 一个按宿主划分的 `ProviderBindingRef`。
+- 一个独立且带 `browser/gateway/static/runner` 泛型约束的 `ModificationTargetRef`。
 
 内置插件目录不再含可执行 `index.js`。原实现移动到 internal Provider，插件目录只保留 manifest/i18n，因此修改点声明不会直接操作真实页面。边界检查会拒绝修改点工程中的 DOM/Node 全局、Provider 目录中的独立 MutationObserver/全局事件监听，以及旧插件入口。
 
@@ -114,7 +118,7 @@ Kernel 分为注册、`compile`、`activate`：
 /opencodex/runtime-compatibility
 ```
 
-入口位于认证页“设置”，Launcher 不提供入口。页面按分类组展示完整“高级 → 底层”适配器链，筛选器匹配链中任意适配器；总状态、定位、应用、验证、命中和注入类别均有可点击说明。
+入口位于认证页“设置”，Launcher 不提供入口。页面按分类组展示完整“高级 → 底层”适配器链，筛选器匹配链中任意适配器；总状态、定位、应用、验证、激活、命中和注入类别均有可点击说明。
 
 ## 7. 构建、插件与边界
 
@@ -136,7 +140,7 @@ ESM 默认导出工厂接收宿主创建的冻结 SDK 作用域。插件不能�
 
 完成改动后必须同时满足：
 
-- 102/102 点均有组、直接适配器、依赖链和实现引用，无 legacy/unassigned 项。
+- 102/102 点均有组、直接适配器、依赖链和宿主语义目标，无 legacy/unassigned 项。
 - 编译期错误覆盖错误 Slot、Schema、环境值、进程请求和产物规格。
 - Kernel 覆盖批量编译、依赖环、原子回滚、故障隔离、全量真实命中语义和销毁。
 - 浏览器覆盖共享 Observer/Event/Hook/Protocol 计数与后台暂停。

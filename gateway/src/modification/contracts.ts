@@ -3,6 +3,7 @@ import { AdapterRef, AdapterUse, CapabilityRef, SignalRef } from "./sdk";
 const VIEW_LOCATOR_BRAND: unique symbol = Symbol("opencodex.view-locator");
 const VIEW_TARGET_BRAND: unique symbol = Symbol("opencodex.view-target");
 const VIEW_SLOT_BRAND: unique symbol = Symbol("opencodex.view-slot");
+const VIEW_PLACEMENT_BRAND: unique symbol = Symbol("opencodex.view-placement");
 const PROTOCOL_CHANNEL_BRAND: unique symbol = Symbol("opencodex.protocol-channel");
 const PROTOCOL_SCHEMA_BRAND: unique symbol = Symbol("opencodex.protocol-schema");
 const HOOK_TARGET_BRAND: unique symbol = Symbol("opencodex.hook-target");
@@ -45,6 +46,7 @@ export interface ViewSlotRef<TTarget extends ViewTargetRef<string, unknown>> {
 }
 
 export interface ViewPlacementRef {
+  readonly [VIEW_PLACEMENT_BRAND]: true;
   readonly id: string;
 }
 
@@ -302,7 +304,7 @@ export function defineViewSlot<TTarget extends ViewTargetRef<string, unknown>>(i
 }
 
 export function defineViewPlacement(id: string): ViewPlacementRef {
-  return Object.freeze({ id: stableRefId(id) });
+  return Object.freeze({ [VIEW_PLACEMENT_BRAND]: true as const, id: stableRefId(id) });
 }
 
 export function defineProtocolChannel<TWire>(id: string): ProtocolChannelRef<TWire> {

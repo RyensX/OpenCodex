@@ -5,6 +5,9 @@ declare const pointBrand: unique symbol;
 declare const locatorBrand: unique symbol;
 declare const placementBrand: unique symbol;
 declare const virtualNodeBrand: unique symbol;
+declare const hookTargetBrand: unique symbol;
+declare const protocolChannelBrand: unique symbol;
+declare const protocolSchemaBrand: unique symbol;
 
 export interface PointGroupRef {
   readonly [groupBrand]: true;
@@ -51,14 +54,17 @@ export interface VirtualViewNode {
 }
 
 export interface BrowserHookTargetRef {
+  readonly [hookTargetBrand]: true;
   readonly id: string;
 }
 
 export interface BrowserProtocolChannelRef {
+  readonly [protocolChannelBrand]: true;
   readonly id: string;
 }
 
 export interface BrowserProtocolSchemaRef<TMessage> {
+  readonly [protocolSchemaBrand]: true;
   readonly id: string;
   parse(value: unknown): TMessage | null;
 }

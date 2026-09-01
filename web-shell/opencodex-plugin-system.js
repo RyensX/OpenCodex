@@ -8,6 +8,7 @@
   const settingDescriptors = new Map();
   const listeners = new Map();
   const activeScopes = new Map();
+  let pageRoot = typeof document !== "undefined" ? document.documentElement || null : null;
   const SETTING_TYPES = new Set(["boolean", "string", "select", "model", "reasoning-effort"]);
 
   function hasOwn(object, key) {
@@ -345,9 +346,21 @@
     return activation;
   }
 
+  function beginPage(root) {
+    if (pageRoot === root) return;
+    pageRoot = root;
+    // document.write 会保留 Window；旧 scope 必须先完整销毁，否则新页面同 ID 插件会被误判为已激活。
+    for (const activation of Array.from(activeScopes.values())) activation.dispose();
+    activeScopes.clear();
+    plugins.clear();
+    settingDescriptors.clear();
+    listeners.clear();
+  }
+
   const api = Object.freeze({
     SETTINGS_STORAGE_KEY,
     activate,
+    beginPage,
     events: Object.freeze({ emit, on }),
     preferences: Object.freeze({
       defaults: defaultPreferences,

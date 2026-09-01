@@ -1,8 +1,16 @@
 (function () {
   const w = window;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const providerGeneration = modificationScope?.generation || document;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   const pluginSystem = w.OpenCodexPluginSystem || w.__OpenCodexPluginSystem;
   if (!pluginSystem || typeof pluginSystem.registerPlugin !== "function") return;
-  const sharedAdapterHost = w.__OpenCodexAdapterHost;
+  const registerPlugin = adapterHost?.plugins?.register
+    ? (plugin) => adapterHost.plugins.register(pluginSystem, plugin)
+    : pluginSystem.registerPlugin.bind(pluginSystem);
+  const sharedAdapterHost = adapterHost;
 
   const POST_SEND_FOCUS_BLOCK_MS = 4000;
   const MANUAL_FOCUS_MS = 900;
@@ -85,16 +93,16 @@
       }
     }
 
-    function cancelAnimationFrame() {
+    function cancelScheduledFrame() {
       if (!animationFrame) return;
-      if (typeof w.cancelAnimationFrame === "function") w.cancelAnimationFrame(animationFrame);
-      else w.clearTimeout(animationFrame);
+      if (typeof w.cancelAnimationFrame === "function") scheduler.cancelAnimationFrame(animationFrame);
+      else scheduler.clearTimeout(animationFrame);
       animationFrame = 0;
     }
 
     function clearSettleTimers() {
       settleGeneration += 1;
-      for (const timer of settleTimers.values()) w.clearTimeout(timer);
+      for (const timer of settleTimers.values()) scheduler.clearTimeout(timer);
       settleTimers.clear();
     }
 
@@ -103,12 +111,12 @@
       if (delays.length === 0) return;
       const generation = settleGeneration;
       const [firstDelay, ...remainingDelays] = delays;
-      const firstTimer = w.setTimeout(() => {
+      const firstTimer = scheduler.setTimeout(() => {
         if (generation !== settleGeneration) return;
         settleTimers.delete(firstDelay);
         // 事件风暴安静到首个校准点后再展开余下时点，热路径始终只反复维护一个 timer。
         for (const delay of remainingDelays) {
-          const timer = w.setTimeout(() => {
+          const timer = scheduler.setTimeout(() => {
             if (generation !== settleGeneration) return;
             settleTimers.delete(delay);
             dispatch(`${reason}:settle`);
@@ -122,7 +130,7 @@
 
     function request(reason = "viewport", options = {}) {
       if (document.visibilityState === "hidden") {
-        cancelAnimationFrame();
+        cancelScheduledFrame();
         clearSettleTimers();
         return;
       }
@@ -141,7 +149,7 @@
           dispatch(pendingReason);
         };
         animationFrame =
-          typeof w.requestAnimationFrame === "function" ? w.requestAnimationFrame(run) : w.setTimeout(run, 0);
+          typeof w.requestAnimationFrame === "function" ? scheduler.requestAnimationFrame(run) : scheduler.setTimeout(run, 0);
       }
       if (delays.length > 0) {
         // 连续 visualViewport 事件只保留最后一组稳定期校准，避免每个事件累积多轮定时任务。
@@ -162,7 +170,7 @@
       if (document.visibilityState === "visible") {
         request("visibility", { immediate: true, settleDelays: [80, 260] });
       } else {
-        cancelAnimationFrame();
+        cancelScheduledFrame();
         clearSettleTimers();
       }
     };
@@ -190,7 +198,7 @@
       listening = false;
       for (const disposeEvent of eventDisposers.reverse()) disposeEvent();
       eventDisposers = [];
-      cancelAnimationFrame();
+      cancelScheduledFrame();
       clearSettleTimers();
       // 无订阅期间屏幕仍可能旋转或被浏览器工具栏改变；再次启用时必须重新读取真实尺寸。
       lastSnapshot = null;
@@ -220,10 +228,13 @@
   }
 
   // 两个移动插件共享同一个事件源和布局快照，避免 iOS 上重复读取 visualViewport 和根节点尺寸。
-  const viewportCoordinator =
-    w.__OpenCodexViewportCoordinator || (w.__OpenCodexViewportCoordinator = createViewportCoordinator());
+  if (w.__OpenCodexViewportCoordinatorGeneration !== providerGeneration) {
+    w.__OpenCodexViewportCoordinator = createViewportCoordinator();
+    w.__OpenCodexViewportCoordinatorGeneration = providerGeneration;
+  }
+  const viewportCoordinator = w.__OpenCodexViewportCoordinator;
 
-  pluginSystem.registerPlugin({
+  registerPlugin({
     id: "opencodex.mobile-keyboard-optimization",
     name: "Mobile keyboard optimization",
     labelKey: "plugin.mobileKeyboardOptimization.label",
@@ -235,7 +246,6 @@
     builtin: true,
     order: 10,
     activate(context) {
-      const adapterHost = w.__OpenCodexAdapterHost;
       if (
         context.scope !== "renderer" ||
         !document ||
@@ -248,7 +258,6 @@
         return null;
       }
       document.__opencodexMobileKeyboardPluginInstalled = true;
-      w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.plugin.mobile-keyboard");
 
       let focusBlockedUntilMs = 0;
       let lastManualFocusIntentAtMs = 0;
@@ -339,7 +348,7 @@
         if (height > 0) setStyleValue(root, "--codex-visual-viewport-height", `${height}px`);
         setStyleValue(root, "--codex-visual-viewport-offset-top", `${offsetTop}px`);
         setStyleValue(root, "--codex-keyboard-inset-bottom", `${keyboardInset}px`);
-        w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-keyboard");
+        modificationEffects?.primary?.emit();
       };
 
       const keepActiveInputVisible = (snapshot = viewportCoordinator.snapshot()) => {
@@ -384,7 +393,7 @@
         if (!isEnabled() || !isMobile()) return;
         if (event.touches && event.touches.length < 2) return;
         event.preventDefault();
-        w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-keyboard");
+        modificationEffects?.primary?.emit();
       };
 
       const rememberManualFocusIntent = (event) => {
@@ -411,7 +420,7 @@
             property: "focus",
             handle(thisValue, args, proceed) {
               if (shouldSuppressFocus(thisValue)) {
-                w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-keyboard");
+                modificationEffects?.primary?.emit();
                 return;
               }
               return proceed(args);

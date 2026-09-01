@@ -50,6 +50,8 @@ test("shared Electron wrapper shadows immutable Tray and Notification exports", 
   const electronHook = createOfficialElectronModuleHook({ moduleLoader });
   const published = [];
   let delivered = 1;
+  let notificationIntercepts = 0;
+  let trayIntercepts = 0;
 
   installOfficialNotificationHook(electronModule, {
     publishNotification(payload) {
@@ -57,9 +59,11 @@ test("shared Electron wrapper shadows immutable Tray and Notification exports", 
       return delivered;
     },
     registerElectronOverride: electronHook.registerOverride,
+    onIntercept() { notificationIntercepts += 1; },
   });
   installOfficialTrayHook(electronModule, {
     registerElectronOverride: electronHook.registerOverride,
+    onIntercept() { trayIntercepts += 1; },
   });
 
   const wrappedElectron = moduleLoader._load("electron");
@@ -93,6 +97,7 @@ test("shared Electron wrapper shadows immutable Tray and Notification exports", 
   assert.equal(tray.isDestroyed(), true);
 
   const notification = new officialElectron.Notification({ title: "Done", body: "Task completed" });
+  assert.deepEqual([notificationIntercepts, trayIntercepts], [1, 1]);
   notification.show();
   assert.equal(notification.__opencodexGatewayNotification, true);
   assert.equal(published.length, 1);

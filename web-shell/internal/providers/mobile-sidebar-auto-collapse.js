@@ -1,7 +1,13 @@
 (function () {
   const w = window;
+  const modificationEffects = w.__OpenCodexCurrentProviderScope?.effects;
+  const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   const pluginSystem = w.OpenCodexPluginSystem || w.__OpenCodexPluginSystem;
   if (!pluginSystem || typeof pluginSystem.registerPlugin !== "function") return;
+  const registerPlugin = adapterHost?.plugins?.register
+    ? (plugin) => adapterHost.plugins.register(pluginSystem, plugin)
+    : pluginSystem.registerPlugin.bind(pluginSystem);
 
   const AUTO_COLLAPSE_DELAY_MS = 80;
   const SIDEBAR_THREAD_ROW_SELECTOR = "[data-app-action-sidebar-thread-row]";
@@ -147,7 +153,7 @@
     return isSidebarNewConversationButton(button) ? button : null;
   }
 
-  pluginSystem.registerPlugin({
+  registerPlugin({
     id: "opencodex.mobile-sidebar-auto-collapse",
     name: "Mobile sidebar auto collapse",
     labelKey: "plugin.mobileSidebarAutoCollapse.label",
@@ -159,7 +165,6 @@
     builtin: true,
     order: 20,
     activate(context) {
-      const adapterHost = w.__OpenCodexAdapterHost;
       if (
         context.scope !== "renderer" ||
         !document ||
@@ -167,26 +172,25 @@
         !adapterHost?.events?.observe
       ) return null;
       document.__opencodexMobileSidebarPluginInstalled = true;
-      w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.plugin.mobile-sidebar");
 
       let collapseTimer = null;
       const isEnabled = () => context.plugin.isEnabled();
       const isMobile = () => !!context.platform.isMobile();
 
       const collapseAfterSelection = () => {
-        if (collapseTimer) w.clearTimeout(collapseTimer);
-        collapseTimer = w.setTimeout(() => {
+        if (collapseTimer) scheduler.clearTimeout(collapseTimer);
+        collapseTimer = scheduler.setTimeout(() => {
           collapseTimer = null;
           const panel = sidebarPanelElement();
           if (!panel || !visibleElement(panel)) return;
           const toggleButton = findSidebarToggleButton();
           if (toggleButton && typeof toggleButton.click === "function") {
             toggleButton.click();
-            w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-sidebar");
+            modificationEffects?.primary?.emit();
             return;
           }
           postSidebarToggleMessage();
-          w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.plugin.mobile-sidebar");
+          modificationEffects?.primary?.emit();
         }, AUTO_COLLAPSE_DELAY_MS);
       };
 
@@ -227,7 +231,7 @@
       });
 
       return () => {
-        if (collapseTimer) w.clearTimeout(collapseTimer);
+        if (collapseTimer) scheduler.clearTimeout(collapseTimer);
         disposeViewMessage();
         disposeClick();
         disposePointerDown();

@@ -22,6 +22,7 @@
       pending: "待应用",
       applying: "应用中",
       applied: "已应用",
+      "rolled-back": "已回滚",
       failed: "应用失败",
       disabled: "已关闭",
     },
@@ -31,21 +32,29 @@
       "not-required": "无需验证",
       failed: "验证失败",
     },
+    activation: {
+      inactive: "未激活",
+      activating: "激活中",
+      ready: "已激活",
+      failed: "激活失败",
+      disposed: "已销毁",
+    },
     exercise: {
       "not-exercised": "未命中",
       active: "已命中",
+      disabled: "已关闭",
     },
   };
   const helpContent = {
     overall: {
       title: "总状态",
-      description: "综合单个修改点的定位、应用、验证、实际命中和回退结果；分类组只负责展示，不参与总体状态计算。",
+      description: "综合单个修改点的定位、应用、验证、激活、实际命中和回退结果；分类组只负责展示，不参与总体状态计算。",
       statuses: [
         ["healthy", "已命中", "修改点已经就绪，并且对应代码路径在本次运行中至少实际执行过一次。"],
         ["ready", "已就绪", "定位、应用和验证已经完成，但对应路径尚未在本次运行中实际执行；这不代表失败。"],
-        ["pending", "待检测", "定位、应用或验证仍未完成，当前还不能得出最终结论。"],
+        ["pending", "待检测", "定位、应用、验证或激活仍未完成，当前还不能得出最终结论。"],
         ["degraded", "已降级", "修改点正在使用官方行为或其他回退方案；功能仍可继续，但增强能力可能不可用。"],
-        ["unavailable", "不可用", "修改点的定位、应用或验证失败。"],
+        ["unavailable", "不可用", "修改点的定位、应用、验证或激活失败。"],
         ["disabled", "已关闭", "修改点被配置关闭，或不适用于当前平台和运行时。"],
       ],
     },
@@ -77,6 +86,7 @@
         ["pending", "待应用", "已经登记修改点，但还没有开始应用。"],
         ["applying", "应用中", "兼容实现正在安装。"],
         ["applied", "已应用", "兼容实现已经成功安装。"],
+        ["rolled-back", "已回滚", "后续应用、验证或激活失败，已经按相反顺序撤销本次修改。"],
         ["failed", "应用失败", "安装过程抛出错误或未能完成。"],
         ["disabled", "已关闭", "该修改点被配置关闭或不适用于当前环境，不会执行应用。"],
       ],
@@ -91,12 +101,24 @@
         ["failed", "验证失败", "应用后的检查未通过，修改点会被判定为不可用。"],
       ],
     },
+    activation: {
+      title: "激活状态",
+      description: "激活表示 Provider 已启动持续运行能力，例如 Observer、Listener、Hook 层或协议订阅；激活成功只代表已就绪，不等于真实命中。",
+      statuses: [
+        ["inactive", "未激活", "尚未启动持续运行能力。"],
+        ["activating", "激活中", "正在启动 Observer、Listener、Hook 或协议订阅。"],
+        ["ready", "已激活", "持续运行能力已经启动，正在等待真实业务效果。"],
+        ["failed", "激活失败", "持续运行能力启动失败，修改点不可用。"],
+        ["disposed", "已销毁", "页面、运行时或插件生命周期结束后已经释放。"],
+      ],
+    },
     exercise: {
       title: "命中状态",
       description: "命中记录兼容代码路径是否在本次运行中被真实业务调用，并累计调用次数。它用于区分“已经准备好”和“已经实际工作过”。",
       statuses: [
         ["not-exercised", "未命中", "兼容实现可能已经就绪，但当前运行中还没有业务操作走到该路径；这不代表失败。"],
         ["active", "已命中", "对应路径已经实际执行；页面同时显示累计命中次数。"],
+        ["disabled", "已关闭", "修改点被配置关闭或不适用于当前环境，不累计业务命中。"],
       ],
     },
   };
@@ -232,12 +254,56 @@
       point.location?.reason ||
       point.application?.lastError ||
       point.verification?.lastError ||
+      point.activation?.lastError ||
       point.fallback?.reason;
     if (reasonText) {
       const reason = document.createElement("div");
       reason.className = "point-reason";
       reason.textContent = reasonText;
       identity.append(reason);
+    }
+    if (Array.isArray(point.contributions) && point.contributions.length > 0) {
+      const details = document.createElement("details");
+      details.className = "contribution-details";
+      const summary = document.createElement("summary");
+      summary.textContent = `${point.contributions.length} 个 Contribution`;
+      const list = document.createElement("div");
+      list.className = "contribution-list";
+      for (const contribution of point.contributions) {
+        const item = document.createElement("article");
+        item.className = "contribution-item";
+        const title = document.createElement("code");
+        title.textContent = contribution.id;
+        const adapter = document.createElement("span");
+        adapter.textContent = adapterById.get(contribution.adapterId)?.name || contribution.adapterId;
+        const phases = document.createElement("span");
+        phases.className = "contribution-phases";
+        phases.textContent = [
+          phaseLabels.location[contribution.location] || contribution.location,
+          phaseLabels.application[contribution.application] || contribution.application,
+          phaseLabels.verification[contribution.verification] || contribution.verification,
+          phaseLabels.activation[contribution.activation] || contribution.activation,
+          contribution.exercise === "active"
+            ? `已命中 ${Number(contribution.hitCount || 0)} 次`
+            : phaseLabels.exercise[contribution.exercise] || contribution.exercise,
+        ].join(" · ");
+        item.append(title, adapter, phases);
+        if (contribution.reason) {
+          const reason = document.createElement("span");
+          reason.className = "contribution-reason";
+          reason.textContent = contribution.reason;
+          item.append(reason);
+        }
+        if (contribution.fallbackActive) {
+          const fallback = document.createElement("span");
+          fallback.className = "contribution-reason";
+          fallback.textContent = `回退：${contribution.fallbackReason || "使用官方行为"}`;
+          item.append(fallback);
+        }
+        list.append(item);
+      }
+      details.append(summary, list);
+      identity.append(details);
     }
 
     const overall = document.createElement("td");
@@ -253,6 +319,7 @@
       phaseCell("location", point.location?.status),
       phaseCell("application", point.application?.status),
       phaseCell("verification", point.verification?.status),
+      phaseCell("activation", point.activation?.status),
       phaseCell("exercise", point.exercise?.status, hitText)
     );
     return row;
@@ -264,7 +331,7 @@
     row.className = "feature-group-row";
     row.dataset.status = definition.status;
     const cell = document.createElement("td");
-    cell.colSpan = 7;
+    cell.colSpan = 8;
     const section = document.createElement("section");
     section.className = "feature-group";
     const main = document.createElement("div");

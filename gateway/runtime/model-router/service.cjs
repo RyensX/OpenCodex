@@ -59,6 +59,15 @@ function createSmartModelRouterService({
   let catalogRefreshPromise = null;
   let historyCacheGeneration = 0;
   let nextHistoryRevision = 0;
+  const gatewayPoints = compatibilityService?.modificationPoints?.gateway;
+
+  function emitModification(point) {
+    try {
+      compatibilityService?.modifications?.effect(point).emit();
+    } catch {
+      // 命中诊断不能改变 App Server 消息处理结果。
+    }
+  }
 
   function emitRouteStatus(event) {
     for (const listener of Array.from(routeStatusListeners)) {
@@ -168,7 +177,7 @@ function createSmartModelRouterService({
     },
     onAttached() {
       injectionHealth?.reportGateway("app-server-router");
-      compatibilityService?.recordHit("gateway.runtime.app-server.transport");
+      emitModification(gatewayPoints?.appServerTransport);
     },
   });
   virtualModel = createVirtualModelController({
@@ -178,7 +187,7 @@ function createSmartModelRouterService({
     catalog,
     onAutoModelInjected() {
       injectionHealth?.reportGateway("auto-model-catalog");
-      compatibilityService?.recordHit("gateway.runtime.app-server.virtual-model");
+      emitModification(gatewayPoints?.virtualModel);
     },
   });
   classifier = createClassifier({ transport, ...classifierOptions });
@@ -462,7 +471,7 @@ function createSmartModelRouterService({
       route = fallbackRoute();
     }
     rewriteTurn(message, route);
-    compatibilityService?.recordHit("gateway.runtime.app-server.turn-router");
+    emitModification(gatewayPoints?.turnRouter);
     turnRouteStatus.select({
       requestKey: requestKey(message.id),
       threadId,
@@ -546,7 +555,7 @@ function createSmartModelRouterService({
     if (!Array.isArray(data)) return message;
     const filteredData = data.filter((thread) => !transport.isInternalThreadId(thread?.id));
     if (filteredData.length !== data.length) {
-      compatibilityService?.recordHit("gateway.runtime.app-server.internal-session");
+      emitModification(gatewayPoints?.internalSession);
     }
     return {
       ...message,
@@ -561,7 +570,7 @@ function createSmartModelRouterService({
     if (!message?.method || !message.params) return;
     const threadId = String(message.params.threadId || message.params.thread?.id || "");
     if (!threadId || transport.isInternalThreadId(threadId)) return;
-    compatibilityService?.recordHit("gateway.runtime.app-server.history-context");
+    emitModification(gatewayPoints?.historyContext);
     if (message.method === "turn/started") {
       associateCachedTurn(threadId, String(message.params.turn?.id || message.params.turnId || ""));
     } else if (message.method === "item/completed") {

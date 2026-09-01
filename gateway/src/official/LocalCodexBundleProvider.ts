@@ -12,6 +12,8 @@ const { CodexBundleSourceInfoReader } = require("./CodexBundleSourceInfoReader")
 const { OfficialBundleCache, OfficialBundleManifestFactory } = require("./OfficialBundleCache");
 const { AsarWebviewExtractor } = require("./AsarWebviewExtractor");
 const { OfficialRuntimeOptimizer } = require("./OfficialRuntimeOptimizer");
+const { createHostModificationRuntime } = require("../../runtime/modification/production-runtime.cjs");
+const { staticMain: staticMainPoints } = require("../../runtime/modification/point-refs.cjs");
 
 const OFFICIAL_AUTO_SCAN_UPGRADE_ENV = "CODEX_WEB_OFFICIAL_AUTO_SCAN_UPGRADE";
 
@@ -72,6 +74,10 @@ class LocalCodexBundleProvider {
     this.logger = options.logger || new OfficialBundleLogger();
     this.fileSystem = fileSystem;
     this.compatibilityService = options.compatibilityService || null;
+    this.modificationCoordinator = createHostModificationRuntime({
+      host: "static",
+      compatibilityService: this.compatibilityService,
+    }).coordinator;
     this.scanner = new CodexAsarScanner({
       configuredPath: options.appPathEnv || this.env.CODEX_DESKTOP_APP_PATH || "",
       defaultCandidates: options.appCandidates || null,
@@ -199,42 +205,41 @@ class LocalCodexBundleProvider {
     if (!this.compatibilityService || !runtimeOptimizations) return;
     const groups = [
       {
-        ids: ["static.cache.main.native-pet.factory"],
+        points: [staticMainPoints.nativePetFactory],
         state: runtimeOptimizations.nativePetComposition,
       },
       {
-        ids: ["static.cache.main.native-pet.prewarm", "static.cache.main.native-pet.restore"],
+        points: [staticMainPoints.nativePetPrewarm, staticMainPoints.nativePetRestore],
         state: runtimeOptimizations.nativePetPrewarm,
       },
       {
-        ids: ["static.cache.main.macos-push-registration"],
+        points: [staticMainPoints.macosPushRegistration],
         state: runtimeOptimizations.macPushRegistration,
       },
       {
-        ids: [
-          "static.cache.main.git-origin-resolver",
-          "static.cache.main.git-local-prefilter",
-          "static.cache.main.git-background-command",
+        points: [
+          staticMainPoints.gitOriginResolver,
+          staticMainPoints.gitLocalPrefilter,
+          staticMainPoints.gitBackgroundCommand,
         ],
         state: runtimeOptimizations.gitDiscovery,
       },
       {
-        ids: ["static.cache.main.worktree-shell-environment"],
+        points: [staticMainPoints.worktreeShellEnvironment],
         state: runtimeOptimizations.worktreeShellEnvironment,
       },
     ];
     for (const group of groups) {
-      for (const id of group.ids) {
+      for (const point of group.points) {
         try {
+          this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
           if (group.state === "unsupported-layout" || group.state === "not-present" || !group.state) {
-            this.compatibilityService.unsupportedPoint(id, {
-              locatorRevision: "official-main-cache-v1",
-              reason: group.state === "not-present" ? "Official capability is not present" : "Cached locator did not resolve",
-            });
-          } else {
-            this.compatibilityService.installPoint(id, {
-              locatorRevision: "official-main-cache-v1",
-            });
+            this.modificationCoordinator.locationFailure(
+              point,
+              "unsupported",
+              new Error(group.state === "not-present" ? "Official capability is not present" : "Cached locator did not resolve"),
+            );
+            this.modificationCoordinator.useFallback(point, "Official behavior");
           }
         } catch {}
       }

@@ -1,15 +1,31 @@
 (() => {
   const w = window;
-  if (w.OpenCodexRuntimeCompatibility) return;
+  const existing = w.OpenCodexRuntimeCompatibility;
+  if (existing?.apiVersion === 2 && typeof existing.ingestSnapshot === "function") return;
+
   const ENDPOINT = "/api/opencodex/runtime-compatibility/reports";
-  const PHASE_PRIORITY = { installed: 1, active: 2, fallback: 3, failed: 4, disabled: 4 };
+  const MAX_REPORTS_PER_FLUSH = 16;
   const clientId =
     w.crypto?.randomUUID?.() || `browser_page_${Math.random().toString(36).slice(2, 18)}`;
   const queue = new Map();
-  const sentPhases = new Map();
+  const sentSignatures = new Map();
   let flushTimer = null;
   let flushing = false;
   let retryDelayMs = 1000;
+  let generation = 1;
+  let sequence = 0;
+  let observedDocument = null;
+
+  function handleVisibilityChange() {
+    if (document.visibilityState === "visible" && queue.size > 0) scheduleFlush();
+  }
+
+  function bindCurrentDocument() {
+    if (observedDocument === document) return;
+    observedDocument?.removeEventListener?.("visibilitychange", handleVisibilityChange);
+    observedDocument = document;
+    observedDocument.addEventListener("visibilitychange", handleVisibilityChange);
+  }
 
   function safeReason(value) {
     return String(value instanceof Error ? value.message : value || "")
@@ -24,6 +40,49 @@
       .slice(0, 240);
   }
 
+  function normalizedContribution(value) {
+    const source = value && typeof value === "object" ? value : {};
+    return {
+      id: String(source.id || ""),
+      directAdapterId: String(source.directAdapterId || ""),
+      adapterId: String(source.adapterId || ""),
+      adapterChainIds: Array.isArray(source.adapterChainIds)
+        ? source.adapterChainIds.map((item) => String(item || ""))
+        : [],
+      location: String(source.location || "unresolved"),
+      application: String(source.application || "pending"),
+      verification: String(source.verification || "pending"),
+      activation: String(source.activation || "inactive"),
+      exercise: String(source.exercise || "not-exercised"),
+      hitCount: Math.max(0, Math.trunc(Number(source.hitCount) || 0)),
+      fallbackActive: source.fallbackActive === true,
+      fallbackReason: safeReason(source.fallbackReason),
+      reason: safeReason(source.reason),
+    };
+  }
+
+  function normalizedPoint(value) {
+    const source = value && typeof value === "object" ? value : {};
+    return {
+      id: String(source.id || ""),
+      groupId: String(source.groupId || ""),
+      status: String(source.status || "pending"),
+      directAdapterIds: Array.isArray(source.directAdapterIds)
+        ? source.directAdapterIds.map((item) => String(item || ""))
+        : [],
+      adapterChainIds: Array.isArray(source.adapterChainIds)
+        ? source.adapterChainIds.map((item) => String(item || ""))
+        : [],
+      contributions: Array.isArray(source.contributions)
+        ? source.contributions.map(normalizedContribution)
+        : [],
+    };
+  }
+
+  function signature(point) {
+    return JSON.stringify(point);
+  }
+
   function scheduleFlush(delayMs = 80) {
     if (flushTimer || flushing) return;
     flushTimer = setTimeout(() => {
@@ -33,32 +92,35 @@
   }
 
   function restoreFailedReport(report) {
-    const queued = queue.get(report.id);
-    // 请求在途期间可能产生更新状态；只在旧回执优先级更高时覆盖，避免 active 失败后退回 installed。
-    if (queued && (PHASE_PRIORITY[queued.phase] || 0) >= (PHASE_PRIORITY[report.phase] || 0)) return;
-    queue.set(report.id, report);
+    if (report.generation !== generation) return;
+    const queued = queue.get(report.point.id);
+    if (queued && queued.sequence > report.sequence) return;
+    queue.set(report.point.id, report);
   }
 
   async function flush() {
     if (flushing || queue.size === 0) return;
     flushing = true;
     let failed = false;
-    const reports = Array.from(queue.values()).slice(0, 128);
-    for (const report of reports) queue.delete(report.id);
+    const reports = Array.from(queue.values())
+      .sort((left, right) => left.sequence - right.sequence)
+      .slice(0, MAX_REPORTS_PER_FLUSH);
+    for (const report of reports) queue.delete(report.point.id);
     try {
       const response = await fetch(ENDPOINT, {
         method: "POST",
         credentials: "same-origin",
         cache: "no-store",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ clientId, reports }),
+        body: JSON.stringify({ clientId, generation, reports }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      for (const report of reports) sentPhases.set(report.id, report.phase);
+      for (const report of reports) {
+        if (report.generation === generation) sentSignatures.set(report.point.id, report.signature);
+      }
       retryDelayMs = 1000;
     } catch {
       failed = true;
-      // 页面加载早于认证 Cookie 刷新或网络短暂断开时保留最后状态，下一次回执会继续尝试。
       for (const report of reports) restoreFailedReport(report);
     } finally {
       flushing = false;
@@ -71,31 +133,35 @@
     }
   }
 
-  function report(id, phase, reason = "") {
-    const normalizedId = String(id || "");
-    if (!normalizedId.startsWith("web.runtime.")) return false;
-    if (sentPhases.get(normalizedId) === phase && !queue.has(normalizedId)) return true;
-    const queued = queue.get(normalizedId);
-    if (queued && (PHASE_PRIORITY[queued.phase] || 0) > (PHASE_PRIORITY[phase] || 0)) return true;
-    queue.set(normalizedId, {
-      id: normalizedId,
-      phase,
-      ...(reason ? { reason: safeReason(reason) } : {}),
-    });
+  function ingestSnapshot(snapshot) {
+    for (const value of Array.isArray(snapshot?.points) ? snapshot.points : []) {
+      const point = normalizedPoint(value);
+      if (!point.id.startsWith("web.runtime.") || point.contributions.length === 0) continue;
+      const pointSignature = signature(point);
+      if (sentSignatures.get(point.id) === pointSignature && !queue.has(point.id)) continue;
+      queue.set(point.id, {
+        generation,
+        point,
+        sequence: ++sequence,
+        signature: pointSignature,
+      });
+    }
     scheduleFlush();
-    return true;
+  }
+
+  function beginGeneration() {
+    bindCurrentDocument();
+    generation += 1;
+    sequence = 0;
+    queue.clear();
+    sentSignatures.clear();
   }
 
   const api = Object.freeze({
+    apiVersion: 2,
     clientId,
-    installed(id) { return report(id, "installed"); },
-    active(id) { return report(id, "active"); },
-    failed(id, reason) { return report(id, "failed", reason); },
-    fallback(id, reason) { return report(id, "fallback", reason); },
-    disabled(id, reason) { return report(id, "disabled", reason); },
-    reportMany(ids, phase = "installed") {
-      for (const id of ids || []) report(id, phase);
-    },
+    beginGeneration,
+    ingestSnapshot,
     flush,
   });
   Object.defineProperty(w, "OpenCodexRuntimeCompatibility", {
@@ -104,14 +170,6 @@
     writable: false,
     value: api,
   });
-  try {
-    if (sessionStorage.getItem("opencodex_legacy_document_replace_hit") === "1") {
-      sessionStorage.removeItem("opencodex_legacy_document_replace_hit");
-      api.active("web.runtime.shell.legacy-document-replace");
-    }
-  } catch {}
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && queue.size > 0) scheduleFlush();
-  });
+  bindCurrentDocument();
   w.addEventListener("online", () => queue.size > 0 && scheduleFlush());
 })();

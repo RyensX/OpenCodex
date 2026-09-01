@@ -15,6 +15,7 @@ const {
 } = require("../shared/fs-utils.cjs");
 const { logLine } = require("../shared/logging.cjs");
 const { writeGatewayAsar } = require("../shared/runner-asar.cjs");
+const { runner: runnerPoints } = require("../../runtime/modification/point-refs.cjs");
 
 function escapePlistString(value) {
   return String(value || "")
@@ -114,7 +115,7 @@ function signRunnerExecutable(executablePath) {
   });
 }
 
-async function createMacRunner({ layout, runtimeDir, logger, runCompatibility = (_id, operation) => operation() }) {
+async function createMacRunner({ layout, runtimeDir, logger, runCompatibility = (_point, operation) => operation() }) {
   const workDir = path.join(runtimeDir, "official-electron-runner");
   const runnerAppPath = path.join(workDir, RUNNER_APP_NAME);
   const contentsDir = path.join(runnerAppPath, "Contents");
@@ -134,18 +135,18 @@ async function createMacRunner({ layout, runtimeDir, logger, runCompatibility = 
   fs.chmodSync(runnerExecutablePath, 0o755);
   ensureFrameworksCopy({ layout, runnerFrameworksDir, markerPath: frameworksMarkerPath, logger });
   runCompatibility(
-    "static.cache.runner.macos-background-bundle",
+    runnerPoints.macosBackgroundBundle,
     () => {
       fs.writeFileSync(path.join(contentsDir, "Info.plist"), runnerInfoPlist(), "utf8");
       fs.writeFileSync(path.join(contentsDir, "PkgInfo"), "APPL????", "utf8");
     }
   );
   await runCompatibility(
-    "static.cache.runner.gateway-asar",
+    runnerPoints.gatewayAsar,
     () => writeGatewayAsar({ runnerResourcesDir, workDir })
   );
   runCompatibility(
-    "static.cache.runner.macos-entry-signature",
+    runnerPoints.macosEntrySignature,
     () => signRunnerExecutable(runnerExecutablePath)
   );
 
@@ -154,9 +155,9 @@ async function createMacRunner({ layout, runtimeDir, logger, runCompatibility = 
 
   return {
     compatibilityPoints: [
-      "static.cache.runner.macos-background-bundle",
-      "static.cache.runner.macos-entry-signature",
-      "static.cache.runner.gateway-asar",
+      runnerPoints.macosBackgroundBundle.id,
+      runnerPoints.macosEntrySignature.id,
+      runnerPoints.gatewayAsar.id,
     ],
     executablePath: runnerExecutablePath,
     runnerAppPath,

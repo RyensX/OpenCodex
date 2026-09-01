@@ -1,9 +1,13 @@
 (function () {
   const w = window;
-  if (w.__codexRemoteFileActionsInstalled) return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const providerGeneration = modificationScope?.generation || document;
+  if (w.__codexRemoteFileActionsInstalled === providerGeneration) return;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
-  w.__codexRemoteFileActionsInstalled = true;
+  w.__codexRemoteFileActionsInstalled = providerGeneration;
 
   const DOWNLOAD_PATH_API = "/api/local-file/download-path";
   const FILE_TREE_MENU_SESSION_TTL_MS = 2500;
@@ -433,7 +437,7 @@
     state.lastMenuSessionClearReason = reason || "";
     disposePendingMenuObservation?.();
     disposePendingMenuObservation = null;
-    if (pendingMenuObserverExpiryTimer) w.clearTimeout(pendingMenuObserverExpiryTimer);
+    if (pendingMenuObserverExpiryTimer) scheduler.clearTimeout(pendingMenuObserverExpiryTimer);
     pendingMenuObserverExpiryTimer = 0;
   }
 
@@ -511,7 +515,7 @@
     anchor.style.display = "none";
     (document.body || document.documentElement).appendChild(anchor);
     anchor.click();
-    w.setTimeout(() => {
+    scheduler.setTimeout(() => {
       try {
         anchor.remove();
       } catch {}
@@ -692,7 +696,7 @@
       return false;
     }
     content.appendChild(createStandalonePathDownloadMenuItem(session.context));
-    w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.remote-file-menu");
+    modificationEffects?.primary?.emit();
     state.injectedPathDownloadItems += 1;
     clearPendingPathMenuSession("injected");
     return true;
@@ -725,9 +729,9 @@
   function schedulePendingMenuScans() {
     if (!freshPendingPathMenuSession()) return;
     const scanDocument = () => scanMenuItems(document);
-    if (typeof w.requestAnimationFrame === "function") w.requestAnimationFrame(scanDocument);
-    w.setTimeout(scanDocument, 50);
-    w.setTimeout(scanDocument, 150);
+    if (typeof w.requestAnimationFrame === "function") scheduler.requestAnimationFrame(scanDocument);
+    scheduler.setTimeout(scanDocument, 50);
+    scheduler.setTimeout(scanDocument, 150);
   }
 
   function handlePendingMenuMutations(mutations) {
@@ -753,9 +757,9 @@
       options: { characterData: true, childList: true, subtree: true },
       callback: handlePendingMenuMutations,
     });
-    if (pendingMenuObserverExpiryTimer) w.clearTimeout(pendingMenuObserverExpiryTimer);
+    if (pendingMenuObserverExpiryTimer) scheduler.clearTimeout(pendingMenuObserverExpiryTimer);
     // 右键菜单只会紧随 contextmenu 挂载；超时后主动停观察，不能让一次未命中的菜单留下永久监听。
-    pendingMenuObserverExpiryTimer = w.setTimeout(() => {
+    pendingMenuObserverExpiryTimer = scheduler.setTimeout(() => {
       if (pendingPathMenuSession?.id === session.id) clearPendingPathMenuSession("expired");
     }, FILE_TREE_MENU_SESSION_TTL_MS);
   }

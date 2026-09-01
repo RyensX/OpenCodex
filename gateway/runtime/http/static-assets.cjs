@@ -21,6 +21,7 @@ const {
 } = require("../core/plugin-assets.cjs");
 const { gzipIfUseful, send } = require("./http-utils.cjs");
 const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
+const { createHostModificationRuntime } = require("../modification/production-runtime.cjs");
 
 const configuredPatchedAssetCacheMaxBytes = Number(
   process.env.CODEX_WEB_PATCHED_ASSET_CACHE_MAX_BYTES || 96 * 1024 * 1024
@@ -44,6 +45,7 @@ const LATE_STARTUP_MODULE_PREFIXES = [
 const OPENCODEX_PLUGIN_LOADER_PATH = "/opencodex-plugin-loader.js";
 const OPENCODEX_PLUGIN_SYSTEM_PATH = "/opencodex-plugin-system.js";
 const OPENCODEX_MODIFICATION_RUNTIME_PATH = "/opencodex-modification-runtime.js";
+const OPENCODEX_MODIFICATION_ACTIVATE_PATH = "/opencodex-modification-activate.js";
 const OPENCODEX_GATEWAY_PLUGIN_SWITCHES_PATH = "/opencodex-gateway-plugin-switches.js";
 const CODEX_SMART_MODEL_ROUTER_SETTINGS_CSS_PATH = "/codex-smart-model-router-settings.css";
 const CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH = "/codex-smart-scheduling-injection-health.js";
@@ -91,6 +93,25 @@ const BUILTIN_PROVIDER_FILES = new Map([
   ["/opencodex/internal/providers/mobile-sidebar-auto-collapse.js", path.join(INTERNAL_PROVIDER_DIR, "mobile-sidebar-auto-collapse.js")],
   ["/opencodex/internal/providers/token-usage-inline.js", path.join(INTERNAL_PROVIDER_DIR, "token-usage-inline.js")],
   ["/opencodex/internal/providers/project-recent-sort.js", path.join(INTERNAL_PROVIDER_DIR, "project-recent-sort.js")],
+]);
+const BROWSER_PROVIDER_KEY_BY_FILE = new Map([
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-sidebar-preview.js"), "sidebar-preview"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-offscreen-animation-guard.js"), "offscreen-animation"],
+  [path.join(INTERNAL_PROVIDER_DIR, "mobile-keyboard-optimization.js"), "mobile-keyboard"],
+  [path.join(INTERNAL_PROVIDER_DIR, "ios-fix.js"), "ios-layout"],
+  [path.join(INTERNAL_PROVIDER_DIR, "mobile-sidebar-auto-collapse.js"), "mobile-sidebar"],
+  [path.join(INTERNAL_PROVIDER_DIR, "token-usage-inline.js"), "token-usage-inline"],
+  [path.join(INTERNAL_PROVIDER_DIR, "project-recent-sort.js"), "project-recent-sort"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-smart-scheduling-injection-health.js"), "smart-settings"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-settings.js"), "smart-settings"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-composer.js"), "smart-composer"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-smart-scheduling-summary.js"), "smart-summary"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-token-usage-capability.js"), "token-usage-capability"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-window-controls-overlay.js"), "window-controls"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js"), "bridge"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-remote-file-actions.js"), "remote-file-actions"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-workspace-root-picker.js"), "workspace-root-picker"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-tooltip-dismiss-guard.js"), "tooltip-dismiss"],
 ]);
 const OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID = "artifactTab.preview.openInFolder";
 const OPENCODEX_DOWNLOAD_FILE_MESSAGE_ID = "web.remoteFile.downloadFile";
@@ -227,6 +248,7 @@ const WEB_SHELL_STATIC_FILES = new Map([
   [RUNTIME_COMPATIBILITY_SCRIPT_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.js")],
   [RUNTIME_COMPATIBILITY_STYLE_PATH, path.join(WEB_SHELL_DIR, "runtime-compatibility.css")],
   [OPENCODEX_MODIFICATION_RUNTIME_PATH, OPENCODEX_MODIFICATION_RUNTIME_FILE],
+  [OPENCODEX_MODIFICATION_ACTIVATE_PATH, path.join(WEB_SHELL_DIR, "opencodex-modification-activate.js")],
   ...BUILTIN_PROVIDER_FILES,
   [OPENCODEX_PLUGIN_SYSTEM_PATH, path.join(WEB_SHELL_DIR, "opencodex-plugin-system.js")],
   [
@@ -274,6 +296,12 @@ function createStaticAssetService({
   getOfficialBundle,
   patchedAssetCacheMaxBytes = PATCHED_ASSET_CACHE_MAX_BYTES,
 }) {
+  const staticModificationRuntime = createHostModificationRuntime({
+    host: "static",
+    compatibilityService,
+  });
+  const staticPoints = staticModificationRuntime.points.staticRenderer;
+  const modificationCoordinator = staticModificationRuntime.coordinator;
   const effectivePatchedAssetCacheMaxBytes = Math.max(
     1,
     Number.isFinite(Number(patchedAssetCacheMaxBytes))
@@ -308,107 +336,72 @@ function createStaticAssetService({
     ])
   );
 
-  function compatibilityCapability(id, implementation) {
-    if (!compatibilityService) return implementation;
+  function hitCompatibilityPoint(point) {
     try {
-      return compatibilityService.bindCapability(id, implementation, {
-        locatorRevision: "renderer-cache-v1",
-        // 骨架自身不可用时仍执行原转换函数，保证接入前后的输出字节完全一致。
-        fallback: implementation,
-        verify: () => typeof implementation === "function",
-      });
-    } catch {
-      return implementation;
-    }
-  }
-
-  function installCompatibilityPoint(id) {
-    try {
-      compatibilityService?.installPoint(id, {
-        locatorRevision: "renderer-cache-v1",
-      });
-    } catch {}
-  }
-
-  function hitCompatibilityPoint(id) {
-    try {
-      compatibilityService?.recordHit(id);
+      modificationCoordinator.effect(point).emit();
     } catch {
       // 命中统计失败不影响 HTML 或资源响应。
     }
   }
 
-  function failCompatibilityPoint(id, reason) {
-    if (failedCompatibilityPoints.has(id)) return;
-    failedCompatibilityPoints.add(id);
+  function failCompatibilityPoint(point, reason) {
+    if (failedCompatibilityPoints.has(point)) return;
+    failedCompatibilityPoints.add(point);
     try {
-      compatibilityService?.failPoint(id, new Error(reason), {
-        locatorRevision: "renderer-cache-v1",
-        fallbackReason: "Official renderer behavior",
-      });
+      modificationCoordinator.locationFailure(point, "failed", new Error(reason));
+      modificationCoordinator.useFallback(point, "Official renderer behavior");
     } catch {}
   }
 
-  const patchHtmlLangCompatible = compatibilityCapability(
-    "static.cache.renderer.html.lang",
-    patchHtmlLang
-  );
-  const patchHtmlViewportCompatible = compatibilityCapability(
-    "static.cache.renderer.html.viewport",
-    patchHtmlViewport
-  );
-  const patchHtmlIconsCompatible = compatibilityCapability(
-    "static.cache.renderer.html.icon-pwa",
-    patchHtmlIcons
-  );
-  const patchHtmlAssetPathsCompatible = compatibilityCapability(
-    "static.cache.renderer.html.asset-path-map",
-    patchHtmlAssetPaths
-  );
-  const patchHtmlFontPreloadsCompatible = compatibilityCapability(
-    "static.cache.renderer.html.font-preload",
-    patchHtmlFontPreloads
-  );
-  const patchOfficialAssetUrlsCompatible = compatibilityCapability(
-    "static.cache.renderer.asset-namespace",
-    patchOfficialAssetUrls
-  );
-  const patchOfficialCspUnsafeEvalCompatible = compatibilityCapability(
-    "static.cache.renderer.csp.unsafe-eval",
-    patchOfficialCspUnsafeEval
-  );
-  const patchOfficialCspManifestSrcCompatible = compatibilityCapability(
-    "static.cache.renderer.csp.manifest-src",
-    patchOfficialCspManifestSrc
-  );
-  const patchHistorySignalsCompatible = compatibilityCapability(
-    "static.cache.renderer.history-turn-signals",
-    patchAppServerManagerSignalsChunk
-  );
-  const patchApplicationMenuCompatible = compatibilityCapability(
-    "static.cache.renderer.application-menu",
-    patchApplicationMenuCapabilityCheck
-  );
-  const patchRequestSchedulingCompatible = compatibilityCapability(
-    "static.cache.renderer.app-server-request-scheduling",
-    patchAppServerRequestScheduling
-  );
-  const patchPluginImageCompatible = compatibilityCapability(
-    "static.cache.renderer.plugin-image-lazy-load",
-    patchPluginSummaryImageInlining
-  );
-  const patchOpenInFolderLocaleCompatible = compatibilityCapability(
-    "static.cache.renderer.open-in-folder-locale",
-    patchOpenInFolderLocaleMessage
-  );
-  for (const id of [
-    "static.cache.renderer.html.runtime-bootstrap",
-    "static.cache.renderer.html.startup-preload",
-    "static.cache.renderer.html.sidebar-preview",
-    "static.cache.renderer.html.loading-animation",
-  ]) {
-    installCompatibilityPoint(id);
+  const dynamicHtmlPoints = [
+    staticPoints.runtimeBootstrap,
+    staticPoints.startupPreload,
+    staticPoints.sidebarPreview,
+    staticPoints.loadingAnimation,
+  ];
+  const staticCapabilityEntries = [
+    [staticPoints.htmlLang, patchHtmlLang],
+    [staticPoints.htmlViewport, patchHtmlViewport],
+    [staticPoints.iconPwa, patchHtmlIcons],
+    [staticPoints.assetPathMap, patchHtmlAssetPaths],
+    [staticPoints.fontPreload, patchHtmlFontPreloads],
+    [staticPoints.assetNamespace, patchOfficialAssetUrls],
+    [staticPoints.cspUnsafeEval, patchOfficialCspUnsafeEval],
+    [staticPoints.cspManifestSrc, patchOfficialCspManifestSrc],
+    [staticPoints.historyTurnSignals, patchAppServerManagerSignalsChunk],
+    [staticPoints.applicationMenu, patchApplicationMenuCapabilityCheck],
+    [staticPoints.appServerRequestScheduling, patchAppServerRequestScheduling],
+    [staticPoints.pluginImageLazyLoad, patchPluginSummaryImageInlining],
+    [staticPoints.openInFolderLocale, patchOpenInFolderLocaleMessage],
+    ...dynamicHtmlPoints.map((point) => [point, () => undefined]),
+  ];
+  let staticCapabilities = new Map(staticCapabilityEntries);
+  try {
+    staticCapabilities = modificationCoordinator.bindBatch(
+      staticCapabilityEntries.map(([point, operation]) => ({
+        point,
+        operation,
+        // 字符串补丁只有真实改变输出时才算命中；仅执行定位函数仍保持“已就绪”。
+        hitWhen: (args, result) => args.length > 0 && result !== args[0],
+      })),
+    );
+  } catch {
+    // Kernel 自身不可用时仍执行原转换函数，保证接入前后的输出字节完全一致。
   }
+  const capabilityFor = (point) => staticCapabilities.get(point);
+  const patchHtmlLangCompatible = capabilityFor(staticPoints.htmlLang);
+  const patchHtmlViewportCompatible = capabilityFor(staticPoints.htmlViewport);
+  const patchHtmlIconsCompatible = capabilityFor(staticPoints.iconPwa);
+  const patchHtmlAssetPathsCompatible = capabilityFor(staticPoints.assetPathMap);
+  const patchHtmlFontPreloadsCompatible = capabilityFor(staticPoints.fontPreload);
+  const patchOfficialAssetUrlsCompatible = capabilityFor(staticPoints.assetNamespace);
+  const patchOfficialCspUnsafeEvalCompatible = capabilityFor(staticPoints.cspUnsafeEval);
+  const patchOfficialCspManifestSrcCompatible = capabilityFor(staticPoints.cspManifestSrc);
+  const patchHistorySignalsCompatible = capabilityFor(staticPoints.historyTurnSignals);
+  const patchApplicationMenuCompatible = capabilityFor(staticPoints.applicationMenu);
+  const patchRequestSchedulingCompatible = capabilityFor(staticPoints.appServerRequestScheduling);
+  const patchPluginImageCompatible = capabilityFor(staticPoints.pluginImageLazyLoad);
+  const patchOpenInFolderLocaleCompatible = capabilityFor(staticPoints.openInFolderLocale);
 
   function matchedPatchedOfficialPrefix(reqPath) {
     return patchedOfficialPrefixes.find((prefix) => reqPath.startsWith(prefix)) || "";
@@ -700,6 +693,7 @@ function createStaticAssetService({
         CODEX_REMOTE_FILE_ACTIONS_PATH,
         CODEX_WORKSPACE_ROOT_PICKER_PATH,
         CODEX_TOOLTIP_DISMISS_GUARD_PATH,
+        OPENCODEX_MODIFICATION_ACTIVATE_PATH,
       ].map((reqPath) => WEB_SHELL_STATIC_FILES.get(reqPath)),
     };
   }
@@ -724,11 +718,21 @@ function createStaticAssetService({
   function createRuntimeBootstrapScript(entries, groups) {
     // 每段脚本都用分号隔开，避免前一文件的尾部表达式与后一文件 IIFE 发生自动分号插入歧义。
     return [
-      ...groups.beforePlugins.map(readText),
+      ...groups.beforePlugins.map(readRuntimeBootstrapFile),
       // 聚合启动路径也必须使用 v2 ESM loader；不能把 export 语法当普通脚本拼进 IIFE。
       createPluginLoaderScript(entries),
-      ...groups.afterPlugins.map(readText),
+      ...groups.afterPlugins.map(readRuntimeBootstrapFile),
     ].join("\n;\n");
+  }
+
+  function wrapBrowserProviderSource(file, source) {
+    const providerKey = BROWSER_PROVIDER_KEY_BY_FILE.get(file);
+    if (!providerKey) return source;
+    return `window.__OpenCodexAdapterHost.providers.register(${JSON.stringify(providerKey)},()=>{\n${source}\n});`;
+  }
+
+  function readRuntimeBootstrapFile(file) {
+    return wrapBrowserProviderSource(file, readText(file));
   }
 
   function runtimeBootstrapEntry() {
@@ -914,8 +918,8 @@ function createStaticAssetService({
     const startupPreloads = startupAssetPreloads(html);
     const lateModuleHrefs = lateStartupModuleHrefs(i18n.locale);
     const previewMarkup = sidebarPreviewMarkup(options.sidebarPreview, i18n.locale);
-    if (startupPreloads) hitCompatibilityPoint("static.cache.renderer.html.startup-preload");
-    if (previewMarkup) hitCompatibilityPoint("static.cache.renderer.html.sidebar-preview");
+    if (startupPreloads) hitCompatibilityPoint(staticPoints.startupPreload);
+    if (previewMarkup) hitCompatibilityPoint(staticPoints.sidebarPreview);
     const useRuntimeBundle = canBundleRuntimeBootstrap();
     const runtimeScripts = useRuntimeBundle
       ? [
@@ -943,6 +947,7 @@ function createStaticAssetService({
           `<script src="${CODEX_REMOTE_FILE_ACTIONS_PATH}"></script>`,
           `<script src="${CODEX_WORKSPACE_ROOT_PICKER_PATH}"></script>`,
           `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
+          `<script src="${OPENCODEX_MODIFICATION_ACTIVATE_PATH}"></script>`,
         ];
     // manifest 在 Cloudflare Access 等前置认证后面也必须带同源凭据，否则 Chrome 可能拿不到受保护的 manifest。
     const base = [
@@ -968,8 +973,8 @@ function createStaticAssetService({
     ].join("\n    ");
     if (/<head[^>]*>/i.test(html)) {
       html = html.replace(/<head([^>]*)>/i, `<head$1>\n    ${base}`);
-      hitCompatibilityPoint("static.cache.renderer.html.runtime-bootstrap");
-      hitCompatibilityPoint("static.cache.renderer.html.loading-animation");
+      hitCompatibilityPoint(staticPoints.runtimeBootstrap);
+      hitCompatibilityPoint(staticPoints.loadingAnimation);
     }
     if (previewMarkup && /<body[^>]*>/i.test(html)) {
       // aside 与 #root 保持相邻，加载期 CSS 才能把官方 Logo 居中到主内容区域。
@@ -1263,7 +1268,7 @@ ${pluginGatewayStateBootstrapScript()}
       if (!hasWarnedHistoryPatchMiss) {
         hasWarnedHistoryPatchMiss = true;
         failCompatibilityPoint(
-          "static.cache.renderer.history-turn-signals",
+          staticPoints.historyTurnSignals,
           "Official history turn layout did not match"
         );
         console.warn("[gateway] app-server-manager history patch skipped: current bundle shape did not match");
@@ -1369,7 +1374,7 @@ ${pluginGatewayStateBootstrapScript()}
     ) {
       hasWarnedApplicationMenuPatchMiss = true;
       failCompatibilityPoint(
-        "static.cache.renderer.application-menu",
+        staticPoints.applicationMenu,
         "Official application menu layout did not match"
       );
       console.warn("[gateway] application menu patch skipped: current bundle shape did not match");
@@ -1389,7 +1394,7 @@ ${pluginGatewayStateBootstrapScript()}
     const backgroundMatch = source.match(APP_SERVER_BACKGROUND_METHODS_RE);
     if (!hasFields || !sendMatch || !backgroundMatch) {
       failCompatibilityPoint(
-        "static.cache.renderer.app-server-request-scheduling",
+        staticPoints.appServerRequestScheduling,
         "Official App Server request layout did not match"
       );
       console.warn("[gateway] app-server request scheduling patch skipped: current bundle shape did not match");
@@ -1445,7 +1450,7 @@ ${pluginGatewayStateBootstrapScript()}
     ) {
       hasWarnedPluginSummaryImagePatchMiss = true;
       failCompatibilityPoint(
-        "static.cache.renderer.plugin-image-lazy-load",
+        staticPoints.pluginImageLazyLoad,
         "Official plugin image layout did not match"
       );
       console.warn("[gateway] plugin summary image lazy-load patch skipped: current bundle shape did not match");
@@ -1596,7 +1601,11 @@ ${pluginGatewayStateBootstrapScript()}
       );
     }
 
-    const sourceData = fs.readFileSync(file);
+    const rawSourceData = fs.readFileSync(file);
+    const providerKey = BROWSER_PROVIDER_KEY_BY_FILE.get(file);
+    const sourceData = providerKey
+      ? Buffer.from(wrapBrowserProviderSource(file, rawSourceData.toString("utf8")), "utf8")
+      : rawSourceData;
     const data = patchOfficialAsset(reqPath, sourceData, req);
     const response = gzipIfUseful(
       req,

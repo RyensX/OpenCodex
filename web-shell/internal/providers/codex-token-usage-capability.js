@@ -1,6 +1,14 @@
 (function () {
   const w = window;
-  if (typeof w.__OpenCodexCreateTokenUsageCapability === "function") return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const scheduler = w.__OpenCodexAdapterHost?.scheduler?.capture?.() || w;
+  const providerGeneration = modificationScope?.generation || (typeof document !== "undefined" ? document : w);
+  if (
+    w.__OpenCodexTokenUsageCapabilityGeneration === providerGeneration &&
+    typeof w.__OpenCodexCreateTokenUsageCapability === "function"
+  ) return;
+  w.__OpenCodexTokenUsageCapabilityGeneration = providerGeneration;
 
   w.__OpenCodexCreateTokenUsageCapability = function createOpenCodexTokenUsageCapability(options = {}) {
     // 这里集中管理 token 用量数据的惰性查询、被动解析和有界缓存，避免 bridge polyfill 继续膨胀。
@@ -265,7 +273,7 @@
       pruneTokenUsageThreadCache(value.threadId);
       pruneTokenUsageCache();
       // 无论数据来自实时协议还是 session API，只有成功归一化并缓存后才算实际命中。
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.protocol.token-usage");
+      modificationEffects?.primary?.emit();
       for (const subscriber of Array.from(tokenUsageState.subscribers)) {
         try {
           subscriber(value);
@@ -700,8 +708,11 @@
         lastFetchUsageFound: null,
       });
       const controller = typeof AbortController === "function" ? new AbortController() : null;
+      const releaseController = controller && modificationScope?.own
+        ? modificationScope.own(() => controller.abort())
+        : null;
       // 未知 threadId 的冷查询可能需要索引 sessions；后端命中缓存后同屏后续请求会快速返回。
-      const timer = controller ? w.setTimeout(() => controller.abort(), TOKEN_USAGE_FETCH_TIMEOUT_MS) : null;
+      const timer = controller ? scheduler.setTimeout(() => controller.abort(), TOKEN_USAGE_FETCH_TIMEOUT_MS) : null;
       try {
         const response = await fetch(url.toString(), {
           cache: "no-store",
@@ -728,7 +739,8 @@
         });
         return null;
       } finally {
-        if (timer) w.clearTimeout(timer);
+        if (timer) scheduler.clearTimeout(timer);
+        releaseController?.();
       }
     }
 
@@ -805,5 +817,4 @@
 
     return tokenUsageCapability;
   };
-  w.OpenCodexRuntimeCompatibility?.installed?.("web.runtime.protocol.token-usage");
 })();

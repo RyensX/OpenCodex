@@ -2,7 +2,7 @@ const { isRequestBodyTooLargeError, readBody, sendJson } = require("./http-utils
 
 const RUNTIME_COMPATIBILITY_API_PATH = "/api/opencodex/runtime-compatibility";
 const RUNTIME_COMPATIBILITY_REPORT_PATH = `${RUNTIME_COMPATIBILITY_API_PATH}/reports`;
-const RUNTIME_COMPATIBILITY_BODY_MAX_BYTES = 32 * 1024;
+const RUNTIME_COMPATIBILITY_BODY_MAX_BYTES = 128 * 1024;
 const MAX_BROWSER_REPORTS_PER_REQUEST = 128;
 
 function sendRuntimeCompatibilitySnapshot(res, compatibilityService) {
@@ -44,28 +44,23 @@ async function handleBrowserReports(req, res, compatibilityService) {
     sendJson(res, 400, { ok: false, error: "Invalid compatibility reports" }, { "cache-control": "no-store" });
     return;
   }
-  if (
-    reports.some((report) => !compatibilityService.canAcceptBrowserReport({
-      clientId: parsed.clientId,
-      id: report?.id,
-      phase: report?.phase,
-    }))
-  ) {
+  const acceptedShape = reports.every((report) => compatibilityService.canAcceptBrowserKernelReport({
+    clientId: parsed.clientId,
+    generation: parsed.generation,
+    report,
+  }));
+  if (!acceptedShape) {
     sendJson(res, 400, { ok: false, error: "One or more compatibility reports were rejected" }, { "cache-control": "no-store" });
     return;
   }
   let accepted = 0;
   for (const report of reports) {
-    if (
-      compatibilityService.browserReport({
-        clientId: parsed.clientId,
-        id: report?.id,
-        phase: report?.phase,
-        reason: report?.reason,
-      })
-    ) {
-      accepted += 1;
-    }
+    const didAccept = compatibilityService.browserKernelReport({
+      clientId: parsed.clientId,
+      generation: parsed.generation,
+      report,
+    });
+    if (didAccept) accepted += 1;
   }
   if (accepted !== reports.length) {
     sendJson(res, 400, { ok: false, error: "One or more compatibility reports were rejected" }, { "cache-control": "no-store" });

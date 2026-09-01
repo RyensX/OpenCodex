@@ -1,9 +1,13 @@
 (function () {
   const w = window;
-  if (w.__codexBridgePolyfillInstalled) return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const providerGeneration = modificationScope?.generation || document;
+  if (w.__codexBridgePolyfillInstalled === providerGeneration) return;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe || !adapterHost?.hooks?.around || !adapterHost?.protocol?.publish) return;
-  w.__codexBridgePolyfillInstalled = true;
+  w.__codexBridgePolyfillInstalled = providerGeneration;
   const cfg = (w.__CODEX_WEB_CONFIG__ =
     w.__CODEX_WEB_CONFIG__ || {
       gatewayBaseUrl: location.origin,
@@ -88,7 +92,7 @@
   w.__opencodexPluginImageUrl = localPluginImageUrl;
 
   function installLocaleOverride() {
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.platform.desktop-globals");
+    modificationEffects?.desktopGlobals?.emit();
     try {
       document.documentElement.lang = OPENCODEX_LOCALE;
     } catch {}
@@ -313,7 +317,7 @@
     /** 把一个自定义 webview 元素包装成 iframe-backed shim。 */
     function installOnElement(element) {
       if (!element || element.__codexWebviewShimElement) return element;
-      globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.webview-shim");
+      modificationEffects?.webviewShim?.emit();
       element.__codexWebviewShimElement = true;
       element.setAttribute("data-codex-webview-shim", "true");
       ensureWebviewStyles();
@@ -440,7 +444,7 @@
     artifacts: true,
   };
   const clientId =
-    w.OpenCodexRuntimeCompatibility?.clientId ||
+    w.__OpenCodexCurrentProviderScope?.clientId ||
     w.crypto?.randomUUID?.() ||
     `web-client-${Math.random().toString(36).slice(2)}`;
   let ws = null;
@@ -547,7 +551,7 @@
 
   function scheduleClientDiagnosticFlush() {
     if (clientDiagnosticFlushTimer) return;
-    clientDiagnosticFlushTimer = w.setTimeout(flushClientDiagnostics, CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS);
+    clientDiagnosticFlushTimer = scheduler.setTimeout(flushClientDiagnostics, CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS);
   }
 
   function clientDiagnostic(event, data) {
@@ -569,7 +573,7 @@
       clientDiagnosticQueue.push({ event, data: diagnosticData });
       if (clientDiagnosticQueue.length >= CLIENT_DIAGNOSTIC_MAX_BATCH) {
         if (clientDiagnosticFlushTimer) {
-          w.clearTimeout(clientDiagnosticFlushTimer);
+          scheduler.clearTimeout(clientDiagnosticFlushTimer);
           clientDiagnosticFlushTimer = null;
         }
         flushClientDiagnostics();
@@ -818,7 +822,7 @@
     if (!inFlight) return 0;
     connectorLogoInFlight.delete(cacheKey);
     if (connectorLogoInFlight.size === 0 && connectorLogoSweepTimer) {
-      w.clearTimeout(connectorLogoSweepTimer);
+      scheduler.clearTimeout(connectorLogoSweepTimer);
       connectorLogoSweepTimer = null;
     }
     let delivered = 0;
@@ -835,7 +839,7 @@
     for (const inFlight of connectorLogoInFlight.values()) {
       nextExpiryAtMs = Math.min(nextExpiryAtMs, inFlight.startedAtMs + CONNECTOR_LOGO_RESPONSE_TIMEOUT_MS);
     }
-    connectorLogoSweepTimer = w.setTimeout(() => {
+    connectorLogoSweepTimer = scheduler.setTimeout(() => {
       connectorLogoSweepTimer = null;
       const now = Date.now();
       for (const [cacheKey, inFlight] of Array.from(connectorLogoInFlight.entries())) {
@@ -876,7 +880,7 @@
     if (!requestId) return false;
     const cacheKey = connectorLogoRequestCacheKeys.get(requestId);
     if (!cacheKey) return false;
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.protocol.connector-logo");
+    modificationEffects?.connectorLogo?.emit();
     connectorLogoRequestCacheKeys.delete(requestId);
 
     const waiterCount = connectorLogoInFlight.get(cacheKey)?.waitingRequestIds.length || 0;
@@ -1136,7 +1140,7 @@
   }
 
   function createGatewayAuthLogoutMenuItem(logoutItem) {
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.gateway-auth-menu");
+    modificationEffects?.gatewayAuthMenu?.emit();
     const officialLabel = officialLogoutLabelFromElement(logoutItem) || "退出登录";
     const item = logoutItem.cloneNode(true);
     item.dataset.codexWebGatewayAuthLogout = "true";
@@ -1196,7 +1200,7 @@
     const stopMenuObservation = () => {
       disposeMenuObservation?.();
       disposeMenuObservation = null;
-      if (menuObserverExpiryTimer) w.clearTimeout(menuObserverExpiryTimer);
+      if (menuObserverExpiryTimer) scheduler.clearTimeout(menuObserverExpiryTimer);
       menuObserverExpiryTimer = 0;
     };
     const scheduleScan = (root = document) => {
@@ -1218,9 +1222,9 @@
         if (injected > 0) stopMenuObservation();
       };
       if (typeof w.requestAnimationFrame === "function") {
-        w.requestAnimationFrame(run);
+        scheduler.requestAnimationFrame(run);
       } else {
-        w.setTimeout(run, 0);
+        scheduler.setTimeout(run, 0);
       }
     };
     const handleMenuMutations = (mutations) => {
@@ -1255,9 +1259,9 @@
         options: { childList: true, subtree: true },
         callback: handleMenuMutations,
       });
-      if (menuObserverExpiryTimer) w.clearTimeout(menuObserverExpiryTimer);
+      if (menuObserverExpiryTimer) scheduler.clearTimeout(menuObserverExpiryTimer);
       // 菜单通常在同一帧挂载；有限会话兼容慢设备，同时不让观察器进入正文流式热路径。
-      menuObserverExpiryTimer = w.setTimeout(stopMenuObservation, MENU_SESSION_TTL_MS);
+      menuObserverExpiryTimer = scheduler.setTimeout(stopMenuObservation, MENU_SESSION_TTL_MS);
     };
     const eventMayOpenMenu = (event) => {
       const target = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
@@ -1536,7 +1540,7 @@
   function removeBridgeToast(toast) {
     if (!toast) return;
     toast.dataset.state = "exiting";
-    w.setTimeout(() => {
+    scheduler.setTimeout(() => {
       try {
         toast.remove();
       } catch {}
@@ -1549,7 +1553,7 @@
       // 页面切换期间 body 可能短暂不存在；指数退避并限制次数，避免 0ms 重试形成主线程热循环。
       if (retryCount >= BRIDGE_TOAST_BODY_RETRY_MAX) return;
       const retryDelayMs = Math.min(BRIDGE_TOAST_BODY_RETRY_BASE_MS * 2 ** retryCount, 500);
-      w.setTimeout(() => renderBridgeErrorToast(payload, retryCount + 1), retryDelayMs);
+      scheduler.setTimeout(() => renderBridgeErrorToast(payload, retryCount + 1), retryDelayMs);
       return;
     }
     const root = ensureBridgeToastRoot();
@@ -1604,7 +1608,7 @@
 
     toast.appendChild(alert);
     root.appendChild(toast);
-    w.setTimeout(() => removeBridgeToast(toast), 8000);
+    scheduler.setTimeout(() => removeBridgeToast(toast), 8000);
   }
 
   function showBridgeToast(payload) {
@@ -1643,7 +1647,7 @@
     const picker = w.OpenCodexWorkspaceRootPicker;
     if (!picker || typeof picker.handleMessage !== "function") return null;
     const result = picker.handleMessage(payload);
-    if (result) globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.workspace.root-picker");
+    if (result) modificationEffects?.workspaceRootPicker?.emit();
     return result;
   }
 
@@ -1704,7 +1708,7 @@
 
   /** 使用浏览器原生 input[type=file] 实现官方 pick-files IPC 的选择动作。 */
   function openBrowserFilePicker(params) {
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.native.file-picker");
+    modificationEffects?.filePicker?.emit();
     // 浏览器同一时刻只能可靠承载一个原生文件面板；新请求先结束遗留会话，避免监听器和 Promise 累积。
     activeBrowserFilePickerCancel?.();
     return new Promise((resolve, reject) => {
@@ -1727,8 +1731,8 @@
       const cleanup = () => {
         disposeFocus?.();
         disposeFocus = null;
-        if (focusCheckTimer) w.clearTimeout(focusCheckTimer);
-        if (sessionTimeout) w.clearTimeout(sessionTimeout);
+        if (focusCheckTimer) scheduler.clearTimeout(focusCheckTimer);
+        if (sessionTimeout) scheduler.clearTimeout(sessionTimeout);
         focusCheckTimer = 0;
         sessionTimeout = 0;
         if (activeBrowserFilePickerCancel === cancelPicker) activeBrowserFilePickerCancel = null;
@@ -1745,8 +1749,8 @@
       }
       function handleFocus() {
         // macOS 文件选择器取消时不一定触发 change，用重新聚焦后的空列表表示取消。
-        if (focusCheckTimer) w.clearTimeout(focusCheckTimer);
-        focusCheckTimer = w.setTimeout(() => {
+        if (focusCheckTimer) scheduler.clearTimeout(focusCheckTimer);
+        focusCheckTimer = scheduler.setTimeout(() => {
           focusCheckTimer = 0;
           if (!finished && (!input.files || input.files.length === 0)) finish([]);
         }, 250);
@@ -1764,7 +1768,7 @@
       disposeFocus = adapterHost.events.observe({ key: {}, target: w, type: "focus", capture: true, callback: handleFocus });
       activeBrowserFilePickerCancel = cancelPicker;
       // 某些 WebView 既不触发 cancel 也不恢复 focus；兜底释放离屏 input 与窗口监听。
-      sessionTimeout = w.setTimeout(cancelPicker, FILE_PICKER_SESSION_TIMEOUT_MS);
+      sessionTimeout = scheduler.setTimeout(cancelPicker, FILE_PICKER_SESSION_TIMEOUT_MS);
 
       try {
         (document.body || document.documentElement).appendChild(input);
@@ -1871,7 +1875,7 @@
   function handleIdeContextFetchMessage(payload) {
     if (!payload || typeof payload !== "object") return false;
     if (payload.type !== "fetch" || payload.url !== "vscode://codex/ide-context") return false;
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.native.ide-context");
+    modificationEffects?.ideContext?.emit();
     const requestId = String(payload.requestId || "");
     let params = {};
     try {
@@ -1898,7 +1902,7 @@
     }
     const requestId = String(payload.requestId || "");
     if (!requestId) return false;
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.network.statsig");
+    modificationEffects?.statsig?.emit();
     let request = {};
     try {
       request = payload.body ? JSON.parse(payload.body) : {};
@@ -1924,14 +1928,14 @@
     if (!isTelemetryRegisterUrl(payload.url)) return false;
     const requestId = String(payload.requestId || "");
     if (!requestId) return false;
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.network.telemetry");
+    modificationEffects?.telemetry?.emit();
     emitFetchSuccess(requestId, {});
     return true;
   }
 
   /** 短延迟 Promise，用于启动期 transient fetch 失败后的重试。 */
   function delay(ms) {
-    return new Promise((resolve) => w.setTimeout(resolve, ms));
+    return new Promise((resolve) => scheduler.setTimeout(resolve, ms));
   }
 
   /** 只把浏览器网络层的瞬时失败视为可重试，HTTP 500 等业务错误不在这里吞。 */
@@ -1999,12 +2003,12 @@
     if (wsReady && ws && ws.readyState === w.WebSocket.OPEN) return Promise.resolve(true);
     // 不能无限等 WS，否则认证失败或网络断开时会把所有 IPC 卡死；超时后仍按原逻辑发送，保留可恢复性。
     return new Promise((resolve) => {
-      const timer = w.setTimeout(() => {
+      const timer = scheduler.setTimeout(() => {
         wsReadyWaiters.delete(resolveReady);
         resolve(false);
       }, WS_READY_WAIT_TIMEOUT_MS);
       const resolveReady = (ready) => {
-        w.clearTimeout(timer);
+        scheduler.clearTimeout(timer);
         resolve(ready);
       };
       wsReadyWaiters.add(resolveReady);
@@ -2065,7 +2069,7 @@
       // 重连时旧 socket 可能晚于新 socket 关闭；只拒绝由该连接发出的请求，不能误伤新连接请求。
       if (socket && pending.socket !== socket) continue;
       pendingGatewayIpc.delete(requestId);
-      w.clearTimeout(pending.timer);
+      scheduler.clearTimeout(pending.timer);
       pending.reject(error);
     }
   }
@@ -2076,7 +2080,7 @@
     const pending = pendingGatewayIpc.get(requestId);
     if (!pending) return true;
     pendingGatewayIpc.delete(requestId);
-    w.clearTimeout(pending.timer);
+    scheduler.clearTimeout(pending.timer);
     pending.resolve(message);
     return true;
   }
@@ -2096,7 +2100,7 @@
       resolveRequest = resolve;
       rejectRequest = reject;
     });
-    const timer = w.setTimeout(() => {
+    const timer = scheduler.setTimeout(() => {
       if (!pendingGatewayIpc.delete(requestId)) return;
       const error = new Error("WebSocket IPC request timed out");
       error.status = 504;
@@ -2116,7 +2120,7 @@
       return promise;
     } catch (error) {
       pendingGatewayIpc.delete(requestId);
-      w.clearTimeout(timer);
+      scheduler.clearTimeout(timer);
       // send 在写入前同步失败时可以安全回退 HTTP；已发出后的断线由 close 统一拒绝，避免重复写操作。
       return null;
     }
@@ -2160,7 +2164,7 @@
       return true;
     }
     if (message.type !== "opencodex:notification") return false;
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.native.notification");
+    modificationEffects?.nativeNotification?.emit();
 
     const notificationId = typeof message.notificationId === "string" ? message.notificationId : "";
     if (!notificationId || !("Notification" in w)) return true;
@@ -2344,14 +2348,14 @@
   }
 
   function installAppHostMessagePortBridge() {
-    if (w.__codexAppHostMessagePortBridgeInstalled) return;
-    w.__codexAppHostMessagePortBridgeInstalled = true;
+    if (w.__codexAppHostMessagePortBridgeInstalled === providerGeneration) return;
+    w.__codexAppHostMessagePortBridgeInstalled = providerGeneration;
     adapterHost.events.observe({ key: {}, target: w, type: "message", callback: (event) => {
       // 官方 renderer 按 Electron preload 协议给 window 自己 postMessage，不处理 iframe/外部来源。
       if (event.source !== w) return;
       const data = event.data;
       if (!data || typeof data !== "object" || data.type !== "connect-app-host") return;
-      globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.app-host-port");
+      modificationEffects?.appHostPort?.emit();
       const port = data.port || (event.ports && event.ports[0]);
       if (!port || typeof port.postMessage !== "function" || typeof port.start !== "function") {
         clientDiagnostic("app-host-connect-missing-port", {
@@ -2483,8 +2487,8 @@
   }
 
   async function invokeGatewayImmediate(channel, ipcArgs, payload) {
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.ipc-transport");
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.desktop-api");
+    modificationEffects?.ipcTransport?.emit();
+    modificationEffects?.desktopApi?.emit();
     const diagnosticSummary = CLIENT_DIAGNOSTICS_ENABLED ? ipcDiagnosticSummary(channel, payload) : {};
     const invokeStartedAtMs = CLIENT_DIAGNOSTICS_ENABLED ? Date.now() : 0;
     const suppressRoutineDiagnostic =
@@ -2558,7 +2562,7 @@
           }
           const controller = typeof w.AbortController === "function" ? new w.AbortController() : null;
           const requestTimeout = controller
-            ? w.setTimeout(() => controller.abort(), IPC_INVOKE_TIMEOUT_MS)
+            ? scheduler.setTimeout(() => controller.abort(), IPC_INVOKE_TIMEOUT_MS)
             : null;
           try {
             res = await w.fetch("/api/ipc/invoke", {
@@ -2590,7 +2594,7 @@
             });
             if (!isTransientGatewayFetchError(error) || attempt === retryDelays.length - 1) throw error;
           } finally {
-            if (requestTimeout) w.clearTimeout(requestTimeout);
+            if (requestTimeout) scheduler.clearTimeout(requestTimeout);
           }
         }
         if (!res) throw lastFetchError || new Error("IPC invoke failed before request was sent");
@@ -2715,7 +2719,7 @@
 
   /** 所有 terminal-* 消息统一进入 session 队列。 */
   function enqueueTerminalMessage(payload) {
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.native.terminal");
+    modificationEffects?.terminal?.emit();
     const sessionId = terminalSessionId(payload);
     if (payload && typeof payload === "object" && payload.type === "terminal-write") {
       return enqueueTerminalWrite(payload);
@@ -2725,7 +2729,7 @@
 
   /** Electron shell.openExternal 的浏览器实现。 */
   function openExternal(url) {
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.native.external-open");
+    modificationEffects?.externalOpen?.emit();
     const newWindow = w.open(url, "_blank", "noopener,noreferrer");
     if (newWindow) return true;
     return true;
@@ -2764,7 +2768,7 @@
     const delivered = dispatch("toggle-browser-panel", panelPayload);
     emitWindowMessage("toggle-browser-panel", panelPayload);
     if (delivered === 0) {
-      setTimeout(() => {
+      scheduler.setTimeout(() => {
         dispatch("toggle-browser-panel", panelPayload);
         emitWindowMessage("toggle-browser-panel", panelPayload);
       }, 0);
@@ -2796,7 +2800,7 @@
     const rawSrc = element.getAttribute("src") || element.src || "";
     const rewritten = appFsUrlToGatewayUrl(rawSrc);
     if (!rewritten || element.getAttribute("src") === rewritten) return;
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.app-fs-image");
+    modificationEffects?.appFsImage?.emit();
     element.setAttribute("data-codex-web-app-fs-src", rawSrc);
     element.setAttribute("src", rewritten);
   }
@@ -3107,7 +3111,7 @@
     target.sendMessageFromView = async (payload) =>
       Promise.resolve().then(() => {
         if (payload && typeof payload === "object" && payload.type === "persisted-atom-sync-request") {
-          globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.persisted-atom");
+          modificationEffects?.persistedAtom?.emit();
           // 官方 renderer 首屏会很早请求 persisted atom；这里先本地回包，避免 WS 未连接导致回包丢失。
           emitPersistedAtomSync();
           void invoke("codex_desktop:message-from-view", payload).catch((error) => {
@@ -3116,20 +3120,20 @@
           return true;
         }
         if (payload && typeof payload === "object" && payload.type === "persisted-atom-update" && payload.key) {
-          globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.persisted-atom");
+          modificationEffects?.persistedAtom?.emit();
           // 更新先写本页快照并广播，后续再交给官方 main 按 Desktop 原逻辑落盘。
           const value = setPersistedAtomSnapshotValue(payload.key, payload.value, !!payload.deleted);
           emitPersistedAtomUpdated(payload.key, value, !!payload.deleted);
           return invoke("codex_desktop:message-from-view", payload);
         }
         if (payload && typeof payload === "object" && payload.type === "shared-object-set") {
-          globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.shared-object");
+          modificationEffects?.sharedObject?.emit();
           // shared-object 的本地快照先同步更新，再交给 gateway 持久化。
           const value = setSharedObjectSnapshotValue(payload.key, payload.value);
           dispatch("shared-object-updated", { ...payload, value });
         }
         if (payload && typeof payload === "object" && payload.type === "shared-object-subscribe" && payload.key) {
-          globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.shared-object");
+          modificationEffects?.sharedObject?.emit();
           emitSharedObjectSnapshotValue(payload.key);
         }
         if (payload && typeof payload === "object" && payload.type === "open-in-browser" && payload.url) {
@@ -3170,7 +3174,10 @@
     // AnalyticsLogger 同步读取该值作为请求头，不能落入自适应异步 IPC fallback。
     target.getDesktopUserAgent = () => navigator.userAgent;
     // 侧栏快照必须同步返回；刷新时官方启动广播不会重放，不能再固定返回 null。
-    target.getInitialSidebarBootstrap = () => cfg.initialSidebarBootstrap ?? null;
+    target.getInitialSidebarBootstrap = () => {
+      modificationEffects?.initialSidebar?.emit();
+      return cfg.initialSidebarBootstrap ?? null;
+    };
     // DeviceCheck 依赖桌面原生能力，Web 壳必须同步报告不支持，不能让 Promise 被误判为 true。
     target.isDeviceCheckSupported = () => false;
     target.isIntelMacBuild = () => /macintosh|mac os x/i.test(navigator.userAgent) && /intel/i.test(navigator.userAgent);
@@ -3273,7 +3280,7 @@
 
   /** 浏览器直连 Statsig/遥测在受限网络下会刷 console error；Web 侧用本地默认值兜底。 */
   function buildStatsigInitializeResponse() {
-    globalThis.OpenCodexRuntimeCompatibility?.active?.("web.runtime.bridge.feature-gates");
+    modificationEffects?.featureGates?.emit();
     const feature_gates = {};
     const dynamic_configs = {
       [STATSIG_DEFAULT_FEATURES_CONFIG]: {
@@ -3463,6 +3470,19 @@
       scheduleReconnect();
       return;
     }
+    const releaseSocket = modificationScope?.own?.(() => {
+      if (ws === socket) {
+        ws = null;
+        wsReady = false;
+      }
+      try {
+        socket.close();
+      } catch {}
+    }) || (() => {
+      try {
+        socket.close();
+      } catch {}
+    });
 
     socket.addEventListener("open", () => {
       // hello 会把本页面 clientId 注册到 gateway，后续审批/fetch 响应才能定向回来。
@@ -3642,6 +3662,8 @@
         wsReady,
         wsState: websocketStateName(socket),
       });
+      // 自然关闭后移除页面生命周期中的 socket disposer，后续重连会登记新的 socket。
+      releaseSocket();
       scheduleReconnect();
     });
     socket.addEventListener("error", (event) => {
@@ -3669,7 +3691,7 @@
       wsReady,
       wsState: websocketStateName(ws),
     });
-    reconnectTimer = setTimeout(() => {
+    reconnectTimer = scheduler.setTimeout(() => {
       reconnectTimer = null;
       reconnectDelay = Math.min(reconnectDelay * 2, 5000);
       connect();
@@ -3678,7 +3700,7 @@
 
   function handleReconnectVisibilityChange() {
     if (document.visibilityState === "hidden") {
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (reconnectTimer) scheduler.clearTimeout(reconnectTimer);
       reconnectTimer = null;
       if (!ws || ws.readyState === w.WebSocket.CLOSED) reconnectDeferredUntilVisible = true;
       return;
@@ -3686,29 +3708,26 @@
     if (reconnectDeferredUntilVisible || !ws || ws.readyState === w.WebSocket.CLOSED) scheduleReconnect();
   }
 
+  modificationScope?.own?.(() => {
+    settleWsReadyWaiters(false);
+    rejectPendingGatewayIpc(new Error("Renderer page was replaced"));
+    activeBrowserFilePickerCancel?.();
+    activeBrowserFilePickerCancel = null;
+    for (const state of [...appHostPortRelays.values()]) closeAppHostRelay(state, "page_replaced", false);
+    for (const notification of activeBrowserNotifications.values()) {
+      try {
+        notification.close();
+      } catch {}
+    }
+    activeBrowserNotifications.clear();
+    listeners.clear();
+    authStatusCallbacks.clear();
+    terminalMessageQueues.clear();
+    terminalMessageQueueDepths.clear();
+    terminalMessagePendingCount = 0;
+  });
+
   // 已连接 socket 保持后台业务语义；只有断线重试暂停，回到前台后再按原退避策略恢复。
   adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: handleReconnectVisibilityChange });
-  w.OpenCodexRuntimeCompatibility?.reportMany?.([
-    "web.runtime.platform.desktop-globals",
-    "web.runtime.bridge.desktop-api",
-    "web.runtime.bridge.ipc-transport",
-    "web.runtime.bridge.app-host-port",
-    "web.runtime.bridge.persisted-atom",
-    "web.runtime.bridge.shared-object",
-    "web.runtime.bridge.initial-sidebar",
-    "web.runtime.bridge.feature-gates",
-    "web.runtime.network.statsig",
-    "web.runtime.network.telemetry",
-    "web.runtime.protocol.connector-logo",
-    "web.runtime.dom.webview-shim",
-    "web.runtime.native.file-picker",
-    "web.runtime.native.ide-context",
-    "web.runtime.native.notification",
-    "web.runtime.native.terminal",
-    "web.runtime.native.external-open",
-    "web.runtime.dom.app-fs-image",
-    "web.runtime.dom.gateway-auth-menu",
-    "web.runtime.protocol.token-usage",
-  ]);
   connect();
 })();

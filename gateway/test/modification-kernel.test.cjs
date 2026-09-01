@@ -11,8 +11,7 @@ const {
   ADAPTER_DEFINITIONS,
   POINT_DEFINITIONS,
   POINT_GROUP_DEFINITIONS,
-  POINT_IMPLEMENTATIONS,
-  PROVIDER_BINDINGS,
+  POINT_TARGETS,
   MIGRATION_MATRIX,
 } = require("../dist/modification/catalog.js");
 
@@ -20,7 +19,7 @@ test("typed modification catalog assigns every point to a group and adapter chai
   assert.equal(POINT_GROUP_DEFINITIONS.length, 17);
   assert.equal(ADAPTER_DEFINITIONS.length, 23);
   assert.equal(POINT_DEFINITIONS.length, 102);
-  assert.equal(POINT_IMPLEMENTATIONS.length, 102);
+  assert.equal(POINT_TARGETS.length, 102);
   assert.equal(MIGRATION_MATRIX.length, 102);
   assert.equal(MIGRATION_MATRIX.every((entry) => entry.migrationStatus === "migrated"), true);
   assert.deepEqual(
@@ -29,8 +28,7 @@ test("typed modification catalog assigns every point to a group and adapter chai
     ),
     [36, 36, 25, 5]
   );
-  assert.equal(new Set(POINT_IMPLEMENTATIONS).size, 102);
-  assert.equal(Object.keys(PROVIDER_BINDINGS).length, 9);
+  assert.equal(new Set(POINT_TARGETS).size, 102);
   assert.equal(new Set(POINT_DEFINITIONS.map((point) => point.id)).size, 102);
   assert.deepEqual(
     ["web.runtime.", "gateway.runtime.", "static.cache."].map(
@@ -40,7 +38,9 @@ test("typed modification catalog assigns every point to a group and adapter chai
   );
   assert.equal(POINT_DEFINITIONS.every((point) => point.group && point.contributions.length > 0), true);
   assert.equal(POINT_DEFINITIONS.every((point) => point.contributions.every((item) => {
-    return item.declaration.implementation && !Object.hasOwn(item.declaration, "pointId");
+    return item.declaration.target &&
+      !Object.hasOwn(item.declaration, "pointId") &&
+      !Object.hasOwn(item.declaration, "implementation");
   })), true);
   const groupById = new Map(POINT_GROUP_DEFINITIONS.map((group) => [group.id, group]));
   assert.equal(groupById.get("workspace-creation").name, "新项目和新工作树创建");
@@ -98,6 +98,9 @@ test("kernel expands composite adapters and compiles terminal declarations in on
         activate(contribution, reporter) {
           reporter.hit(contribution);
         },
+        diagnostics() {
+          return { compileCount, batchSize };
+        },
       };
     },
   });
@@ -117,6 +120,10 @@ test("kernel expands composite adapters and compiles terminal declarations in on
   const active = await runtime.activate(plan);
   assert.deepEqual(active.failures, []);
   const snapshot = runtime.snapshot();
+  assert.deepEqual(snapshot.providerDiagnostics, [{
+    adapterId: "adapter.test-terminal",
+    metrics: { compileCount: 1, batchSize: 2 },
+  }]);
   assert.deepEqual(snapshot.points[0].adapterChainIds, ["adapter.test-semantic", "adapter.test-terminal"]);
   assert.equal(snapshot.points.every((point) => point.contributions[0].exercise === "active"), true);
 });
@@ -166,6 +173,130 @@ test("kernel rolls already applied adapter plans back in reverse order", async (
   const contributionStates = runtime.snapshot().points[0].contributions;
   assert.equal(contributionStates[0].application, "rolled-back");
   assert.equal(contributionStates[1].application, "failed");
+});
+
+test("synchronous activation continues reverse rollback after one cleanup fails", () => {
+  const runtime = createModificationRuntime();
+  const group = runtime.registerGroup(definePointGroup({
+    id: "sync-rollback-group",
+    name: "同步回滚组",
+    description: "验证同步启动边界的尽力回滚",
+    order: 1,
+  }));
+  const first = defineAdapter({ id: "adapter.sync-rollback-first", name: "第一适配器", description: "最先应用", kind: "terminal" });
+  const second = defineAdapter({ id: "adapter.sync-rollback-second", name: "第二适配器", description: "随后应用", kind: "terminal" });
+  const third = defineAdapter({ id: "adapter.sync-rollback-third", name: "第三适配器", description: "触发失败", kind: "terminal" });
+  const events = [];
+  for (const adapter of [first, second]) {
+    runtime.provide({
+      adapter,
+      compile(contributions) {
+        return {
+          locate(reporter) { contributions.forEach((item) => reporter.resolved(item)); },
+          apply(contribution, reporter) {
+            events.push(`apply:${adapter.id}`);
+            reporter.applied(contribution);
+          },
+          rollback() {
+            events.push(`rollback:${adapter.id}`);
+            if (adapter === second) throw new Error("cleanup failed");
+          },
+        };
+      },
+    });
+  }
+  runtime.provide({
+    adapter: third,
+    compile(contributions) {
+      return {
+        locate(reporter) { contributions.forEach((item) => reporter.resolved(item)); },
+        apply() {
+          events.push(`apply:${third.id}`);
+          throw new Error("business failed");
+        },
+      };
+    },
+  });
+  runtime.registerPoint(defineModificationPoint({
+    id: "gateway.runtime.test.sync-rollback",
+    description: "同步回滚测试",
+    owner: "test",
+    group,
+    contributions: [first.use({}), second.use({}), third.use({})],
+  }));
+
+  const active = runtime.activateSync(runtime.compile());
+  assert.equal(active.failures.length, 1);
+  assert.match(active.failures[0].reason, /business failed/);
+  assert.deepEqual(events, [
+    `apply:${first.id}`,
+    `apply:${second.id}`,
+    `apply:${third.id}`,
+    `rollback:${second.id}`,
+    `rollback:${first.id}`,
+  ]);
+});
+
+test("asynchronous activation continues reverse rollback after one cleanup fails", async () => {
+  const runtime = createModificationRuntime();
+  const group = runtime.registerGroup(definePointGroup({
+    id: "async-rollback-group",
+    name: "异步回滚组",
+    description: "验证异步启动边界的尽力回滚",
+    order: 1,
+  }));
+  const first = defineAdapter({ id: "adapter.async-rollback-first", name: "第一适配器", description: "最先应用", kind: "terminal" });
+  const second = defineAdapter({ id: "adapter.async-rollback-second", name: "第二适配器", description: "随后应用", kind: "terminal" });
+  const third = defineAdapter({ id: "adapter.async-rollback-third", name: "第三适配器", description: "触发失败", kind: "terminal" });
+  const events = [];
+  for (const adapter of [first, second]) {
+    runtime.provide({
+      adapter,
+      compile(contributions) {
+        return {
+          locate(reporter) { contributions.forEach((item) => reporter.resolved(item)); },
+          async apply(contribution, reporter) {
+            events.push(`apply:${adapter.id}`);
+            reporter.applied(contribution);
+          },
+          async rollback() {
+            events.push(`rollback:${adapter.id}`);
+            if (adapter === second) throw new Error("cleanup failed");
+          },
+        };
+      },
+    });
+  }
+  runtime.provide({
+    adapter: third,
+    compile(contributions) {
+      return {
+        locate(reporter) { contributions.forEach((item) => reporter.resolved(item)); },
+        async apply() {
+          events.push(`apply:${third.id}`);
+          throw new Error("business failed");
+        },
+      };
+    },
+  });
+  runtime.registerPoint(defineModificationPoint({
+    id: "gateway.runtime.test.async-rollback",
+    description: "异步回滚测试",
+    owner: "test",
+    group,
+    contributions: [first.use({}), second.use({}), third.use({})],
+  }));
+
+  const active = await runtime.activate(runtime.compile());
+  assert.equal(active.failures.length, 1);
+  assert.match(active.failures[0].reason, /business failed/);
+  assert.deepEqual(events, [
+    `apply:${first.id}`,
+    `apply:${second.id}`,
+    `apply:${third.id}`,
+    `rollback:${second.id}`,
+    `rollback:${first.id}`,
+  ]);
 });
 
 test("kernel isolates a failed point while preserving another point in the same provider batch", async () => {
@@ -291,4 +422,83 @@ test("kernel rejects duplicate ids, unregistered groups and adapter cycles", () 
     group,
     contributions: [missingAdapter.use({})],
   })), /未注册适配器/);
+});
+
+test("kernel freezes registration after activation and cannot execute one plan twice", () => {
+  const runtime = createModificationRuntime();
+  const group = runtime.registerGroup(definePointGroup({
+    id: "lifecycle-group",
+    name: "生命周期组",
+    description: "验证执行计划只激活一次",
+    order: 1,
+  }));
+  const adapter = defineAdapter({
+    id: "adapter.lifecycle",
+    name: "生命周期适配器",
+    description: "验证注册冻结",
+    kind: "terminal",
+  });
+  runtime.provide({
+    adapter,
+    compile(contributions) {
+      return {
+        locate(reporter) { contributions.forEach((item) => reporter.resolved(item)); },
+        apply(contribution, reporter) { reporter.applied(contribution); },
+      };
+    },
+  });
+  runtime.registerPoint(defineModificationPoint({
+    id: "gateway.runtime.test.lifecycle",
+    description: "生命周期测试",
+    owner: "test",
+    group,
+    contributions: [adapter.use({})],
+  }));
+  const plan = runtime.compile();
+  runtime.activateSync(plan);
+  assert.throws(() => runtime.activateSync(plan), /不能重复激活/);
+  assert.throws(() => runtime.registerGroup(definePointGroup({
+    id: "late-group",
+    name: "晚到组",
+    description: "不允许写入已经激活的批次",
+    order: 2,
+  })), /不能继续注册/);
+});
+
+test("kernel continues reverse disposal after one Provider cleanup fails", async () => {
+  const runtime = createModificationRuntime();
+  const group = runtime.registerGroup(definePointGroup({
+    id: "dispose-group",
+    name: "销毁组",
+    description: "验证尽力释放全部 Provider",
+    order: 1,
+  }));
+  const first = defineAdapter({ id: "adapter.dispose-first", name: "第一销毁", description: "第一销毁", kind: "terminal" });
+  const second = defineAdapter({ id: "adapter.dispose-second", name: "第二销毁", description: "第二销毁", kind: "terminal" });
+  const events = [];
+  for (const adapter of [first, second]) {
+    runtime.provide({
+      adapter,
+      compile(contributions) {
+        return {
+          locate(reporter) { contributions.forEach((item) => reporter.resolved(item)); },
+          apply(contribution, reporter) { reporter.applied(contribution); },
+          dispose() {
+            events.push(adapter.id);
+            if (adapter === second) throw new Error("dispose failed");
+          },
+        };
+      },
+    });
+  }
+  runtime.registerPoint(defineModificationPoint({
+    id: "gateway.runtime.test.dispose",
+    description: "销毁测试",
+    owner: "test",
+    group,
+    contributions: [first.use({}), second.use({})],
+  }));
+  const active = runtime.activateSync(runtime.compile());
+  await assert.rejects(active.dispose(), /dispose failed/);
+  assert.deepEqual(events, ["adapter.dispose-second", "adapter.dispose-first"]);
 });

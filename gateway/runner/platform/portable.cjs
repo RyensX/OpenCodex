@@ -15,6 +15,7 @@ const {
 const { logLine } = require("../shared/logging.cjs");
 const { writeGatewayAsar } = require("../shared/runner-asar.cjs");
 const { patchWindowsRunnerAsarIntegrity } = require("./windows-integrity.cjs");
+const { runner: runnerPoints } = require("../../runtime/modification/point-refs.cjs");
 
 const WINDOWS_READ_WRITE_COPY_BUFFER_SIZE = 8 * 1024 * 1024;
 
@@ -281,7 +282,7 @@ function ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath
   return { copied: true };
 }
 
-async function createPortableRunner({ layout, runtimeDir, logger, runCompatibility = (_id, operation) => operation() }) {
+async function createPortableRunner({ layout, runtimeDir, logger, runCompatibility = (_point, operation) => operation() }) {
   const workDir = path.join(runtimeDir, "official-electron-runner");
   const runnerRootDir = path.join(workDir, `${process.platform}-${process.arch}`);
   const runnerResourcesDir = path.join(runnerRootDir, "resources");
@@ -289,19 +290,19 @@ async function createPortableRunner({ layout, runtimeDir, logger, runCompatibili
   const markerPath = path.join(workDir, `runtime-manifest-${process.platform}-${process.arch}.json`);
 
   runCompatibility(
-    "static.cache.runner.portable-layout",
+    runnerPoints.portableLayout,
     () => ensurePortableRuntimeCopy({ layout, runnerRootDir, runnerExecutablePath, markerPath, logger })
   );
   // app.asar 是 OpenCodex gateway 壳，必须每次按当前代码路径重写；官方资源目录只通过 env/process.resourcesPath 指回原安装包。
   fs.rmSync(runnerResourcesDir, { recursive: true, force: true });
   fs.mkdirSync(runnerResourcesDir, { recursive: true });
   const runnerAsarPath = await runCompatibility(
-    "static.cache.runner.gateway-asar",
+    runnerPoints.gatewayAsar,
     () => writeGatewayAsar({ runnerResourcesDir, workDir })
   );
   if (process.platform === "win32") {
     runCompatibility(
-      "static.cache.runner.windows-asar-integrity",
+      runnerPoints.windowsAsarIntegrity,
       () => patchWindowsRunnerAsarIntegrity({
         runnerRootDir,
         runnerExecutablePath,
@@ -317,9 +318,9 @@ async function createPortableRunner({ layout, runtimeDir, logger, runCompatibili
 
   return {
     compatibilityPoints: [
-      "static.cache.runner.portable-layout",
-      "static.cache.runner.gateway-asar",
-      ...(process.platform === "win32" ? ["static.cache.runner.windows-asar-integrity"] : []),
+      runnerPoints.portableLayout.id,
+      runnerPoints.gatewayAsar.id,
+      ...(process.platform === "win32" ? [runnerPoints.windowsAsarIntegrity.id] : []),
     ],
     executablePath: runnerExecutablePath,
     runnerAppPath: runnerRootDir,

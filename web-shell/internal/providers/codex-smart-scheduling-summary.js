@@ -1,9 +1,13 @@
 (function () {
   const w = window;
-  if (w.__OpenCodexSmartSchedulingSummaryInstalled) return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const providerGeneration = modificationScope?.generation || document;
+  if (w.__OpenCodexSmartSchedulingSummaryInstalled === providerGeneration) return;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
-  w.__OpenCodexSmartSchedulingSummaryInstalled = true;
+  w.__OpenCodexSmartSchedulingSummaryInstalled = providerGeneration;
 
   const FEATURE = "smart-model-router";
   const ROUTE_METADATA_KEY = "opencodex/smart-scheduling";
@@ -134,7 +138,7 @@
   function setPendingNavigation(threadId) {
     pendingNavigationThreadId = resolvedThreadId(threadId);
     const sequence = ++pendingNavigationSequence;
-    const timer = w.setTimeout(() => {
+    const timer = scheduler.setTimeout(() => {
       if (sequence !== pendingNavigationSequence || pendingNavigationThreadId === null) return;
       // 导航意图只保护 React 提交窗口，超时后释放，避免一次未确认的 client-* 永久阻断后续切换。
       pendingNavigationThreadId = null;
@@ -501,14 +505,14 @@
     if (!section.isConnected) container.prepend(section);
     if (section.isConnected && !compatibilityHitReported) {
       compatibilityHitReported = true;
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.smart-router.summary");
+      modificationEffects?.primary?.emit();
     }
   }
 
   function scheduleRender() {
     if (observerScheduled || document.visibilityState === "hidden") return;
     observerScheduled = true;
-    w.requestAnimationFrame(render);
+    scheduler.requestAnimationFrame(render);
   }
 
   async function hydrateActiveRoute(threadId) {
@@ -865,7 +869,7 @@
     if (activeThreadId) {
       const sequence = ++visibleThreadActivitySequence;
       // 等本轮 React/MutationObserver 提交侧栏活动行后再绑定别名，避免把旧 A 的 client-* 误绑定到新 B。
-      w.requestAnimationFrame(() => {
+      scheduler.requestAnimationFrame(() => {
         if (sequence !== visibleThreadActivitySequence) return;
         selectVisibleThread(activeThreadId, true, "view-activity");
       });
@@ -968,7 +972,7 @@
       });
       configurationRetryCount = 0;
       if (configurationRetryTimer) {
-        w.clearTimeout(configurationRetryTimer);
+        scheduler.clearTimeout(configurationRetryTimer);
         configurationRetryTimer = null;
       }
     } catch {
@@ -976,7 +980,7 @@
       const delay = Math.min(500 * 2 ** configurationRetryCount, 8000);
       configurationRetryCount += 1;
       // 登录态和运行时 token 可能晚于 renderer 脚本就绪，短暂重试即可消除初始化竞态。
-      configurationRetryTimer = w.setTimeout(() => {
+      configurationRetryTimer = scheduler.setTimeout(() => {
         configurationRetryTimer = null;
         void loadConfiguration();
       }, delay);

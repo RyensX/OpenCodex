@@ -1,9 +1,13 @@
 (function () {
   const w = window;
-  if (w.__opencodexSidebarPreviewInstalled) return;
+  const modificationScope = w.__OpenCodexCurrentProviderScope;
+  const modificationEffects = modificationScope?.effects;
+  const providerGeneration = modificationScope?.generation || document;
+  if (w.__opencodexSidebarPreviewInstalled === providerGeneration) return;
   const adapterHost = w.__OpenCodexAdapterHost;
+  const scheduler = adapterHost?.scheduler?.capture?.() || w;
   if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
-  w.__opencodexSidebarPreviewInstalled = true;
+  w.__opencodexSidebarPreviewInstalled = providerGeneration;
 
   const PREVIEW_ID = "opencodex-sidebar-preview";
   const PREVIEW_ROW_SELECTOR = "[data-opencodex-sidebar-preview-row]";
@@ -42,9 +46,9 @@
         }
         marker.remove();
       }
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.late-module-preload");
+      modificationEffects?.lateModulePreload?.emit();
     };
-    const scheduleInstall = () => w.setTimeout(install, LATE_MODULE_PRELOAD_DELAY_MS);
+    const scheduleInstall = () => scheduler.setTimeout(install, LATE_MODULE_PRELOAD_DELAY_MS);
     // load 后再留出一段主模块初始化窗口，避免低速 CPU 同时编译语言包和 React 首屏任务。
     if (document.readyState === "complete") scheduleInstall();
     else adapterHost.events.observe({ key: {}, target: w, type: "load", once: true, callback: scheduleInstall });
@@ -64,8 +68,8 @@
   }
 
   function removePreview() {
-    if (checkTimer) w.clearTimeout(checkTimer);
-    if (readyFrame) w.cancelAnimationFrame(readyFrame);
+    if (checkTimer) scheduler.clearTimeout(checkTimer);
+    if (readyFrame) scheduler.cancelAnimationFrame(readyFrame);
     disposeReadyObservation?.();
     checkTimer = null;
     readyFrame = null;
@@ -77,10 +81,10 @@
   function handoffIfOfficialReady() {
     const officialTarget = officialThreadRow(pendingThreadId);
     if (officialTarget) {
-      w.OpenCodexRuntimeCompatibility?.active?.("web.runtime.dom.sidebar-preview-handoff");
+      modificationEffects?.handoff?.emit();
       // 先移除覆盖层再委托点击，官方 React 仍是唯一负责导航和会话状态的实现。
       removePreview();
-      w.requestAnimationFrame(() => {
+      scheduler.requestAnimationFrame(() => {
         officialTarget.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: w }));
       });
       return true;
@@ -94,7 +98,7 @@
 
   function scheduleCheck() {
     if (checkTimer) return;
-    checkTimer = w.setTimeout(() => {
+    checkTimer = scheduler.setTimeout(() => {
       checkTimer = null;
       if (!previewElement()) {
         // head 脚本执行时 body 尚未解析；短暂轮询到预渲染 aside 出现，不等待 DOMContentLoaded。
@@ -124,7 +128,7 @@
     checkDelayMs = 16;
     // 常态首屏只做低频轮询；用户已经提前选择会话时才临时观察 DOM，兼顾低功耗和快速交接。
     observeOfficialSidebar();
-    if (checkTimer) w.clearTimeout(checkTimer);
+    if (checkTimer) scheduler.clearTimeout(checkTimer);
     checkTimer = null;
     scheduleCheck();
   }
@@ -137,7 +141,7 @@
       options: { childList: true, subtree: true },
       callback() {
       if (readyFrame) return;
-      readyFrame = w.requestAnimationFrame(() => {
+      readyFrame = scheduler.requestAnimationFrame(() => {
         readyFrame = null;
         // 官方 React 提交侧栏节点时直接交接，不让连续 DOM 更新反复取消定时检查。
         handoffIfOfficialReady();

@@ -177,7 +177,7 @@ test("runtime compatibility diagnostics are public, grouped, explained, and repo
   const page = fs.readFileSync(service.staticFile(pagePath), "utf8");
   assert.match(page, /id="pointsTable"/);
   assert.doesNotMatch(page, /id="featureList"/);
-  for (const help of ["adapter", "overall", "location", "application", "verification", "exercise"]) {
+  for (const help of ["adapter", "overall", "location", "application", "verification", "activation", "exercise"]) {
     assert.match(page, new RegExp(`data-help="${help}"`));
   }
   assert.match(page, /分组只用于查看，不影响启用、回退或执行决策/);
@@ -186,6 +186,7 @@ test("runtime compatibility diagnostics are public, grouped, explained, and repo
   const diagnosticsStyles = fs.readFileSync(service.staticFile("/opencodex/runtime-compatibility.css"), "utf8");
   assert.match(diagnosticsScript, /point\.adapterChainIds/);
   assert.match(diagnosticsScript, /snapshot\.adapterTypes/);
+  assert.match(diagnosticsScript, /point\.contributions/);
   assert.match(diagnosticsScript, /feature-title-line/);
   assert.doesNotMatch(diagnosticsScript, /snapshot\.features/);
   assert.match(diagnosticsStyles, /\.feature-title-line/);
@@ -293,7 +294,10 @@ test("bridge keeps synchronous official preload methods out of the adaptive IPC 
 
   // 这两个官方 preload 方法必须同步返回基础值；一旦返回 Promise，最新版 renderer 会在首屏直接崩溃。
   assert.match(source, /target\.getPreloadStartedAtMs = \(\) => preloadStartedAtMs;/);
-  assert.match(source, /target\.getInitialSidebarBootstrap = \(\) => cfg\.initialSidebarBootstrap \?\? null;/);
+  assert.match(
+    source,
+    /target\.getInitialSidebarBootstrap = \(\) => \{[\s\S]*return cfg\.initialSidebarBootstrap \?\? null;[\s\S]*\};/
+  );
   assert.match(source, /target\.isDeviceCheckSupported = \(\) => false;/);
   assert.match(source, /target\.startFileDrag = \(\) => false;/);
   assert.ok(source.indexOf("target.getInitialSidebarBootstrap") < source.indexOf("createAdaptiveBridgeProxy"));
@@ -1124,11 +1128,11 @@ test("inline token usage reports a hit only after a connected badge is rendered"
 
   const activation = source.slice(activationStart, observationStart);
   const render = source.slice(renderStart, requestStart);
-  assert.match(activation, /OpenCodexRuntimeCompatibility\?\.installed\?\.\("web\.runtime\.dom\.token-usage-inline"\)/);
-  assert.doesNotMatch(activation, /OpenCodexRuntimeCompatibility\?\.active/);
+  assert.doesNotMatch(activation, /modificationEffects\?\.primary\?\.emit/);
+  assert.doesNotMatch(activation, /OpenCodexRuntimeCompatibility/);
   assert.match(
     render,
-    /renderUsageContent\(badge, usage\);[\s\S]*if \(!badge\.isConnected\) return;[\s\S]*OpenCodexRuntimeCompatibility\?\.active/
+    /renderUsageContent\(badge, usage\);[\s\S]*if \(!badge\.isConnected\) return;[\s\S]*modificationEffects\?\.primary\?\.emit\(\)/
   );
 });
 
