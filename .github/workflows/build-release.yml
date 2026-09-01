@@ -1,0 +1,190 @@
+name: Build installers and draft release
+
+on:
+  push:
+
+# 默认只读取仓库内容，创建 Release 的写权限仅授予发布任务。
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: Detect release version
+    runs-on: ubuntu-latest
+    outputs:
+      is_release: ${{ steps.version.outputs.is_release }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Detect version bump commit
+        id: version
+        shell: bash
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          # 仅匹配 HEAD commit 的标题，避免普通提交误触发发布流程。
+          commit_subject="${COMMIT_MESSAGE%%$'\n'*}"
+          commit_subject="${commit_subject%$'\r'}"
+
+          if [[ "$commit_subject" =~ ^chore:\ bump\ version\ to\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            package_version="$(node --print "require('./package.json').version")"
+
+            # 提交中的版本必须与安装包版本一致，防止创建错误的 Tag 和 Release。
+            if [[ "$version" != "$package_version" ]]; then
+              echo "Version mismatch: commit=$version, package.json=$package_version" >&2
+              exit 1
+            fi
+
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-macos:
+    name: Build macOS installers
+    needs: metadata
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build ad-hoc signed DMG installers
+        run: |
+          pnpm run build
+          pnpm exec electron-builder --mac dmg --x64 --arm64 --config.mac.identity=-
+
+      - name: Verify macOS signatures
+        shell: bash
+        run: |
+          # 同时校验 Intel 与 Apple Silicon 应用包的 ad-hoc 签名。
+          app_count=0
+          while IFS= read -r -d '' app_path; do
+            codesign --verify --deep --strict --verbose=2 "$app_path"
+            ((app_count += 1))
+          done < <(find release -mindepth 2 -maxdepth 2 -type d -name '*.app' -print0)
+
+          if (( app_count != 2 )); then
+            echo "Unexpected application bundles: $app_count" >&2
+            exit 1
+          fi
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: opencodex-macos
+          path: release/*.dmg
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows installer
+    needs: metadata
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build NSIS installer
+        run: |
+          pnpm run build
+          pnpm exec electron-builder --win nsis --x64
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: opencodex-windows
+          path: release/*.exe
+          if-no-files-found: error
+
+  release:
+    name: Create draft release
+    if: needs.metadata.outputs.is_release == 'true'
+    needs:
+      - metadata
+      - build-macos
+      - build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate release assets
+        shell: bash
+        run: |
+          shopt -s nullglob
+          dmg_files=(release-assets/*.dmg)
+          exe_files=(release-assets/*.exe)
+
+          # 当前配置应产出 Intel/Apple Silicon 两个 DMG 和一个 Windows 安装包。
+          if (( ${#dmg_files[@]} != 2 || ${#exe_files[@]} != 1 )); then
+            echo "Unexpected assets: ${#dmg_files[@]} DMG, ${#exe_files[@]} EXE" >&2
+            exit 1
+          fi
+
+      - name: Create or update draft release
+        shell: bash
+        run: |
+          shopt -s nullglob
+          assets=(release-assets/*.dmg release-assets/*.exe)
+
+          if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            # 重跑流水线时仅更新已有草稿，避免覆盖已经正式发布的 Release。
+            is_draft="$(gh release view "$RELEASE_VERSION" --json isDraft --jq '.isDraft')"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Release $RELEASE_VERSION already exists and is not a draft" >&2
+              exit 1
+            fi
+
+            gh release edit "$RELEASE_VERSION" --title "v$RELEASE_VERSION" --draft=true
+            gh release upload "$RELEASE_VERSION" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_VERSION" "${assets[@]}" \
+              --draft \
+              --target "$GITHUB_SHA" \
+              --title "v$RELEASE_VERSION" \
+              --notes ""
+          fi
