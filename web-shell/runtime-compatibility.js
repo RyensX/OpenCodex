@@ -1,4 +1,5 @@
 (() => {
+  const AUTO_REFRESH_STORAGE_KEY = "opencodex_runtime_compatibility_auto_refresh";
   const runtimeConfig = window.__CODEX_WEB_CONFIG__ || {};
   const locale = String(runtimeConfig.locale || "zh-CN");
   const messages = runtimeConfig.messages && typeof runtimeConfig.messages === "object"
@@ -17,7 +18,22 @@
     return t(`web.runtimeCompatibility.${kind}.${id}.${field}`, fallback);
   }
 
-  const state = { snapshot: null, timer: null, helpTrigger: null };
+  function readAutoRefreshPreference() {
+    try {
+      return localStorage.getItem(AUTO_REFRESH_STORAGE_KEY) !== "disabled";
+    } catch {
+      // 浏览器禁用存储时仍保持旧版默认自动刷新行为。
+      return true;
+    }
+  }
+
+  const state = {
+    snapshot: null,
+    timer: null,
+    refreshPromise: null,
+    helpTrigger: null,
+    autoRefresh: readAutoRefreshPreference(),
+  };
   const overallLabels = {
     healthy: t("web.runtimeCompatibility.status.healthy", "已命中"),
     ready: t("web.runtimeCompatibility.status.ready", "已就绪"),
@@ -524,42 +540,69 @@
   }
 
   async function refresh() {
-    try {
-      const response = await fetch("/api/opencodex/runtime-compatibility", {
-        credentials: "omit",
-        cache: "no-store",
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json();
-      if (!payload.ok || !payload.compatibility) {
-        throw new Error(payload.error || t("web.runtimeCompatibility.invalidResponse", "无效的兼容性响应"));
+    if (state.refreshPromise) return state.refreshPromise;
+    state.refreshPromise = (async () => {
+      try {
+        const response = await fetch("/api/opencodex/runtime-compatibility", {
+          credentials: "omit",
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        if (!payload.ok || !payload.compatibility) {
+          throw new Error(payload.error || t("web.runtimeCompatibility.invalidResponse", "无效的兼容性响应"));
+        }
+        render(payload.compatibility);
+        byId("errorBanner").hidden = true;
+      } catch (error) {
+        const banner = byId("errorBanner");
+        banner.textContent = t(
+          "web.runtimeCompatibility.readFailed",
+          "兼容性状态读取失败：{error}",
+          { error: error instanceof Error ? error.message : String(error) }
+        );
+        banner.hidden = false;
       }
-      render(payload.compatibility);
-      byId("errorBanner").hidden = true;
-    } catch (error) {
-      const banner = byId("errorBanner");
-      banner.textContent = t(
-        "web.runtimeCompatibility.readFailed",
-        "兼容性状态读取失败：{error}",
-        { error: error instanceof Error ? error.message : String(error) }
-      );
-      banner.hidden = false;
+    })();
+    try {
+      return await state.refreshPromise;
+    } finally {
+      state.refreshPromise = null;
     }
   }
 
   function scheduleRefresh() {
     if (state.timer) clearTimeout(state.timer);
     state.timer = null;
-    if (document.visibilityState !== "visible") return;
+    if (!state.autoRefresh || document.visibilityState !== "visible") return;
     // 调试页可见时低频刷新；切到后台立即停止，避免诊断功能本身制造持续唤醒。
-    state.timer = setTimeout(async () => {
-      await refresh();
-      scheduleRefresh();
+    state.timer = setTimeout(() => {
+      void refresh().finally(scheduleRefresh);
     }, 5000);
   }
 
+  function setAutoRefresh(enabled, { refreshImmediately = false } = {}) {
+    state.autoRefresh = enabled === true;
+    byId("autoRefreshToggle").checked = state.autoRefresh;
+    try {
+      localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, state.autoRefresh ? "enabled" : "disabled");
+    } catch {
+      // 存储失败只影响偏好持久化，不影响当前页面的刷新控制。
+    }
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = null;
+    if (!state.autoRefresh) return;
+    if (refreshImmediately && document.visibilityState === "visible") {
+      void refresh().finally(scheduleRefresh);
+    } else scheduleRefresh();
+  }
+
   applyI18n();
-  byId("refreshButton").addEventListener("click", () => void refresh());
+  byId("autoRefreshToggle").checked = state.autoRefresh;
+  byId("autoRefreshToggle").addEventListener("change", (event) => {
+    setAutoRefresh(event.currentTarget.checked, { refreshImmediately: true });
+  });
+  byId("refreshButton").addEventListener("click", () => void refresh().finally(scheduleRefresh));
   byId("backButton").addEventListener("click", () => history.length > 1 ? history.back() : location.assign("/"));
   byId("adapterFilter").addEventListener("change", () => renderPoints(state.snapshot || { points: [], groups: [], adapterTypes: [] }));
   byId("statusFilter").addEventListener("change", () => renderPoints(state.snapshot || { points: [], groups: [], adapterTypes: [] }));
@@ -576,5 +619,9 @@
     state.helpTrigger = null;
   });
   document.addEventListener("visibilitychange", scheduleRefresh);
+  window.addEventListener("pagehide", () => {
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = null;
+  }, { once: true });
   void refresh().finally(scheduleRefresh);
 })();
