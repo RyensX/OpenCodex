@@ -13,9 +13,18 @@ const {
 } = require("../runtime/core/plugin-assets.cjs");
 const { createCompatibilityService } = require("../runtime/compatibility/service.cjs");
 const {
+  ADAPTER_DEFINITIONS,
+  POINT_DEFINITIONS,
+  POINT_GROUP_DEFINITIONS,
+} = require("../runtime/compatibility/catalog.cjs");
+const {
   OPENCODEX_RUNTIME_BOOTSTRAP_PATH,
   createStaticAssetService,
 } = require("../runtime/http/static-assets.cjs");
+const {
+  messagesForLocale,
+  runtimeCompatibilityMessagesForLocale,
+} = require("../../shared/i18n/index.cjs");
 
 const WEB_SHELL_INDEX = path.resolve(__dirname, "..", "..", "web-shell", "index.html");
 const INTERNAL_PROVIDER_DIR = path.resolve(__dirname, "..", "..", "web-shell", "internal", "providers");
@@ -120,10 +129,10 @@ function makeOfficialWebviewDir(t) {
   return dir;
 }
 
-function createService(webviewDir, compatibilityService = null) {
+function createService(webviewDir, compatibilityService = null, locale = "en-US") {
   return createStaticAssetService({
     compatibilityService,
-    getI18nSnapshot: () => ({ locale: "en-US", messages: {} }),
+    getI18nSnapshot: () => ({ locale, messages: messagesForLocale(locale) }),
     getOfficialBundle: () => ({ webviewDir }),
   });
 }
@@ -198,6 +207,43 @@ test("runtime compatibility diagnostics are public, grouped, explained, and repo
   const sidebarIndex = bootstrap.indexOf("__opencodexSidebarPreviewInstalled");
   assert.ok(compatibilityIndex >= 0);
   assert.ok(sidebarIndex > compatibilityIndex);
+});
+
+test("runtime compatibility page follows the public authentication locale", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  for (const [locale, expectedTitle] of [
+    ["zh-CN", "OpenCodex虚拟骨架调试"],
+    ["en-US", "OpenCodex Virtual Skeleton Diagnostics"],
+  ]) {
+    const service = createService(webviewDir, null, locale);
+    const reqPath = "/settings/developer/runtime-compatibility";
+    const response = serveOfficialAssetResponse(service, reqPath, "localhost:3737", {
+      "accept-encoding": "identity",
+    });
+    const page = response.body.toString("utf8");
+    assert.equal(response.status, 200);
+    assert.equal(response.headers["cache-control"], "no-store");
+    assert.match(response.headers["content-type"], /^text\/html/);
+    assert.match(page, new RegExp(`<html lang="${locale}">`));
+    assert.match(page, new RegExp(JSON.stringify(expectedTitle).slice(1, -1)));
+    assert.match(page, new RegExp(`"locale":"${locale}"`));
+    assert.doesNotMatch(page, /opencodex-runtime-config/);
+  }
+});
+
+test("English diagnostics metadata covers every built-in group, adapter, and point", () => {
+  const messages = runtimeCompatibilityMessagesForLocale("en-US");
+  for (const group of POINT_GROUP_DEFINITIONS) {
+    assert.ok(messages[`web.runtimeCompatibility.group.${group.id}.name`], `missing group name: ${group.id}`);
+    assert.ok(messages[`web.runtimeCompatibility.group.${group.id}.description`], `missing group description: ${group.id}`);
+  }
+  for (const adapter of ADAPTER_DEFINITIONS) {
+    assert.ok(messages[`web.runtimeCompatibility.adapter.${adapter.id}.name`], `missing adapter name: ${adapter.id}`);
+    assert.ok(messages[`web.runtimeCompatibility.adapter.${adapter.id}.description`], `missing adapter description: ${adapter.id}`);
+  }
+  for (const point of POINT_DEFINITIONS) {
+    assert.ok(messages[`web.runtimeCompatibility.point.${point.id}.description`], `missing point: ${point.id}`);
+  }
 });
 
 test("compatibility capabilities preserve renderer HTML output byte for byte", (t) => {

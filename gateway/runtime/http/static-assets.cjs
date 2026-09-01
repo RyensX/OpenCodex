@@ -21,6 +21,7 @@ const {
 } = require("../core/plugin-assets.cjs");
 const { gzipIfUseful, send } = require("./http-utils.cjs");
 const { OPENCODEX_VERSION_LABEL } = require("../../../shared/app-version.cjs");
+const { runtimeCompatibilityMessagesForLocale } = require("../../../shared/i18n/index.cjs");
 const { createHostModificationRuntime } = require("../modification/production-runtime.cjs");
 
 const configuredPatchedAssetCacheMaxBytes = Number(
@@ -1582,6 +1583,32 @@ ${pluginGatewayStateBootstrapScript()}
       };
       const entry = cachedPatchedAsset(reqPath, file, req);
       return typeof entry?.then === "function" ? entry.then(sendEntry) : sendEntry(entry);
+    }
+
+    if (
+      file === WEB_SHELL_STATIC_FILES.get(RUNTIME_COMPATIBILITY_PAGE_PATH) &&
+      (reqPath === RUNTIME_COMPATIBILITY_PAGE_PATH || reqPath === RUNTIME_COMPATIBILITY_SETTINGS_PATH)
+    ) {
+      const i18n = currentI18n();
+      const pageI18n = {
+        ...i18n,
+        messages: {
+          ...i18n.messages,
+          ...runtimeCompatibilityMessagesForLocale(i18n.locale),
+        },
+      };
+      let html = patchHtmlLang(readText(file), pageI18n.locale);
+      const bootstrap = webShellBootstrapScript(pageI18n);
+      // 调试页公开可读，但语言必须与认证页来自同一快照；动态 HTML 不参与静态文件 ETag。
+      html = html.includes("<!-- opencodex-runtime-config -->")
+        ? html.replace("<!-- opencodex-runtime-config -->", bootstrap)
+        : html.replace(/<\/head>/i, `    ${bootstrap}\n  </head>`);
+      const response = gzipIfUseful(
+        req,
+        { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+        Buffer.from(html, "utf-8")
+      );
+      return send(res, status, response.headers, response.body);
     }
 
     const cacheControl = cacheControlForRequestPath(reqPath);
