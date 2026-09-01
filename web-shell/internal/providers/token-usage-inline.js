@@ -12,6 +12,7 @@
   const PLUGIN_ID = "opencodex.token-usage-inline";
   const BADGE_ATTR = "data-opencodex-token-usage-inline";
   const REQUEST_RETRY_MS = 65 * 1000;
+  const USAGE_RETRY_DELAYS_MS = Object.freeze([2500, 10 * 1000, 60 * 1000]);
   const MAX_REQUESTED_KEYS = 600;
   const MAX_PENDING_SCAN_ROOTS = 64;
   const DIAGNOSTIC_KEY = "__OpenCodexTokenUsageInline";
@@ -30,6 +31,8 @@
     nullResponses: 0,
     observedRows: 0,
     rendered: 0,
+    retriesAttempted: 0,
+    retriesScheduled: 0,
     requested: 0,
     rows: 0,
   };
@@ -251,6 +254,60 @@
     }
   }
 
+  function createUsageRetryQueue({ canRetry, delays, maxEntries, onRetry, scheduler }) {
+    const entries = new Map();
+
+    const cancel = (key) => {
+      const entry = entries.get(key);
+      if (!entry) return;
+      if (entry.timer != null) scheduler.clearTimeout(entry.timer);
+      entries.delete(key);
+    };
+
+    const trim = () => {
+      while (entries.size > maxEntries) {
+        const oldestKey = entries.keys().next().value;
+        if (!oldestKey) break;
+        cancel(oldestKey);
+      }
+    };
+
+    const schedule = (key, row, ids) => {
+      if (!key || !row || !ids) return false;
+      const previous = entries.get(key);
+      if (previous?.timer != null) return false;
+      const attempt = previous?.attempt || 0;
+      if (attempt >= delays.length) return false;
+      const entry = { attempt: attempt + 1, ids, row, timer: null };
+      entry.timer = scheduler.setTimeout(() => {
+        entry.timer = null;
+        if (entries.get(key) !== entry) return;
+        if (!canRetry(row, ids)) {
+          entries.delete(key);
+          return;
+        }
+        onRetry(row, ids);
+      }, delays[attempt]);
+      // 重新插入维持最近调度顺序，超限时优先取消最旧回复的定时器。
+      entries.delete(key);
+      entries.set(key, entry);
+      trim();
+      return true;
+    };
+
+    const cancelRow = (row) => {
+      for (const [key, entry] of Array.from(entries.entries())) {
+        if (entry.row === row) cancel(key);
+      }
+    };
+
+    const clear = () => {
+      for (const key of Array.from(entries.keys())) cancel(key);
+    };
+
+    return Object.freeze({ cancel, cancelRow, clear, schedule });
+  }
+
   registerPlugin({
     id: PLUGIN_ID,
     name: "Token usage inline",
@@ -278,6 +335,7 @@
       document.__opencodexTokenUsageInlineInstalled = true;
 
       const observedRows = new Set();
+      const intersectingRows = new Set();
       const pendingScanRoots = new Set();
       const requestedAtByKey = new Map();
       // WeakMap 绑定 DOM row 和 turn 信息；虚拟列表卸载后可被 GC 自动回收。
@@ -382,7 +440,12 @@
         modificationEffects?.primary?.emit();
       };
 
-      const requestUsageForRow = (row, providedIds) => {
+      let usageRetries = null;
+      const scheduleUsageRetry = (row, ids) => {
+        if (usageRetries?.schedule(ids?.key, row, ids)) diagnostics.retriesScheduled += 1;
+      };
+
+      const requestUsageForRow = (row, providedIds, retry = false) => {
         // 后台标签只保留权威缓存更新，不主动发文件查询；恢复前台后由 IO 重新确认可见行。
         if (disposed || document.visibilityState === "hidden" || !context.plugin.isEnabled()) return;
         const ids = rememberRowIds(row, providedIds || idsForRow(row));
@@ -392,7 +455,7 @@
         diagnostics.requested += 1;
         const requestedAt = requestedAtByKey.get(ids.key) || 0;
         // null/失败结果也短暂限流，避免滚动或 DOM 重排时对同一 turn 重复查询。
-        if (Date.now() - requestedAt < REQUEST_RETRY_MS) return;
+        if (!retry && Date.now() - requestedAt < REQUEST_RETRY_MS) return;
         requestedAtByKey.delete(ids.key);
         requestedAtByKey.set(ids.key, Date.now());
         trimRequestedKeys(requestedAtByKey);
@@ -401,21 +464,59 @@
           .then((usage) => {
             diagnostics.lastUsageFound = !!usage;
             if (usage) {
+              usageRetries?.cancel(ids.key);
               renderUsage(row, usage, ids);
             } else {
               diagnostics.nullResponses += 1;
+              scheduleUsageRetry(row, ids);
             }
           })
           .catch((error) => {
             diagnostics.lastError = error?.message || String(error || "token usage request failed");
+            scheduleUsageRetry(row, ids);
           });
       };
+
+      usageRetries = createUsageRetryQueue({
+        scheduler,
+        delays: USAGE_RETRY_DELAYS_MS,
+        maxEntries: MAX_REQUESTED_KEYS,
+        canRetry(row, ids) {
+          if (
+            disposed ||
+            document.visibilityState === "hidden" ||
+            !context.plugin.isEnabled() ||
+            !row?.isConnected ||
+            (intersectionObserver && !intersectingRows.has(row)) ||
+            !visibleElement(row)
+          ) {
+            requestedAtByKey.delete(ids.key);
+            return false;
+          }
+          const sameReply = idsForRow(row)?.key === ids.key;
+          if (!sameReply) requestedAtByKey.delete(ids.key);
+          return sameReply;
+        },
+        onRetry(row, ids) {
+          diagnostics.retriesAttempted += 1;
+          requestUsageForRow(row, ids, true);
+        },
+      });
 
       const intersectionObserver =
         typeof IntersectionObserver === "function"
           ? new IntersectionObserver((entries) => {
               for (const entry of entries) {
-                if (entry.isIntersecting) requestUsageForRow(entry.target);
+                const row = entry.target;
+                if (entry.isIntersecting) {
+                  intersectingRows.add(row);
+                  requestUsageForRow(row);
+                  continue;
+                }
+                intersectingRows.delete(row);
+                usageRetries?.cancelRow(row);
+                const ids = idsForRow(row);
+                if (ids?.key) requestedAtByKey.delete(ids.key);
               }
             })
           : null;
@@ -440,6 +541,10 @@
         for (const row of Array.from(observedRows)) {
           if (row.isConnected) continue;
           // 官方虚拟列表会频繁替换节点；及时解除观察，避免集合里保留离屏旧 DOM。
+          usageRetries?.cancelRow(row);
+          intersectingRows.delete(row);
+          const ids = idsForRow(row);
+          if (ids?.key) requestedAtByKey.delete(ids.key);
           observedRows.delete(row);
           intersectionObserver?.unobserve(row);
         }
@@ -558,10 +663,14 @@
           // 后台不消费 token IPC、不观察 DOM/几何，也不保留等待扫描的子树引用。
           stopMutationObservation();
           intersectionObserver?.disconnect();
+          intersectingRows.clear();
           deactivateConsumer();
           if (scanTimer) scheduler.clearTimeout(scanTimer);
           scanTimer = null;
           pendingScanRoots.clear();
+          usageRetries?.clear();
+          // capability 在零消费者时会清缓存；回到前台必须允许可见行立即重新查询。
+          requestedAtByKey.clear();
           return;
         }
         activateConsumer();
@@ -583,12 +692,17 @@
           if (!row.isConnected) {
             // 被动更新也可能先于下一轮 DOM 扫描到达，必须在这里同步释放原生观察引用。
             intersectionObserver?.unobserve(row);
+            usageRetries?.cancelRow(row);
+            intersectingRows.delete(row);
+            const staleIds = idsForRow(row);
+            if (staleIds?.key) requestedAtByKey.delete(staleIds.key);
             observedRows.delete(row);
             continue;
           }
           const ids = idsForRow(row);
           if (ids && ids.turnId === usage.turnId && (!ids.threadId || ids.threadId === usage.threadId)) {
             // 被动通道先拿到 usage 时，只更新已经观察过的行，不为了订阅事件重新扫全页。
+            usageRetries?.cancel(ids.key);
             renderUsage(row, usage, ids);
           }
         }
@@ -609,11 +723,13 @@
       return () => {
         disposed = true;
         if (scanTimer) scheduler.clearTimeout(scanTimer);
+        usageRetries?.clear();
         disposeUpdate();
         deactivateConsumer();
         stopMutationObservation();
         disposeVisibility();
         intersectionObserver?.disconnect();
+        intersectingRows.clear();
         for (const element of Array.from(document.querySelectorAll(`[${BADGE_ATTR}]`))) {
           element.remove();
         }

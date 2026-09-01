@@ -1076,6 +1076,72 @@ test("inline token usage shares the assistant action group visibility", () => {
   assert.match(source, /height: 0\.75rem;[\s\S]*width: 0\.75rem;/);
 });
 
+test("inline token usage retries transient empty results with a bounded queue", () => {
+  const source = fs.readFileSync(TOKEN_USAGE_INLINE_PLUGIN, "utf-8");
+  const start = source.indexOf("  function createUsageRetryQueue(");
+  assert.notEqual(start, -1);
+  const bodyStart = source.indexOf(") {", start) + 2;
+  let depth = 0;
+  let end = -1;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] !== "}") continue;
+    depth -= 1;
+    if (depth === 0) {
+      end = index + 1;
+      break;
+    }
+  }
+  assert.notEqual(end, -1);
+  const createUsageRetryQueue = new Function(
+    `${source.slice(start, end)}; return createUsageRetryQueue;`
+  )();
+  const timers = new Map();
+  const cleared = [];
+  const retried = [];
+  let timerId = 0;
+  const scheduler = {
+    setTimeout(callback, delay) {
+      const id = ++timerId;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      cleared.push(id);
+      timers.delete(id);
+    },
+  };
+  const queue = createUsageRetryQueue({
+    scheduler,
+    delays: [2500, 10000],
+    maxEntries: 2,
+    canRetry: () => true,
+    onRetry(row, ids) { retried.push([row, ids]); },
+  });
+  const row = {};
+  const ids = { key: "thread\0turn" };
+
+  assert.equal(queue.schedule(ids.key, row, ids), true);
+  assert.equal(queue.schedule(ids.key, row, ids), false, "同一回复不能并发保留多个重试定时器");
+  assert.equal([...timers.values()][0].delay, 2500);
+  const firstTimer = timers.get(1);
+  timers.delete(1);
+  firstTimer.callback();
+  assert.deepEqual(retried, [[row, ids]]);
+  assert.equal(queue.schedule(ids.key, row, ids), true);
+  assert.equal(timers.get(2).delay, 10000);
+  queue.cancel(ids.key);
+  assert.deepEqual(cleared, [2]);
+  assert.equal(timers.size, 0);
+
+  // 空响应、请求异常和页面隐藏都必须接入同一个有界清理流程。
+  assert.match(source, /diagnostics\.nullResponses \+= 1;\s*scheduleUsageRetry\(row, ids\);/);
+  assert.match(source, /lastError = error[\s\S]*scheduleUsageRetry\(row, ids\);/);
+  assert.match(source, /usageRetries\?\.clear\(\);\s*\/\/ capability 在零消费者时会清缓存/);
+  assert.match(source, /intersectingRows\.delete\(row\);\s*usageRetries\?\.cancelRow\(row\);/);
+  assert.match(source, /const USAGE_RETRY_DELAYS_MS = Object\.freeze\(\[2500, 10 \* 1000, 60 \* 1000\]\)/);
+});
+
 test("inline token usage resolves current official history and thread keys", () => {
   const source = fs.readFileSync(TOKEN_USAGE_INLINE_PLUGIN, "utf-8");
 

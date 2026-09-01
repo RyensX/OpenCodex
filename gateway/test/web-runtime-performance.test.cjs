@@ -1813,6 +1813,65 @@ test("token usage passive parsing bounds wide and cyclic payload traversal", () 
   release();
 });
 
+test("token usage capability expires transient empty results before the UI retry", async () => {
+  let now = Date.parse("2026-09-01T00:00:00.000Z");
+  class TestDate extends Date {
+    static now() { return now; }
+  }
+  let fetchCount = 0;
+  const window = {
+    clearTimeout,
+    location: { origin: "http://127.0.0.1", pathname: "/" },
+    setTimeout,
+  };
+  window.window = window;
+  vm.runInNewContext(TOKEN_USAGE_CAPABILITY_SOURCE, {
+    AbortController,
+    Date: TestDate,
+    Headers,
+    URL,
+    console,
+    fetch: async () => {
+      fetchCount += 1;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return fetchCount === 1
+            ? { ok: true, threadId: "thread-1", turnId: "turn-1", usage: null }
+            : {
+                ok: true,
+                threadId: "thread-1",
+                turnId: "turn-1",
+                usage: { cachedInputTokens: 8, inputTokens: 10, outputTokens: 2 },
+              };
+        },
+      };
+    },
+    window,
+  });
+  const capability = window.__OpenCodexCreateTokenUsageCapability();
+  const release = capability.acquireConsumer("negative-cache-test");
+  const request = { threadId: "thread-1", turnId: "turn-1" };
+
+  assert.equal(await capability.getForTurn(request), null);
+  assert.equal(await capability.getForTurn(request), null);
+  assert.equal(fetchCount, 1, "瞬时空结果在短 TTL 内仍应合并后续查询");
+  now += 2001;
+  assert.deepEqual(JSON.parse(JSON.stringify(await capability.getForTurn(request))), {
+    cacheHitRate: 0.8,
+    cachedInputTokens: 8,
+    inputTokens: 10,
+    outputTokens: 2,
+    source: "session-api",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    updatedAt: now,
+  });
+  assert.equal(fetchCount, 2, "UI 首次重试前必须允许重新读取已经追加 token_count 的 session");
+  release();
+});
+
 test("token usage capability factory follows the current document generation", () => {
   const document = {};
   const window = {

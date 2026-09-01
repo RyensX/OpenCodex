@@ -17,7 +17,8 @@
     const TOKEN_USAGE_THREAD_STATE_LIMIT = 256;
     const TOKEN_USAGE_PENDING_QUERY_LIMIT = 256;
     const TOKEN_USAGE_TTL_MS = 24 * 60 * 60 * 1000;
-    const TOKEN_USAGE_NEGATIVE_TTL_MS = 60 * 1000;
+    // 新回复的最终 token_count 可能晚于操作栏出现；空结果只做瞬时缓存，交给 UI 的有界重试补齐。
+    const TOKEN_USAGE_NEGATIVE_TTL_MS = 2 * 1000;
     const TOKEN_USAGE_TURN_ASSOCIATION_WINDOW_MS = 10 * 60 * 1000;
     const TOKEN_USAGE_TREE_SCAN_LIMIT = 2000;
     const TOKEN_USAGE_FETCH_TIMEOUT_MS = 12 * 1000;
