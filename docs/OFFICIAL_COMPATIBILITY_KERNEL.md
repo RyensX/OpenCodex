@@ -101,7 +101,7 @@ Kernel 分为注册、`compile`、`activate`：
 
 ## 6. 分类组与报告 v2
 
-当前 17 个分类组覆盖 Renderer 核心桥、首屏历史、工作区、远端文件、智能调度、通知节能、Token、移动交互、Renderer UI、浏览器平台、Web 网络、项目导航、Gateway Runtime/IPC、官方 Main、Renderer 静态资源和 Runner。
+当前 17 个分类组统一按能力领域组织，覆盖 Renderer 核心桥、首屏与项目会话导航、工作区、远端文件、智能调度、通知集成、后台效率、Token、移动交互、Renderer 壳层、浏览器平台、Web 服务请求、隐藏 Runtime 生命周期、消息路由、仓库发现、Renderer 资源交付和 Runner。
 
 组状态仅由成员最严重状态派生：
 

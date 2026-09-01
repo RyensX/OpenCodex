@@ -741,6 +741,9 @@ export function installPluginSdk(host: BrowserAdapterHost): void {
 
     const groupApi = Object.freeze({
       ...POINT_GROUPS,
+      // 旧名称只作为 SDK 源码兼容别名，不参与当前分类组目录和调试页展示。
+      notificationPower: POINT_GROUPS.backgroundEfficiency,
+      projectNavigation: POINT_GROUPS.startupHistory,
       register(definition: { id: string; name: string; description: string; order: number }): PointGroupRef {
         assertCurrentGeneration();
         if (committed) throw new Error("插件注册批次已经提交");

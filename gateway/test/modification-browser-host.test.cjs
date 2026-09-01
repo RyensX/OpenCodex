@@ -503,6 +503,8 @@ test("browser plugin SDK v2 commits strong references and mounts virtual views",
     apiVersion: 2,
     sdkVersion: "^2.0.0",
   });
+  assert.equal(sdk.groups.notificationPower, sdk.groups.backgroundEfficiency);
+  assert.equal(sdk.groups.projectNavigation, sdk.groups.startupHistory);
   const group = sdk.groups.register({
     id: "example.virtual-view-group",
     name: "虚拟视图示例",

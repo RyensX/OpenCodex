@@ -44,10 +44,36 @@ test("typed modification catalog assigns every point to a group and adapter chai
   })), true);
   const groupById = new Map(POINT_GROUP_DEFINITIONS.map((group) => [group.id, group]));
   assert.equal(groupById.get("workspace-creation").name, "新项目和新工作树创建");
-  assert.equal(groupById.get("notification-power").name, "通知和隐藏 Runtime 后台节能");
+  assert.equal(groupById.get("notifications").name, "通知与系统后台集成");
+  assert.equal(groupById.get("background-efficiency").name, "后台运行效率与节能");
   assert.equal(
     POINT_DEFINITIONS.find((point) => point.id === "web.runtime.bridge.feature-gates").group.id,
-    "workspace-creation"
+    "renderer-core"
+  );
+  assert.deepEqual(
+    Object.fromEntries(POINT_GROUP_DEFINITIONS.map((group) => [
+      group.id,
+      POINT_DEFINITIONS.filter((point) => point.group === group).length,
+    ])),
+    {
+      "renderer-core": 13,
+      "startup-history": 9,
+      "workspace-creation": 4,
+      "remote-files": 7,
+      "smart-routing": 9,
+      notifications: 5,
+      "background-efficiency": 8,
+      "token-usage": 2,
+      "mobile-interaction": 4,
+      "renderer-ui": 6,
+      "browser-platform": 3,
+      "web-network": 3,
+      "gateway-runtime": 9,
+      "gateway-ipc": 4,
+      "official-main": 3,
+      "renderer-resources": 8,
+      "runner-packaging": 5,
+    }
   );
 });
 

@@ -133,12 +133,16 @@ export interface OpenCodexPluginSdk {
     readonly workspace: PointGroupRef;
     readonly remoteFiles: PointGroupRef;
     readonly smartRouting: PointGroupRef;
+    readonly notifications: PointGroupRef;
+    readonly backgroundEfficiency: PointGroupRef;
+    /** @deprecated Use backgroundEfficiency. */
     readonly notificationPower: PointGroupRef;
     readonly tokenUsage: PointGroupRef;
     readonly mobileInteraction: PointGroupRef;
     readonly rendererUi: PointGroupRef;
     readonly browserPlatform: PointGroupRef;
     readonly webNetwork: PointGroupRef;
+    /** @deprecated Use startupHistory. */
     readonly projectNavigation: PointGroupRef;
     readonly gatewayRuntime: PointGroupRef;
     readonly gatewayIpc: PointGroupRef;
