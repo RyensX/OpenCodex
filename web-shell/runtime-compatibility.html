@@ -3,20 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>OpenCodex Runtime Compatibility</title>
+    <title data-i18n="web.runtimeCompatibility.pageTitle">OpenCodex虚拟骨架调试</title>
+    <!-- 调试页与认证页消费同一份公开语言配置，不依赖登录状态。 -->
+    <!-- opencodex-runtime-config -->
     <link rel="stylesheet" href="/opencodex/runtime-compatibility.css" />
   </head>
   <body>
     <main class="page">
       <header class="hero">
         <div>
-          <p class="eyebrow">OpenCodex Developer Diagnostics</p>
-          <h1>官方运行时兼容性</h1>
-          <p id="runtimeIdentity" class="muted">正在读取运行时状态…</p>
+          <h1 data-i18n="web.runtimeCompatibility.title">OpenCodex虚拟骨架调试</h1>
+          <p id="runtimeIdentity" class="muted" data-i18n="web.runtimeCompatibility.loading">正在读取运行时状态…</p>
         </div>
         <div class="actions">
-          <button id="refreshButton" type="button">刷新</button>
-          <button id="backButton" type="button" class="secondary">返回</button>
+          <button id="refreshButton" type="button" data-i18n="common.refresh">刷新</button>
+          <button id="backButton" type="button" class="secondary" data-i18n="common.back">返回</button>
         </div>
       </header>
 
@@ -25,26 +26,26 @@
       <section class="panel">
         <div class="panel-heading filters">
           <div>
-            <h2>修改点</h2>
-            <p class="muted">每个修改点按开发者功能组归类；分组只用于查看，不影响启用、回退或执行决策。</p>
+            <h2 data-i18n="web.runtimeCompatibility.points">修改点</h2>
+            <p class="muted" data-i18n="web.runtimeCompatibility.pointsDescription">每个修改点按开发者功能组归类；分组只用于查看，不影响启用、回退或执行决策。</p>
           </div>
-          <div class="filter-controls" role="group" aria-label="修改点筛选">
+          <div class="filter-controls" role="group" aria-label="修改点筛选" data-i18n-aria-label="web.runtimeCompatibility.filters">
             <label>
-              <span>注入类型</span>
+              <span data-i18n="web.runtimeCompatibility.adapterFilter">注入类型</span>
               <select id="adapterFilter">
-                <option value="">全部</option>
+                <option value="" data-i18n="common.all">全部</option>
               </select>
             </label>
             <label>
-              <span>状态</span>
+              <span data-i18n="common.status">状态</span>
               <select id="statusFilter">
-                <option value="">全部</option>
-                <option value="unavailable">不可用</option>
-                <option value="degraded">降级</option>
-                <option value="pending">待检测</option>
-                <option value="ready">已就绪</option>
-                <option value="healthy">已命中</option>
-                <option value="disabled">已关闭</option>
+                <option value="" data-i18n="common.all">全部</option>
+                <option value="unavailable" data-i18n="web.runtimeCompatibility.status.unavailable">不可用</option>
+                <option value="degraded" data-i18n="web.runtimeCompatibility.status.degraded">降级</option>
+                <option value="pending" data-i18n="web.runtimeCompatibility.status.pending">待检测</option>
+                <option value="ready" data-i18n="web.runtimeCompatibility.status.ready">已就绪</option>
+                <option value="healthy" data-i18n="web.runtimeCompatibility.status.healthy">已命中</option>
+                <option value="disabled" data-i18n="web.runtimeCompatibility.status.disabled">已关闭</option>
               </select>
             </label>
           </div>
@@ -53,33 +54,33 @@
           <table id="pointsTable">
             <thead>
               <tr>
-                <th scope="col">修改点</th>
+                <th scope="col" data-i18n="web.runtimeCompatibility.points">修改点</th>
                 <th scope="col">
-                  <span class="column-heading">注入类别<button class="help-button" type="button" data-help="adapter" aria-label="查看注入类别说明">?</button></span>
+                  <span class="column-heading"><span data-i18n="web.runtimeCompatibility.column.adapter">注入类别</span><button class="help-button" type="button" data-help="adapter" aria-label="查看注入类别说明" data-i18n-aria-label="web.runtimeCompatibility.help.adapterAria">?</button></span>
                 </th>
                 <th scope="col">
-                  <span class="column-heading">总状态<button class="help-button" type="button" data-help="overall" aria-label="查看总状态说明">?</button></span>
+                  <span class="column-heading"><span data-i18n="web.runtimeCompatibility.column.overall">总状态</span><button class="help-button" type="button" data-help="overall" aria-label="查看总状态说明" data-i18n-aria-label="web.runtimeCompatibility.help.overallAria">?</button></span>
                 </th>
                 <th scope="col">
-                  <span class="column-heading">定位<button class="help-button" type="button" data-help="location" aria-label="查看定位状态说明">?</button></span>
+                  <span class="column-heading"><span data-i18n="web.runtimeCompatibility.column.location">定位</span><button class="help-button" type="button" data-help="location" aria-label="查看定位状态说明" data-i18n-aria-label="web.runtimeCompatibility.help.locationAria">?</button></span>
                 </th>
                 <th scope="col">
-                  <span class="column-heading">应用<button class="help-button" type="button" data-help="application" aria-label="查看应用状态说明">?</button></span>
+                  <span class="column-heading"><span data-i18n="web.runtimeCompatibility.column.application">应用</span><button class="help-button" type="button" data-help="application" aria-label="查看应用状态说明" data-i18n-aria-label="web.runtimeCompatibility.help.applicationAria">?</button></span>
                 </th>
                 <th scope="col">
-                  <span class="column-heading">验证<button class="help-button" type="button" data-help="verification" aria-label="查看验证状态说明">?</button></span>
+                  <span class="column-heading"><span data-i18n="web.runtimeCompatibility.column.verification">验证</span><button class="help-button" type="button" data-help="verification" aria-label="查看验证状态说明" data-i18n-aria-label="web.runtimeCompatibility.help.verificationAria">?</button></span>
                 </th>
                 <th scope="col">
-                  <span class="column-heading">激活<button class="help-button" type="button" data-help="activation" aria-label="查看激活状态说明">?</button></span>
+                  <span class="column-heading"><span data-i18n="web.runtimeCompatibility.column.activation">激活</span><button class="help-button" type="button" data-help="activation" aria-label="查看激活状态说明" data-i18n-aria-label="web.runtimeCompatibility.help.activationAria">?</button></span>
                 </th>
                 <th scope="col">
-                  <span class="column-heading">命中<button class="help-button" type="button" data-help="exercise" aria-label="查看命中状态说明">?</button></span>
+                  <span class="column-heading"><span data-i18n="web.runtimeCompatibility.column.exercise">命中</span><button class="help-button" type="button" data-help="exercise" aria-label="查看命中状态说明" data-i18n-aria-label="web.runtimeCompatibility.help.exerciseAria">?</button></span>
                 </th>
               </tr>
             </thead>
           </table>
         </div>
-        <p id="emptyState" class="empty" hidden>没有符合筛选条件的修改点。</p>
+        <p id="emptyState" class="empty" hidden data-i18n="web.runtimeCompatibility.empty">没有符合筛选条件的修改点。</p>
       </section>
 
       <p id="errorBanner" class="error" hidden></p>
@@ -89,7 +90,7 @@
       <div class="help-dialog-content">
         <header class="help-dialog-header">
           <h2 id="helpDialogTitle"></h2>
-          <button id="helpDialogClose" class="help-dialog-close" type="button" aria-label="关闭说明">×</button>
+          <button id="helpDialogClose" class="help-dialog-close" type="button" aria-label="关闭说明" data-i18n-aria-label="web.runtimeCompatibility.help.closeAria">×</button>
         </header>
         <p id="helpDialogDescription" class="help-dialog-description"></p>
         <div id="helpDialogStatuses" class="help-status-list"></div>
