@@ -71,7 +71,8 @@ jobs:
       - name: Build ad-hoc signed DMG installers
         run: |
           pnpm run build
-          pnpm exec electron-builder --mac dmg --x64 --arm64 --config.mac.identity=-
+          # 安装包由后续 job 统一发布，禁止 electron-builder 在 CI 中自动上传。
+          pnpm exec electron-builder --mac dmg --x64 --arm64 --config.mac.identity=- --publish never
 
       - name: Verify macOS signatures
         shell: bash
@@ -121,7 +122,8 @@ jobs:
       - name: Build NSIS installer
         run: |
           pnpm run build
-          pnpm exec electron-builder --win nsis --x64
+          # 安装包由后续 job 统一发布，禁止 electron-builder 在 CI 中自动上传。
+          pnpm exec electron-builder --win nsis --x64 --publish never
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v6
