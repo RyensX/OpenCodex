@@ -111,6 +111,7 @@ function createHarness({
     initialBootstrap,
     plugin: registeredPlugin,
     postedMessages,
+    window,
   };
 }
 
@@ -144,6 +145,9 @@ test("project recent sort plugin is discovered with localized copy", () => {
 test("recent mode masks project order in both bootstrap and global-state fetches", async () => {
   const harness = createHarness({ flatPreferences: { projectSortMode: "updated_at" } });
 
+  // 新版 AppHost 查询补丁读取同一个实时开关；旧 bridge 拦截仍按原路径工作。
+  assert.equal(harness.window.__OpenCodexProjectRecentSortActive, true);
+
   const bootstrap = parsed(harness.bridge.getInitialSidebarBootstrap());
   assert.deepEqual(
     bootstrap.globalStateEntries.find((entry) => entry.key === PROJECT_ORDER_KEY)?.value,
@@ -167,6 +171,8 @@ test("recent mode masks project order in both bootstrap and global-state fetches
 
 test("manual mode keeps the saved project order and forwards the official request", async () => {
   const harness = createHarness({ flatPreferences: { projectSortMode: "manual" } });
+
+  assert.equal(harness.window.__OpenCodexProjectRecentSortActive, false);
 
   assert.deepEqual(
     parsed(harness.bridge.getInitialSidebarBootstrap()).globalStateEntries.find(
@@ -245,6 +251,7 @@ test("disabling the plugin restores the original bridge methods and real project
   const harness = createHarness({ flatPreferences: { projectSortMode: "updated_at" } });
   harness.dispose();
 
+  assert.equal(harness.window.__OpenCodexProjectRecentSortActive, false);
   assert.equal(harness.bridge.getInitialSidebarBootstrap(), harness.initialBootstrap);
   const request = projectOrderFetch("after-dispose");
   await harness.bridge.sendMessageFromView(request);

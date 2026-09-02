@@ -84,12 +84,21 @@
       let installTimer = null;
       let unsubscribePersistedAtom = null;
       const bridgePatches = [];
+      const appHostOwner = {};
+      const appHostHit = () => modificationEffects?.primary?.emit();
 
       function usesRecentProjectSort() {
         // 旧版统一排序状态仍会覆盖新版项目排序状态，因此必须按官方优先级一起判断。
         const effectiveSortMode =
           legacySidebarSortMode ?? normalizedSortMode(flatSidebarPreferences?.projectSortMode) ?? "priority";
         return RECENT_SORT_MODES.has(effectiveSortMode);
+      }
+
+      function syncAppHostSortState() {
+        // 新版 get-global-state 走 AppHost；响应层补丁读取此开关，旧版仍由下面的 bridge hook 处理。
+        w.__OpenCodexProjectRecentSortOwner = appHostOwner;
+        w.__OpenCodexProjectRecentSortActive = usesRecentProjectSort();
+        w.__OpenCodexProjectRecentSortHit = appHostHit;
       }
 
       function emitRendererMessage(type, payload) {
@@ -133,6 +142,7 @@
         } else {
           legacySidebarSortMode = payload.deleted ? null : normalizedSortMode(payload.value);
         }
+        syncAppHostSortState();
         if (wasRecent !== usesRecentProjectSort()) emitProjectOrderInvalidation();
       }
 
@@ -217,8 +227,10 @@
       }
 
       if (typeof w.queueMicrotask === "function") {
+        syncAppHostSortState();
         w.queueMicrotask(installBridgePatches);
       } else {
+        syncAppHostSortState();
         Promise.resolve().then(installBridgePatches);
       }
 
@@ -227,6 +239,11 @@
         if (installTimer != null && typeof w.clearTimeout === "function") scheduler.clearTimeout(installTimer);
         unsubscribePersistedAtom?.();
         restoreBridges();
+        if (w.__OpenCodexProjectRecentSortOwner === appHostOwner) {
+          w.__OpenCodexProjectRecentSortActive = false;
+          delete w.__OpenCodexProjectRecentSortOwner;
+          if (w.__OpenCodexProjectRecentSortHit === appHostHit) delete w.__OpenCodexProjectRecentSortHit;
+        }
         // 停用插件后让官方重新读取真实项目顺序，避免虚拟空顺序残留在 query 缓存中。
         emitProjectOrderInvalidation();
       };

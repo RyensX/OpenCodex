@@ -132,6 +132,12 @@ const APPLICATION_MENU_CAPABILITY_CHECK_AT_START_RE =
   /\b[A-Za-z_$][\w$]*\(\)\s*&&\s*[A-Za-z_$][\w$]*\??\.applicationMenu\s*!={1,2}\s*(?:null|void 0)\b/y;
 const APPLICATION_MENU_SERVICE_USAGE_RE =
   /\b[A-Za-z_$][\w$]*\??\.applicationMenu\??\.(?:getSnapshot|invokeItem)\b/;
+const PROJECT_ORDER_APP_HOST_QUERY_TOKEN = "getInstance().post(`vscode://codex/${";
+const PROJECT_ORDER_APP_HOST_QUERY_RE =
+  /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=\(await ([A-Za-z_$][\w$]*)\.getInstance\(\)\.post\(`vscode:\/\/codex\/\$\{\2\}`,JSON\.stringify\(\3\),([A-Za-z_$][\w$]*)\(\6\),\5\)\)\.body;return \4\?\4\(\7\):\7\}/g;
+const PROJECT_RECENT_GROUP_ORDER_TOKEN = "projectOrder:";
+const PROJECT_RECENT_GROUP_ORDER_RE =
+  /function ([A-Za-z_$][\w$]*)\(\{groups:([A-Za-z_$][\w$]*),projectOrder:([A-Za-z_$][\w$]*)\}\)\{return ([A-Za-z_$][\w$]*)\(\2,\3\)\}/g;
 const APP_SERVER_REQUEST_CLIENT_FIELDS_RE =
   /pendingConfigReadRequests=new Map;queuedRequests=\[\]/;
 const APP_SERVER_REQUEST_CLIENT_DISPATCH_ERROR = "AppServerRequestClient is missing a message dispatcher";
@@ -332,6 +338,7 @@ function createStaticAssetService({
   const patchedOfficialPrefixes = Array.from(
     new Set([
       PATCHED_OFFICIAL_PREFIX,
+      "/official-patched-v7/",
       "/official-patched-v6/",
       "/official-patched-v5/",
       "/official-patched-v4/",
@@ -1388,6 +1395,35 @@ ${pluginGatewayStateBootstrapScript()}
     return patched;
   }
 
+  function patchProjectRecentSortAppHostQuery(source) {
+    /**
+     * 新版 renderer 把 get-global-state 改走 AppHost httpFetch，旧 Provider 无法再截获 sendMessageFromView。
+     * 这里只在插件声明“最近排序”时把 project-order 的返回值虚拟为空，其它 AppHost RPC 完全透明。
+     */
+    return source
+      .replace(
+        PROJECT_ORDER_APP_HOST_QUERY_RE,
+        (_match, functionName, methodName, paramsName, selectName, signalName, sourceName, resultName, clientName, headerName) =>
+          [
+            `async function ${functionName}(${methodName},${paramsName},${selectName},${signalName},${sourceName}){`,
+            `let ${resultName}=(await ${clientName}.getInstance().post(\`vscode://codex/\${${methodName}}\`,JSON.stringify(${paramsName}),${headerName}(${sourceName}),${signalName})).body;`,
+            `if(globalThis.__OpenCodexProjectRecentSortActive===true&&${methodName}===\`get-global-state\`&&${paramsName}?.key===\`project-order\`){`,
+            `${resultName}={...${resultName},value:[]};globalThis.__OpenCodexProjectRecentSortHit?.()}`,
+            `return ${selectName}?${selectName}(${resultName}):${resultName}}`,
+          ].join("")
+      )
+      .replace(
+        PROJECT_RECENT_GROUP_ORDER_RE,
+        (_match, functionName, groupsName, orderName, sorterName) =>
+          [
+            `function ${functionName}({groups:${groupsName},projectOrder:${orderName}}){`,
+            `let __opencodexGroups=${sorterName}(${groupsName},${orderName});`,
+            // 新版基础分组按旧到新排列；仅最近排序模式翻转，手动顺序仍完全交给官方函数。
+            "return globalThis.__OpenCodexProjectRecentSortActive===true?[...__opencodexGroups].reverse():__opencodexGroups}",
+          ].join("")
+      );
+  }
+
   function patchAppServerRequestScheduling(source) {
     /**
      * 官方调度器会把部分首屏必需读取与耗时的能力清单一起放进 background 队列。
@@ -1469,6 +1505,8 @@ ${pluginGatewayStateBootstrapScript()}
     return (
       /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath) ||
       data.includes(APPLICATION_MENU_TOKEN) ||
+      data.includes(PROJECT_ORDER_APP_HOST_QUERY_TOKEN) ||
+      data.includes(PROJECT_RECENT_GROUP_ORDER_TOKEN) ||
       data.includes(APP_SERVER_REQUEST_CLIENT_DISPATCH_ERROR) ||
       (!loopback &&
         (data.includes(OPEN_IN_FOLDER_LOCALE_TOKEN) ||
@@ -1488,6 +1526,7 @@ ${pluginGatewayStateBootstrapScript()}
       ? patchHistorySignalsCompatible(source)
       : source;
     patched = patchApplicationMenuCompatible(patched);
+    patched = patchProjectRecentSortAppHostQuery(patched);
     patched = patchRequestSchedulingCompatible(patched);
     if (!loopback) {
       patched = patchPluginImageCompatible(patched);
