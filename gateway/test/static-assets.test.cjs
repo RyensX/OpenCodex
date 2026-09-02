@@ -636,7 +636,10 @@ test("bridge resolves window focus from the browser instead of the hidden Electr
   assert.equal(emitted.at(-1).payload.isFocused, false);
 
   // 保留一条 wiring 断言，确保 WebSocket 入站数据实际经过已执行验证的 normalizer。
-  assert.match(bridge, /browserRendererMessagePayload\(effectiveChannel, messagePayload\)/);
+  assert.match(
+    bridge,
+    /browserRendererMessagePayload\(\s*effectiveChannel,\s*authoritativeMessagePayload\s*\)/
+  );
   assert.match(bridge, /dispatch\(effectiveChannel, rendererMessagePayload\)/);
   assert.match(bridge, /emitWindowMessage\(effectiveChannel, rendererMessagePayload\)/);
 });

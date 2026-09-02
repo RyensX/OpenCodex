@@ -437,7 +437,6 @@
     locale_source: "IDE",
   };
   const STATSIG_DEFAULT_FEATURE_OVERRIDES = {
-    guardian_approval: true,
     "3903742690": true,
     // 官方新会话的“新工作树”入口由该门控制；Web 本地快照必须保留桌面端已有能力。
     "505458": true,
@@ -2952,6 +2951,13 @@
     return normalized;
   }
 
+  /** 记录官方 shared-object 回包，并保留官方值本身的 true/false/缺省语义。 */
+  function cacheSharedObjectUpdatedPayload(payload) {
+    if (!isPlainObject(payload) || !payload.key) return payload;
+    const value = setSharedObjectSnapshotValue(payload.key, payload.value);
+    return value === payload.value ? payload : { ...payload, value };
+  }
+
   /** 读取 shared-object snapshot，特定 key 会懒补默认值。 */
   function getSharedObjectSnapshotValue(key) {
     if (key === STATSIG_DEFAULT_FEATURES_CONFIG || sharedObjectSnapshot.has(key)) {
@@ -3139,7 +3145,7 @@
         }
         if (payload && typeof payload === "object" && payload.type === "shared-object-subscribe" && payload.key) {
           modificationEffects?.sharedObject?.emit();
-          emitSharedObjectSnapshotValue(payload.key);
+          // 初始订阅只交给官方 runtime 回包，避免本地快照与官方权威值竞争覆盖 renderer 状态。
         }
         if (payload && typeof payload === "object" && payload.type === "open-in-browser" && payload.url) {
           return openExternal(payload.url);
@@ -3629,7 +3635,14 @@
             surfaceFetchIpcError("fetch-stream-error", messagePayload);
           }
           handleTokenUsageGatewayPayload(messagePayload);
-          const rendererMessagePayload = browserRendererMessagePayload(effectiveChannel, messagePayload);
+          const authoritativeMessagePayload =
+            effectiveChannel === "shared-object-updated"
+              ? cacheSharedObjectUpdatedPayload(messagePayload)
+              : messagePayload;
+          const rendererMessagePayload = browserRendererMessagePayload(
+            effectiveChannel,
+            authoritativeMessagePayload
+          );
           if (shouldDispatchGatewayMessage(msg.channel, effectiveChannel)) {
             dispatch(effectiveChannel, rendererMessagePayload);
           }

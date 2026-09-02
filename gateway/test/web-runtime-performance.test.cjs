@@ -1442,6 +1442,56 @@ test("shared and persisted snapshots are bounded while preserving active keys", 
   assert.deepEqual(Array.from(snapshots.persistedKeys()), ["prompt-history", "composer-mode", "atom-a", "atom-c"]);
 });
 
+test("official shared-object updates remain authoritative for guardian approval", () => {
+  const state = vm.runInNewContext(
+    `(() => {
+      const SHARED_OBJECT_SNAPSHOT_MAX_ENTRIES = 8;
+      const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
+      const STATSIG_DEFAULT_FEATURE_OVERRIDES = { "505458": true };
+      const sharedObjectSnapshot = new Map();
+      const PINNED_SHARED_OBJECT_SNAPSHOT_KEYS = new Set([STATSIG_DEFAULT_FEATURES_CONFIG]);
+      function trimSnapshotMap() {}
+      ${sourceSection(BRIDGE_SOURCE, "  function isPlainObject", "\n\n  /** shared-object snapshot")}
+      ${sourceSection(BRIDGE_SOURCE, "  function normalizeSharedObjectSnapshotValue", "\n\n  /** 更新本地 shared-object")}
+      ${sourceSection(BRIDGE_SOURCE, "  function setSharedObjectSnapshotValue", "\n\n  /** 读取 shared-object")}
+      return {
+        cache: cacheSharedObjectUpdatedPayload,
+        read: () => sharedObjectSnapshot.get(STATSIG_DEFAULT_FEATURES_CONFIG),
+      };
+    })()`
+  );
+
+  const truePayload = state.cache({
+    key: "statsig_default_enable_features",
+    value: { guardian_approval: true },
+  });
+  assert.equal(truePayload.value.guardian_approval, true);
+  assert.equal(state.read().guardian_approval, true);
+
+  const falsePayload = state.cache({
+    key: "statsig_default_enable_features",
+    value: { guardian_approval: false },
+  });
+  assert.equal(falsePayload.value.guardian_approval, false);
+  assert.equal(state.read().guardian_approval, false);
+
+  const missingPayload = state.cache({
+    key: "statsig_default_enable_features",
+    value: {},
+  });
+  assert.equal(Object.hasOwn(missingPayload.value, "guardian_approval"), false);
+  assert.equal(Object.hasOwn(state.read(), "guardian_approval"), false);
+
+  const subscribeSection = sourceSection(
+    BRIDGE_SOURCE,
+    '        if (payload && typeof payload === "object" && payload.type === "shared-object-subscribe"',
+    '\n        if (payload && typeof payload === "object" && payload.type === "open-in-browser"'
+  );
+  assert.doesNotMatch(subscribeSection, /emitSharedObjectSnapshotValue/);
+  assert.doesNotMatch(BRIDGE_SOURCE, /guardian_approval:\s*true/);
+  assert.match(BRIDGE_SOURCE, /effectiveChannel === "shared-object-updated"[\s\S]*cacheSharedObjectUpdatedPayload/);
+});
+
 test("connector logo response cache is bounded and refreshes LRU order", () => {
   const cache = vm.runInNewContext(
     `(() => {
