@@ -10,6 +10,7 @@ const {
   CodexAsarCandidateProvider,
 } = require("../dist/official/CodexAsarScanner.js");
 const { AsarWebviewExtractor } = require("../dist/official/AsarWebviewExtractor.js");
+const { LocalCodexBundleProvider } = require("../dist/official/LocalCodexBundleProvider.js");
 const { OfficialBundleCache } = require("../dist/official/OfficialBundleCache.js");
 const { OfficialBundleFileSystem } = require("../dist/official/OfficialBundleFileSystem.js");
 const { OfficialRuntimeOptimizer } = require("../dist/official/OfficialRuntimeOptimizer.js");
@@ -436,6 +437,56 @@ test("runtime optimizer patches every native pet factory and prewarm in one chun
     optimized,
     /if\(this\.window!=null\|\|this\.openingWindowPromise!=null\|\|this\.isAppQuitting\)return/
   );
+});
+
+test("runtime optimizer patches the renamed avatar overlay paths in new official runtimes", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const mainPath = path.join(bundleDir, ".vite", "build", "main-avatar-overlay.js");
+  writeFile(
+    mainPath,
+    "var Overlay=class{logger=log(`avatar-overlay`);supportsInputShape=BrowserWindow.isInputShapeSupported();" +
+      "async restoreOpenState(e){this.globalState.get(`electron-avatar-overlay-open`)===!0&&await this.open(e)}" +
+      "async prewarm(e){if(this.window!=null||this.openingWindowPromise!=null||this.isAppQuitting)return;await this.ensureWindow(e)}" +
+      "async ensureWindow(e){if(this.isAppQuitting)return null;return this.createWindow(e)}}"
+  );
+  const compatibilityService = createCompatibilityService();
+  const optimizer = new OfficialRuntimeOptimizer({
+    fileSystem: new OfficialBundleFileSystem(),
+    compatibilityService,
+  });
+
+  try {
+    assert.deepEqual(optimizer.optimize(bundleDir), {
+      nativePetComposition: "gateway-css-fallback",
+      nativePetPrewarm: "gateway-lazy",
+      macPushRegistration: "not-present",
+      patchedFileCount: 1,
+      unsupportedFiles: [],
+    });
+    const optimized = fs.readFileSync(mainPath, "utf8");
+    // 新版保留 Manager 对象协议，但窗口创建、预热和 Profile 恢复都不能在隐藏 runtime 中发生。
+    assert.match(
+      optimized,
+      /async ensureWindow\(e\)\{if\(process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`\|\|this\.isAppQuitting\)return null;/
+    );
+    assert.match(
+      optimized,
+      /async prewarm\(e\)\{if\(process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`\|\|this\.window!=null/
+    );
+    assert.match(
+      optimized,
+      /async restoreOpenState\(e\)\{process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME!==`1`&&this\.globalState/
+    );
+    for (const pointId of [
+      "static.cache.main.native-pet.factory",
+      "static.cache.main.native-pet.prewarm",
+      "static.cache.main.native-pet.restore",
+    ]) {
+      assert.equal(compatibilityService.registry.point(pointId).status, "healthy");
+    }
+  } finally {
+    compatibilityService.dispose();
+  }
 });
 
 test("runtime optimizer reports a partially recognized native pet chunk", (t) => {
@@ -966,12 +1017,63 @@ test("runtime optimizer leaves bundles without native pet composition unchanged"
   assert.equal(fs.readFileSync(mainPath, "utf8"), "module.exports = { ok: true };");
 });
 
+test("runtime optimizer disables removed native pet points without degrading new official runtimes", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  writeFile(path.join(bundleDir, ".vite", "build", "main.js"), "module.exports = { ok: true };");
+  const compatibilityService = createCompatibilityService();
+  const optimizer = new OfficialRuntimeOptimizer({
+    fileSystem: new OfficialBundleFileSystem(),
+    compatibilityService,
+  });
+
+  try {
+    optimizer.optimize(bundleDir);
+    // 新版完全移除 Native Pet 时没有可执行补丁，三个点都应显示为不适用而不是降级。
+    for (const pointId of [
+      "static.cache.main.native-pet.factory",
+      "static.cache.main.native-pet.prewarm",
+      "static.cache.main.native-pet.restore",
+    ]) {
+      assert.equal(compatibilityService.registry.point(pointId).status, "disabled");
+    }
+  } finally {
+    compatibilityService.dispose();
+  }
+});
+
+test("cached optimization preserves removed native pet points as disabled", () => {
+  const compatibilityService = createCompatibilityService();
+  const provider = new LocalCodexBundleProvider({ compatibilityService });
+
+  try {
+    provider.reportCachedOptimizationCompatibility({
+      nativePetComposition: "not-present",
+      nativePetPrewarm: "not-present",
+      macPushRegistration: "gateway-disabled",
+      patchedFileCount: 0,
+      unsupportedFiles: [],
+    });
+    // 缓存命中不能把首次扫描得到的“不适用”重新解释成“不支持”。
+    for (const pointId of [
+      "static.cache.main.native-pet.factory",
+      "static.cache.main.native-pet.prewarm",
+      "static.cache.main.native-pet.restore",
+    ]) {
+      assert.equal(compatibilityService.registry.point(pointId).status, "disabled");
+    }
+  } finally {
+    compatibilityService.dispose();
+  }
+});
+
 test("runtime optimizer keeps gateway compatible when an official native pet layout changes", (t) => {
   const bundleDir = temporaryDirectory(t);
   const mainPath = path.join(bundleDir, ".vite", "build", "main-new-layout.js");
   writeFile(mainPath, 'console.log("Native pet material attachment completed");');
+  const compatibilityService = createCompatibilityService();
   const optimizer = new OfficialRuntimeOptimizer({
     fileSystem: new OfficialBundleFileSystem(),
+    compatibilityService,
   });
 
   assert.deepEqual(optimizer.optimize(bundleDir), {
@@ -985,6 +1087,15 @@ test("runtime optimizer keeps gateway compatible when an official native pet lay
     fs.readFileSync(mainPath, "utf8"),
     'console.log("Native pet material attachment completed");'
   );
+  // 能力仍存在但定位器失配时继续报告真实降级，不能被“新版不适用”分支掩盖。
+  for (const pointId of [
+    "static.cache.main.native-pet.factory",
+    "static.cache.main.native-pet.prewarm",
+    "static.cache.main.native-pet.restore",
+  ]) {
+    assert.equal(compatibilityService.registry.point(pointId).status, "degraded");
+  }
+  compatibilityService.dispose();
 });
 
 test("runtime optimizer reports unsupported when any native pet marker file cannot be fully patched", (t) => {

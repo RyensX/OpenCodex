@@ -6,6 +6,7 @@ const { createHostModificationRuntime } = require("../../runtime/modification/pr
 const { staticMain: staticMainPoints } = require("../../runtime/modification/point-refs.cjs");
 
 const NATIVE_PET_LOG_MARKER = "Native pet material attachment completed";
+const AVATAR_OVERLAY_MARKER = "`avatar-overlay`);supportsInputShape=";
 const MAC_PUSH_LOG_MARKER = "Failed to register macOS push notifications";
 const GIT_ORIGINS_LOG_MARKER = "[git-origins] worker-complete";
 const WORKTREE_SHELL_ENVIRONMENT_MARKER = '"worktree-shell-environment-config"';
@@ -26,6 +27,10 @@ const NATIVE_PET_RESTORE_PATTERN =
   /async restoreOpenState\(([A-Za-z_$][\w$]*)\)\{this\.globalState\.get\(`electron-avatar-overlay-open`\)===!0&&await this\.open\(\1\)\}/g;
 const OPTIMIZED_NATIVE_PET_FACTORY_PATTERN =
   /function [A-Za-z_$][\w$]*\(\{devAppPath:[A-Za-z_$][\w$]*,platform:([A-Za-z_$][\w$]*)=process\.platform\}=\{\}\)\{if\(\1!==`darwin`\|\|process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`\)return null;/g;
+const AVATAR_OVERLAY_ENSURE_WINDOW_PATTERN =
+  /async ensureWindow\(([A-Za-z_$][\w$]*)\)\{if\(this\.isAppQuitting\)return null;/g;
+const OPTIMIZED_AVATAR_OVERLAY_ENSURE_WINDOW_PATTERN =
+  /async ensureWindow\([A-Za-z_$][\w$]*\)\{if\(process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`\|\|this\.isAppQuitting\)return null;/g;
 const OPTIMIZED_NATIVE_PET_PREWARM_PATTERN =
   /async prewarm\([A-Za-z_$][\w$]*\)\{if\(process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`\|\|this\.window!=null\|\|this\.openingWindowPromise!=null\|\|this\.isAppQuitting\)return;/g;
 const OPTIMIZED_NATIVE_PET_RESTORE_PATTERN =
@@ -81,7 +86,8 @@ class OfficialRuntimeOptimizer {
       if (!entry.isFile() || !entry.name.endsWith(".js")) continue;
       const filePath = path.join(buildDir, entry.name);
       const source = this.fileSystem.readText(filePath);
-      const hasNativePet = source.includes(NATIVE_PET_LOG_MARKER);
+      // 26.831 起 Native Pet 改名为 Avatar Overlay；两套 marker 必须并存，不能用新版覆盖旧版定位器。
+      const hasNativePet = source.includes(NATIVE_PET_LOG_MARKER) || source.includes(AVATAR_OVERLAY_MARKER);
       const hasMacPush = source.includes(MAC_PUSH_LOG_MARKER);
       const hasGitDiscovery = source.includes(GIT_ORIGINS_LOG_MARKER);
       const hasWorktreeShellEnvironment = source.includes(WORKTREE_SHELL_ENVIRONMENT_MARKER);
@@ -92,10 +98,14 @@ class OfficialRuntimeOptimizer {
 
       if (hasNativePet) {
         markerFileCount += 1;
-        const markerCount = source.split(NATIVE_PET_LOG_MARKER).length - 1;
+        const markerCount =
+          source.split(NATIVE_PET_LOG_MARKER).length - 1 +
+          (source.split(AVATAR_OVERLAY_MARKER).length - 1);
         const recognizedFactoryCount =
           matchCount(source, NATIVE_PET_FACTORY_PATTERN) +
-          matchCount(source, OPTIMIZED_NATIVE_PET_FACTORY_PATTERN);
+          matchCount(source, OPTIMIZED_NATIVE_PET_FACTORY_PATTERN) +
+          matchCount(source, AVATAR_OVERLAY_ENSURE_WINDOW_PATTERN) +
+          matchCount(source, OPTIMIZED_AVATAR_OVERLAY_ENSURE_WINDOW_PATTERN);
         const recognizedPrewarmCount =
           matchCount(source, NATIVE_PET_PREWARM_PATTERN) +
           matchCount(source, OPTIMIZED_NATIVE_PET_PREWARM_PATTERN);
@@ -286,9 +296,14 @@ class OfficialRuntimeOptimizer {
           ? "gateway-coalesced"
           : "unsupported-layout";
     }
-    this.reportAbsentPoint(staticMainPoints.nativePetFactory, markerFileCount);
-    this.reportAbsentPoint(staticMainPoints.nativePetPrewarm, markerFileCount);
-    this.reportAbsentPoint(staticMainPoints.nativePetRestore, nativePetRestoreMarkerCount);
+    // 新版官方运行时已移除 Native Pet 时没有补丁目标，属于无需启用；旧版 marker 仍走原补丁与校验路径。
+    this.reportAbsentPoint(staticMainPoints.nativePetFactory, markerFileCount, markerFileCount === 0);
+    this.reportAbsentPoint(staticMainPoints.nativePetPrewarm, markerFileCount, markerFileCount === 0);
+    this.reportAbsentPoint(
+      staticMainPoints.nativePetRestore,
+      nativePetRestoreMarkerCount,
+      markerFileCount === 0,
+    );
     this.reportAbsentPoint(staticMainPoints.macosPushRegistration, macPushMarkerFileCount);
     this.reportAbsentPoint(staticMainPoints.gitOriginResolver, gitDiscoveryMarkerFileCount);
     this.reportAbsentPoint(staticMainPoints.gitLocalPrefilter, gitDiscoveryMarkerFileCount);
@@ -339,10 +354,15 @@ class OfficialRuntimeOptimizer {
     return capability(source);
   }
 
-  private reportAbsentPoint(point: any, markerFileCount: number): void {
+  private reportAbsentPoint(point: any, markerFileCount: number, disableWhenAbsent = false): void {
     if (markerFileCount > 0) return;
     try {
       this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
+      if (disableWhenAbsent) {
+        // 能力整体不存在与“官方布局变化但仍存在”不同，前者不应触发降级告警。
+        this.modificationCoordinator.setEnabled(point, false, "Official capability is not present");
+        return;
+      }
       this.modificationCoordinator.locationFailure(
         point,
         "unsupported",
@@ -354,15 +374,25 @@ class OfficialRuntimeOptimizer {
 
   private patchNativePetFactory(source: string): string {
     // 同一压缩 chunk 可能包含多份平台工厂，必须全部改写后才能把该文件标为成功。
-    return source.replace(
-      NATIVE_PET_FACTORY_PATTERN,
-      (match, _factoryName, _devAppPathName, platformName) =>
-        match.replace(
-          `if(${platformName}!==\`darwin\`)return null;`,
-          // 隐藏运行时没有可见原生宠物窗口，直接沿用官方 null bridge 对应的 CSS fallback。
-          `if(${platformName}!==\`darwin\`||process.env.${GATEWAY_RUNTIME_ENV}===\`1\`)return null;`
-        )
-    );
+    return source
+      .replace(
+        NATIVE_PET_FACTORY_PATTERN,
+        (match, _factoryName, _devAppPathName, platformName) =>
+          match.replace(
+            `if(${platformName}!==\`darwin\`)return null;`,
+            // 旧版使用可空工厂；隐藏运行时继续返回 null，让主窗口沿用官方 CSS fallback。
+            `if(${platformName}!==\`darwin\`||process.env.${GATEWAY_RUNTIME_ENV}===\`1\`)return null;`
+          )
+      )
+      .replace(
+        AVATAR_OVERLAY_ENSURE_WINDOW_PATTERN,
+        (match) =>
+          match.replace(
+            "if(this.isAppQuitting)return null;",
+            // 新版始终创建 Manager，因此在唯一窗口创建入口返回 null，保留对象协议但不生成隐藏 renderer。
+            `if(process.env.${GATEWAY_RUNTIME_ENV}===\`1\`||this.isAppQuitting)return null;`
+          )
+      );
   }
 
   private patchNativePetPrewarm(source: string): string {

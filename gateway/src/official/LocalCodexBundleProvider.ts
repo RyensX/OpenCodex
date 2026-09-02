@@ -207,10 +207,12 @@ class LocalCodexBundleProvider {
       {
         points: [staticMainPoints.nativePetFactory],
         state: runtimeOptimizations.nativePetComposition,
+        disableWhenAbsent: true,
       },
       {
         points: [staticMainPoints.nativePetPrewarm, staticMainPoints.nativePetRestore],
         state: runtimeOptimizations.nativePetPrewarm,
+        disableWhenAbsent: true,
       },
       {
         points: [staticMainPoints.macosPushRegistration],
@@ -233,6 +235,11 @@ class LocalCodexBundleProvider {
       for (const point of group.points) {
         try {
           this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
+          if (group.state === "not-present" && group.disableWhenAbsent) {
+            // 缓存命中必须复现首次优化的“不适用”语义，避免重启后又把新版运行时误报为降级。
+            this.modificationCoordinator.setEnabled(point, false, "Official capability is not present");
+            continue;
+          }
           if (group.state === "unsupported-layout" || group.state === "not-present" || !group.state) {
             this.modificationCoordinator.locationFailure(
               point,
