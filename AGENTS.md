@@ -19,7 +19,10 @@ Rules:
 - Use English commit messages.
 - Keep the subject to one concise line.
 - Use a lowercase type.
-- Add a scope only when it helps identify the touched area, for example `polyfill` or `terminal`.
+- Include a lowercase scope when the change belongs to a recognizable module or subsystem.
+- Omit the scope only for genuinely repository-wide or cross-cutting changes where no single scope is accurate.
+- Reuse an established scope instead of introducing a synonym. Common scopes include `compatibility`, `gateway`, `launcher`, `plugin`, `polyfill`, `router`, `test`, `web`, and `web-shell`.
+- Use `compatibility` for the runtime compatibility kernel, diagnostics service, and diagnostics interface.
 - Do not end the subject with a period.
 - Keep each commit focused on one logical change.
 
@@ -34,6 +37,7 @@ Examples from the existing history:
 
 ```text
 feat: load gateway password from config
+fix(compatibility): clarify runtime contribution titles
 fix(polyfill): collapse sidebar on new chat
 fix(terminal): restore web terminal sessions
 chore: switch package manager to pnpm
