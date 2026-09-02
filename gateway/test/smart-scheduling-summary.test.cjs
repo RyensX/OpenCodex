@@ -409,8 +409,15 @@ function createHarness() {
     sendClientMessage(message) {
       summary.handleAppHostData(JSON.stringify(message), "client");
     },
+    sendStructuredClientMessage(message) {
+      // 结构化 AppHost 帧不应先 stringify 再 parse，直接交给同一消费者。
+      summary.handleAppHostData(message, "client");
+    },
     sendServerMessage(message) {
       summary.handleAppHostData(JSON.stringify(message), "server");
+    },
+    sendStructuredServerMessage(message) {
+      summary.handleAppHostData(message, "server");
     },
     sendViewMessage(payload) {
       windowListeners.get("opencodex:plugin-event")?.({
@@ -601,7 +608,7 @@ test("root-routed new Auto task renders directly in an otherwise empty official 
     type: "navigate-to-route",
     path: "/local/client-new-thread%3Atemporary",
   });
-  harness.sendClientMessage({
+  harness.sendStructuredClientMessage({
     id: "turn-new",
     method: "turn/start",
     params: { threadId: "thread-new", model: "auto" },
@@ -777,13 +784,15 @@ test("manual selection wins over delayed selected and turn metadata", async () =
   await resolveRoute(harness, "thread-a", null);
   assert.equal(harness.activeRoute(), null);
 
-  harness.sendServerMessage({
-    method: "turn/started",
-    params: {
-      threadId: "thread-a",
-      turn: { id: "turn-a" },
-      _meta: {
-        "opencodex/smart-scheduling": { model: "luna", effort: "high" },
+  harness.sendStructuredServerMessage({
+    message: {
+      method: "turn/started",
+      params: {
+        threadId: "thread-a",
+        turn: { id: "turn-a" },
+        _meta: {
+          "opencodex/smart-scheduling": { model: "luna", effort: "high" },
+        },
       },
     },
   });

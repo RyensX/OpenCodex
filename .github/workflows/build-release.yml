@@ -100,7 +100,8 @@ jobs:
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: opencodex-macos-${{ matrix.arch }}
+          # 外层 Artifact 名称携带完整提交哈希，内部 DMG 文件名保持不变。
+          name: opencodex-macos-${{ matrix.arch }}-${{ github.sha }}
           path: release/*.dmg
           if-no-files-found: error
 
@@ -136,7 +137,8 @@ jobs:
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v6
         with:
-          name: opencodex-windows
+          # 外层 Artifact 名称携带完整提交哈希，内部 EXE 文件名保持不变。
+          name: opencodex-windows-${{ github.sha }}
           path: release/*.exe
           if-no-files-found: error
 

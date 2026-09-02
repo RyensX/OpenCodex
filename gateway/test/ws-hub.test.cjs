@@ -4,6 +4,7 @@ const test = require("node:test");
 const WebSocket = require("ws");
 
 const { createWsHub, __test } = require("../runtime/ipc/ws-hub.cjs");
+const appHostMessageCodec = require("../../web-shell/codex-app-host-message-codec.js");
 
 function waitForMessage(socket, predicate) {
   return new Promise((resolve, reject) => {
@@ -34,6 +35,29 @@ function waitForOpen(socket) {
 
 function waitForClose(socket) {
   return new Promise((resolve) => socket.once("close", resolve));
+}
+
+function waitForCondition(predicate, description) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${description}`)), 2000);
+    const check = () => {
+      let matched = false;
+      try {
+        matched = predicate();
+      } catch (error) {
+        clearTimeout(timer);
+        reject(error);
+        return;
+      }
+      if (matched) {
+        clearTimeout(timer);
+        resolve();
+        return;
+      }
+      setImmediate(check);
+    };
+    check();
+  });
 }
 
 test("recreates an app-host relay when the browser WebSocket reconnects", async (t) => {
@@ -97,6 +121,316 @@ test("recreates an app-host relay when the browser WebSocket reconnects", async 
 
   assert.equal(relays.length, 2);
   assert.deepEqual(relays[1].messages, ["thread/list"]);
+});
+
+test("bridges structured AppHost values while retaining legacy frames", async (t) => {
+  const server = http.createServer();
+  const relays = [];
+  createWsHub(server, {
+    createAppHostRelay({ onMessage, onError, onClose }) {
+      const relay = {
+        messages: [],
+        emitClose: onClose,
+        emitError: onError,
+        emitMessage: onMessage,
+        close(reason) {
+          this.closeReason = reason;
+        },
+        postMessage(value) {
+          this.messages.push(value);
+          return true;
+        },
+      };
+      relays.push(relay);
+      return relay;
+    },
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  t.after(async () => {
+    socket.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  await waitForOpen(socket);
+  const clientId = "structured-client";
+  const portId = "structured-port";
+  socket.send(JSON.stringify({ type: "hello", clientId }));
+  await waitForMessage(socket, (message) => message.type === "hello-ack");
+  socket.send(JSON.stringify({ type: "app-host-connect", clientId, portId }));
+  await waitForMessage(socket, (message) => message.type === "app-host-port-connected");
+
+  const value = { type: "turn/start", nested: [undefined, 7n] };
+  socket.send(
+    JSON.stringify({
+      type: "app-host-port-message",
+      clientId,
+      portId,
+      ...appHostMessageCodec.encodeMessageData(value),
+    })
+  );
+  await waitForCondition(() => relays[0].messages.length >= 1, "first AppHost relay message");
+  assert.deepEqual(relays[0].messages[0], value);
+
+  socket.send(JSON.stringify({ type: "app-host-port-message", clientId, portId, data: "legacy" }));
+  await waitForCondition(() => relays[0].messages.length >= 2, "legacy AppHost relay message");
+  assert.equal(relays[0].messages[1], "legacy");
+
+  const downlink = waitForMessage(socket, (message) => message.type === "app-host-port-message");
+  relays[0].emitMessage(value);
+  const wire = await downlink;
+  assert.equal(wire.dataEncoding, appHostMessageCodec.encoding);
+  assert.deepEqual(appHostMessageCodec.decodeMessageData(wire), value);
+});
+
+test("reports one relay error and isolates stale replacement callbacks", async (t) => {
+  const server = http.createServer();
+  const relays = [];
+  createWsHub(server, {
+    createAppHostRelay({ onMessage, onError, onClose }) {
+      const relayIndex = relays.length;
+      const relay = {
+        emitClose: onClose,
+        emitError: onError,
+        emitMessage: onMessage,
+        close(reason) {
+          onClose(reason);
+        },
+        postMessage() {
+          if (relayIndex === 0) throw new Error("post failed");
+          return true;
+        },
+      };
+      relays.push(relay);
+      return relay;
+    },
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  t.after(async () => {
+    socket.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  await waitForOpen(socket);
+  const clientId = "failure-client";
+  const portId = "failure-port";
+  socket.send(JSON.stringify({ type: "hello", clientId }));
+  await waitForMessage(socket, (message) => message.type === "hello-ack");
+  socket.send(JSON.stringify({ type: "app-host-connect", clientId, portId }));
+  await waitForMessage(socket, (message) => message.type === "app-host-port-connected");
+  socket.send(
+    JSON.stringify({
+      type: "app-host-port-message",
+      clientId,
+      portId,
+      ...appHostMessageCodec.encodeMessageData({ request: "fails" }),
+    })
+  );
+  const error = await waitForMessage(socket, (message) => message.type === "app-host-port-error");
+  assert.match(error.error, /post failed/);
+  socket.send(JSON.stringify({ type: "app-host-connect", clientId, portId }));
+  await waitForMessage(socket, (message) => message.type === "app-host-port-connected");
+  assert.equal(relays.length, 2);
+  relays[0].emitClose("late-close");
+  relays[0].emitError(new Error("late-error"));
+  const downlink = waitForMessage(socket, (message) => message.type === "app-host-port-message");
+  relays[1].emitMessage({ type: "replacement/ok" });
+  await downlink;
+  assert.equal(relays.length, 2);
+});
+
+test("reports one terminal error for official encode and browser decode failures", async (t) => {
+  const server = http.createServer();
+  const relays = [];
+  const events = [];
+  createWsHub(server, {
+    createAppHostRelay({ onMessage, onError, onClose }) {
+      const relay = {
+        emitClose: onClose,
+        emitError: onError,
+        emitMessage: onMessage,
+        close(reason) {
+          // 真实 MessagePort close 会触发 onClose，测试不能只检查 map 是否删除。
+          onClose(reason);
+        },
+        postMessage() {
+          return true;
+        },
+      };
+      relays.push(relay);
+      return relay;
+    },
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  socket.on("message", (raw) => events.push(JSON.parse(String(raw))));
+  t.after(async () => {
+    socket.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  await waitForOpen(socket);
+  const clientId = "terminal-event-client";
+  const portId = "terminal-event-port";
+  socket.send(JSON.stringify({ type: "hello", clientId }));
+  await waitForMessage(socket, (message) => message.type === "hello-ack");
+  socket.send(JSON.stringify({ type: "app-host-connect", clientId, portId }));
+  await waitForMessage(socket, (message) => message.type === "app-host-port-connected");
+
+  relays[0].emitMessage(Symbol("unsupported"));
+  await waitForMessage(socket, (message) => message.type === "app-host-port-error");
+  relays[0].emitError(new Error("late-error"));
+  relays[0].emitClose("late-close");
+  assert.equal(events.filter((message) => message.type === "app-host-port-error").length, 1);
+  assert.equal(events.filter((message) => message.type === "app-host-port-close").length, 0);
+
+  socket.send(JSON.stringify({ type: "app-host-connect", clientId, portId }));
+  await waitForMessage(socket, (message) => message.type === "app-host-port-connected");
+  socket.send(JSON.stringify({ type: "app-host-port-message", clientId, portId, dataEncoding: "unknown", data: null }));
+  await waitForMessage(
+    socket,
+    (message) => message.type === "app-host-port-error" && message.portId === portId
+  );
+  assert.equal(events.filter((message) => message.type === "app-host-port-error").length, 2);
+  assert.equal(events.filter((message) => message.type === "app-host-port-close").length, 0);
+});
+
+test("isolates a failed AppHost port from sibling ports and clients", async (t) => {
+  const server = http.createServer();
+  const relays = [];
+  createWsHub(server, {
+    createAppHostRelay({ onMessage, onError, onClose, clientId, portId }) {
+      const relay = {
+        clientId,
+        emitClose: onClose,
+        emitError: onError,
+        emitMessage: onMessage,
+        portId,
+        close(reason) {
+          onClose(reason);
+        },
+        postMessage() {
+          return true;
+        },
+      };
+      relays.push(relay);
+      return relay;
+    },
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const first = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  const second = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  t.after(async () => {
+    first.close();
+    second.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  await Promise.all([waitForOpen(first), waitForOpen(second)]);
+  const firstClient = "isolated-client-one";
+  const secondClient = "isolated-client-two";
+  first.send(JSON.stringify({ type: "hello", clientId: firstClient }));
+  second.send(JSON.stringify({ type: "hello", clientId: secondClient }));
+  await Promise.all([
+    waitForMessage(first, (message) => message.type === "hello-ack"),
+    waitForMessage(second, (message) => message.type === "hello-ack"),
+  ]);
+  const connect = (socket, clientId, portId) => {
+    socket.send(JSON.stringify({ type: "app-host-connect", clientId, portId }));
+    return waitForMessage(socket, (message) => message.type === "app-host-port-connected" && message.portId === portId);
+  };
+  await Promise.all([
+    connect(first, firstClient, "isolated-port-one"),
+    connect(first, firstClient, "isolated-port-two"),
+    connect(second, secondClient, "isolated-port-three"),
+  ]);
+
+  const firstPortError = waitForMessage(
+    first,
+    (message) => message.type === "app-host-port-error" && message.portId === "isolated-port-one"
+  );
+  const firstRelay = relays.find((relay) => relay.portId === "isolated-port-one");
+  const secondRelay = relays.find((relay) => relay.portId === "isolated-port-two");
+  const thirdRelay = relays.find((relay) => relay.portId === "isolated-port-three");
+  assert.ok(firstRelay && secondRelay && thirdRelay);
+  firstRelay.emitError(new Error("isolated failure"));
+  await firstPortError;
+
+  const secondPortMessage = waitForMessage(
+    first,
+    (message) => message.type === "app-host-port-message" && message.portId === "isolated-port-two"
+  );
+  const thirdPortMessage = waitForMessage(
+    second,
+    (message) => message.type === "app-host-port-message" && message.portId === "isolated-port-three"
+  );
+  secondRelay.emitMessage({ method: "thread/list" });
+  thirdRelay.emitMessage({ method: "thread/read" });
+  assert.deepEqual(await secondPortMessage, {
+    type: "app-host-port-message",
+    portId: "isolated-port-two",
+    data: ["object", [["method", ["string", "thread/list"]]]],
+    dataEncoding: appHostMessageCodec.encoding,
+  });
+  assert.deepEqual(await thirdPortMessage, {
+    type: "app-host-port-message",
+    portId: "isolated-port-three",
+    data: ["object", [["method", ["string", "thread/read"]]]],
+    dataEncoding: appHostMessageCodec.encoding,
+  });
+});
+
+test("closes only the relay when forwarding to the browser websocket fails", async (t) => {
+  const server = http.createServer();
+  const relays = [];
+  const hub = createWsHub(server, {
+    createAppHostRelay({ onMessage, onError, onClose }) {
+      const relay = {
+        closeReason: "",
+        emitMessage: onMessage,
+        close(reason) {
+          this.closeReason = reason;
+          onClose(reason);
+        },
+        postMessage() {
+          return true;
+        },
+      };
+      relays.push(relay);
+      return relay;
+    },
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  const originalSend = socket.send.bind(socket);
+  t.after(async () => {
+    socket.send = originalSend;
+    socket.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  await waitForOpen(socket);
+  const clientId = "send-failure-client";
+  const portId = "send-failure-port";
+  socket.send(JSON.stringify({ type: "hello", clientId }));
+  await waitForMessage(socket, (message) => message.type === "hello-ack");
+  socket.send(JSON.stringify({ type: "app-host-connect", clientId, portId }));
+  await waitForMessage(socket, (message) => message.type === "app-host-port-connected");
+
+  const serverSocket = [...hub.clients][0];
+  const originalServerSend = serverSocket.send.bind(serverSocket);
+  serverSocket.send = () => {
+    throw new Error("browser websocket send failed");
+  };
+  relays[0].emitMessage({ method: "turn/start" });
+  assert.equal(relays[0].closeReason, "forward_to_browser_failed");
+  serverSocket.send = originalServerSend;
 });
 
 test("caps app-host relays per browser socket", async (t) => {
@@ -265,4 +599,9 @@ test("bounds diagnostic route extraction for wide payload arrays", () => {
   });
   assert.equal(__test.routeIdFromPayload(wide), "");
   assert.ok(reads > 0 && reads <= 128, `diagnostic route scan read ${reads} array items`);
+});
+
+test("keeps the WebSocket ingress boundary at 64 MiB", () => {
+  assert.equal(__test.webSocketServerOptions().maxPayload, 64 * 1024 * 1024);
+  assert.equal(__test.webSocketServerOptions({ maxPayloadBytes: 2 * 1024 * 1024 }).maxPayload, 2 * 1024 * 1024);
 });

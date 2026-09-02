@@ -62,10 +62,10 @@ test("presentation correlates turns and model selections and sends safe route st
   });
   presentation.observeAppHostFrame({
     clientId: "client-3",
-    data: JSON.stringify({
+    data: {
       method: "thread/settings/update",
       params: { threadId: "thread-3", model: "auto" },
-    }),
+    },
   });
   router.emit({ status: "classifying", threadId: "thread-1" });
   router.emit({

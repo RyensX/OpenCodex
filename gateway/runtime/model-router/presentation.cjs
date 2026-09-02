@@ -79,15 +79,17 @@ function createSmartSchedulingPresentation({ compatibilityService, modelRouter, 
   }
 
   function observeAppHostFrame({ clientId, data, direction = "client" } = {}) {
-    if (
-      direction !== "client" ||
-      typeof data !== "string" ||
-      (!data.includes("turn/") && !data.includes("thread/"))
-    ) {
-      return;
-    }
+    if (direction !== "client") return;
     try {
-      visitProtocolMessages(JSON.parse(data), (message) => {
+      const decoded =
+        data && typeof data === "object"
+          ? data
+          : typeof data === "string" && (data.includes("turn/") || data.includes("thread/"))
+            ? JSON.parse(data)
+            : null;
+      if (!decoded) return;
+      // 结构化 AppHost 帧已经由 transport adapter 解码，legacy string wire 帧仍按关键词预筛选后解析。
+      visitProtocolMessages(decoded, (message) => {
         if (!["turn/start", "thread/settings/update"].includes(message?.method)) return;
         rememberClient(message.params?.threadId || message.params?.thread?.id, clientId);
       });

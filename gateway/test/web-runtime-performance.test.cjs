@@ -1582,12 +1582,15 @@ test("app-host oversized frames bypass the limit only when they can be sent imme
       const sent = [];
       const closed = [];
       function appHostWsPayload(state, payload) { return { portId: state.portId, ...payload }; }
-      function sendAppHostWsPayload(payload) {
+      function sendAppHostWsPayload(payload, serialized) {
         if (!sendable) return false;
-        sent.push(payload);
+        sent.push(serialized || payload);
         return true;
       }
       function clientDiagnostic() {}
+      function failAppHostRelay(state, error, reason) {
+        closeAppHostRelay(state, reason);
+      }
       function closeAppHostRelay(state, reason) {
         state.closed = true;
         state.pending.length = 0;
@@ -1596,15 +1599,16 @@ test("app-host oversized frames bypass the limit only when they can be sent imme
       }
       function flushAppHostRelayMessages(state) {
         while (!state.closed && state.pending.length > 0) {
-          if (!sendAppHostWsPayload(state.pending[0])) return;
-          const payload = state.pending.shift();
-          state.pendingChars = Math.max(0, state.pendingChars - appHostPendingPayloadChars(payload));
+          const prepared = state.pending[0];
+          if (!sendAppHostWsPayload(prepared.payload, prepared.serialized)) return;
+          state.pending.shift();
+          state.pendingChars = Math.max(0, state.pendingChars - appHostPendingPayloadChars(prepared));
         }
       }
       ${sourceSection(
         BRIDGE_SOURCE,
         "  function appHostPendingPayloadChars",
-        "\n\n  function closeAppHostRelay"
+        "\n\n  function sendAppHostRelayError"
       )}
       return {
         closed,
@@ -1614,16 +1618,16 @@ test("app-host oversized frames bypass the limit only when they can be sent imme
       };
     })()`
   );
-  const makeState = (portId) => ({ closed: false, flushing: false, pending: [], pendingChars: 0, portId });
+  const makeState = (portId) => ({ closed: false, closing: false, flushing: false, pending: [], pendingChars: 0, portId });
 
   const offlineLarge = makeState("offline-large");
-  relay.queue(offlineLarge, { data: "x".repeat(300), type: "app-host-port-message" });
+  relay.queue(offlineLarge, { data: "x".repeat(500), type: "app-host-port-message" });
   assert.equal(offlineLarge.closed, true);
   assert.deepEqual(Array.from(relay.closed), ["queue_overflow"]);
 
   relay.setSendable(true);
   const onlineLarge = makeState("online-large");
-  relay.queue(onlineLarge, { data: "x".repeat(300), type: "app-host-port-message" });
+  relay.queue(onlineLarge, { data: "x".repeat(500), type: "app-host-port-message" });
   assert.equal(onlineLarge.closed, false);
   assert.equal(onlineLarge.pending.length, 0);
   assert.equal(relay.sent.length, 1);
@@ -1732,7 +1736,7 @@ test("browser Statsig defaults preserve the official new-worktree capability", (
   assert.match(BRIDGE_SOURCE, /STATSIG_DEFAULT_FEATURE_OVERRIDES\s*=\s*\{[\s\S]*?"505458": true/);
 });
 
-test("token usage passive parsing bounds wide and cyclic payload traversal", () => {
+test("token usage passive parsing bounds wide and cyclic payload traversal", async () => {
   const compatibilityHits = [];
   const window = {
     clearTimeout,
@@ -1762,6 +1766,35 @@ test("token usage passive parsing bounds wide and cyclic payload traversal", () 
 
   const capability = window.__OpenCodexCreateTokenUsageCapability();
   const release = capability.acquireConsumer("performance-test");
+  const structuredUsageMessage = {
+    method: "thread/tokenUsage/updated",
+    params: {
+      threadId: "structured-thread",
+      turnId: "structured-turn",
+      tokenUsage: { cachedInputTokens: 8, inputTokens: 10, outputTokens: 2 },
+    },
+  };
+  capability.handleAppHostData(structuredUsageMessage);
+  const structuredUsage = await capability.getForTurn({ threadId: "structured-thread", turnId: "structured-turn" });
+  const legacyUsageMessage = JSON.stringify({
+    method: "thread/tokenUsage/updated",
+    params: {
+      threadId: "legacy-thread",
+      turnId: "legacy-turn",
+      tokenUsage: { cachedInputTokens: 8, inputTokens: 10, outputTokens: 2 },
+    },
+  });
+  capability.handleAppHostData(legacyUsageMessage);
+  const legacyUsage = await capability.getForTurn({ threadId: "legacy-thread", turnId: "legacy-turn" });
+  // 结构化值和旧字符串只差 transport 形状，normalized usage 必须保持一致。
+  const comparableUsage = (usage) => {
+    const { threadId, turnId, updatedAt, ...rest } = usage || {};
+    return rest;
+  };
+  assert.deepEqual(comparableUsage(structuredUsage), comparableUsage(legacyUsage));
+  assert.equal(structuredUsage.source, "app-host");
+  assert.equal(legacyUsage.source, "app-host");
+  compatibilityHits.length = 0;
   let passiveArrayReads = 0;
   const passiveWide = new Proxy(Array.from({ length: 50_000 }, () => "ordinary"), {
     get(target, key, receiver) {
@@ -1949,7 +1982,7 @@ test("whole-document observer filters stay scoped to their feature mounts", () =
   );
   assert.match(BRIDGE_SOURCE, /reconnectDeferredUntilVisible = true/);
   assert.match(BRIDGE_SOURCE, /const releaseSocket = modificationScope\?\.own/);
-  assert.match(BRIDGE_SOURCE, /closeAppHostRelay\(state, "page_replaced", false\)/);
+  assert.match(BRIDGE_SOURCE, /closeAppHostRelay\(state, "page_replaced"\)/);
   assert.match(BRIDGE_SOURCE, /document\.visibilityState === "hidden"/);
   assert.match(BRIDGE_SOURCE, /if \(!CLIENT_DIAGNOSTICS_ENABLED\) return/);
   assert.match(BRIDGE_SOURCE, /CLIENT_DIAGNOSTICS_ENABLED \? ipcDiagnosticSummary/);
@@ -1960,7 +1993,10 @@ test("whole-document observer filters stay scoped to their feature mounts", () =
   assert.match(BRIDGE_SOURCE, /activeBrowserNotifications\.size > BROWSER_NOTIFICATION_MAX_ACTIVE/);
   assert.match(BRIDGE_SOURCE, /appHostPortRelays\.size >= APP_HOST_RELAY_MAX_ENTRIES/);
   assert.match(BRIDGE_SOURCE, /nextPendingChars > APP_HOST_PENDING_MESSAGE_CHARS_LIMIT/);
-  assert.match(BRIDGE_SOURCE, /nextPendingChars > APP_HOST_PENDING_MESSAGE_CHARS_LIMIT &&\s*sendAppHostWsPayload\(framedPayload\)/);
+  assert.match(
+    BRIDGE_SOURCE,
+    /nextPendingChars > APP_HOST_PENDING_MESSAGE_CHARS_LIMIT &&\s*sendAppHostWsPayload\(prepared\.payload, prepared\.serialized\)/
+  );
   assert.doesNotMatch(BRIDGE_SOURCE, /state\.pending\.length > 0 && nextPendingChars/);
   assert.match(BRIDGE_SOURCE, /state\.pending\.length = 0;[\s\S]*state\.pendingChars = 0/);
   assert.match(BRIDGE_SOURCE, /TERMINAL_QUEUE_MAX_PENDING_PER_SESSION/);

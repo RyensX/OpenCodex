@@ -679,7 +679,7 @@
         return;
       }
       try {
-        // app-host 通道是字符串帧，只有命中 token 关键词后才 parse，避免每条 RPC 都 JSON.parse。
+        // legacy AppHost wire 帧只有命中 token 关键词后才 parse，避免每条 RPC 都 JSON.parse。
         const decoded = typeof decodeFrame === "function" ? decodeFrame() : JSON.parse(data);
         handleTokenUsageProtocolMessage(decoded, "app-host", true);
       } catch {}

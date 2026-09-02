@@ -26,6 +26,17 @@ function threadStreamStateMessage(conversationId, sourceClientId, change) {
   };
 }
 
+test("official AppHost delivery treats only null as peer close", () => {
+  const delivered = [];
+  const closed = [];
+  const deliver = __test.deliverOfficialAppHostMessage;
+  assert.equal(deliver({ data: undefined }, (value) => delivered.push(value), (reason) => closed.push(reason)), true);
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0], undefined);
+  assert.equal(deliver({ data: null }, (value) => delivered.push(value), (reason) => closed.push(reason)), false);
+  assert.deepEqual(closed, ["official_closed"]);
+});
+
 test("bridges only the primary official renderer to the Web client", () => {
   const primary = { id: 1, isDestroyed: () => false };
   const samePrimaryWrapper = { id: 1, isDestroyed: () => false };

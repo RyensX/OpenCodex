@@ -211,12 +211,18 @@ test("runtime compatibility diagnostics are public, grouped, explained, and repo
   assert.match(diagnosticsStyles, /\.feature-title-line/);
   const loginShell = fs.readFileSync(WEB_SHELL_INDEX, "utf8");
   assert.match(loginShell, /href="\/settings\/developer\/runtime-compatibility"/);
+  assert.ok(loginShell.indexOf("/codex-app-host-message-codec.js") < loginShell.indexOf("/opencodex-modification-activate.js"));
 
   const bootstrap = runtimeBootstrapSource(service);
   const compatibilityIndex = bootstrap.indexOf("OpenCodexRuntimeCompatibility");
   const sidebarIndex = bootstrap.indexOf("__opencodexSidebarPreviewInstalled");
+  const codecIndex = bootstrap.indexOf("opencodex-structured-clone-v1");
+  const bridgeIndex = bootstrap.indexOf("__codexAppHostMessagePortBridgeInstalled");
   assert.ok(compatibilityIndex >= 0);
   assert.ok(sidebarIndex > compatibilityIndex);
+  assert.ok(codecIndex >= 0 && bridgeIndex > codecIndex);
+  assert.equal(service.isPublicStaticPath("/codex-app-host-message-codec.js"), true);
+  assert.match(service.staticFile("/codex-app-host-message-codec.js"), /codex-app-host-message-codec\.js$/);
 });
 
 test("runtime compatibility page follows the public authentication locale", (t) => {
@@ -584,6 +590,11 @@ test("remote renderer defers plugin summary image bytes until an image mounts", 
 test("bridge reconnects active app-host ports after websocket hello", () => {
   const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
 
+  assert.match(bridge, /encodeAppHostMessageData\(portData\)/);
+  assert.match(bridge, /decodeAppHostMessageData\(message\)/);
+  assert.match(bridge, /failAppHostRelay\(state, "Invalid app-host message data", "encode_failed"\)/);
+  assert.match(bridge, /failAppHostRelay\(state, "Browser MessagePort is unavailable", "post_to_browser_failed"\)/);
+  assert.match(bridge, /prepareAppHostRelayPayload\(state, \{ type: "app-host-connect" \}\)/);
   assert.match(bridge, /state\.pending\.unshift\(connectPayload\)/);
   assert.match(bridge, /state\.pendingChars \+= appHostPendingPayloadChars\(connectPayload\)/);
   assert.match(bridge, /for \(const state of appHostPortRelays\.values\(\)\) state\.connected = false/);

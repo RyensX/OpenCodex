@@ -5,6 +5,7 @@ try {
 } catch {}
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
 const { DEBUG_LOGS } = require("../core/config.cjs");
+const appHostMessageCodec = require("../../../web-shell/codex-app-host-message-codec.js");
 
 // 下面这些阈值只服务于 OPENCODEX_DEBUG_WS=1 的链路排障；默认运行不会采样慢 WS 发送。
 const WS_LARGE_MESSAGE_BYTES = Number(process.env.OPENCODEX_WS_LARGE_LOG_BYTES || 256 * 1024);
@@ -33,6 +34,16 @@ const WS_IPC_MAX_IN_FLIGHT = Math.max(32, Number(process.env.OPENCODEX_WS_IPC_MA
 const ROUTE_ID_SCAN_MAX_NODES = 128;
 const BROADCAST_DEDUPE_MAX_ENTRIES_PER_SOCKET = 16;
 const BROADCAST_DEDUPE_MAX_WINDOW_MS = 60_000;
+let nextAppHostRelayGeneration = 0;
+
+function webSocketServerOptions({ perMessageDeflate, maxPayloadBytes = WS_MAX_PAYLOAD_BYTES } = {}) {
+  return {
+    noServer: true,
+    perMessageDeflate,
+    // 64 MiB 是 WebSocket 入站帧边界，不是 AppHost codec 的消息限制。
+    maxPayload: Math.max(1024 * 1024, Number(maxPayloadBytes) || WS_MAX_PAYLOAD_BYTES),
+  };
+}
 
 function byteLength(value) {
   // WebSocket bufferedAmount 用字节衡量；日志里也统一按 UTF-8 字节估算，方便对齐网络层现象。
@@ -124,11 +135,7 @@ function createWsHub(
 
   const perMessageDeflate = wsCompressionOptions();
   const effectiveMaxBufferedBytes = Math.max(1024, Number(maxBufferedBytes) || WS_MAX_BUFFERED_BYTES);
-  const wss = new WebSocketServer({
-    noServer: true,
-    perMessageDeflate,
-    maxPayload: Math.max(1024 * 1024, Number(maxPayloadBytes) || WS_MAX_PAYLOAD_BYTES),
-  });
+  const wss = new WebSocketServer(webSocketServerOptions({ perMessageDeflate, maxPayloadBytes }));
   if (WS_DEBUG_ENABLED) {
     // 压缩配置只在排障模式打印；压缩本身始终按上面的配置生效。
     diagnosticLog("ws-hub", "compression_configured", {
@@ -199,7 +206,7 @@ function createWsHub(
         startedAtMs: Date.now(),
         timer: null,
       };
-      // 聚合窗口结束后只打一条 summary，避免 app-host 高频字符串帧把会话加载日志刷爆。
+      // 聚合窗口结束后只打一条 summary，避免 AppHost 高频 wire 帧把会话加载日志刷爆。
       stat.timer = setTimeout(() => flushAppHostTraffic(key), APP_HOST_TRAFFIC_FLUSH_MS);
       if (stat.timer && typeof stat.timer.unref === "function") stat.timer.unref();
       appHostTraffic.set(key, stat);
@@ -225,10 +232,11 @@ function createWsHub(
   }
 
   function appHostPayloadInfo(payload) {
-    // app-host-port-message.data 是官方 RPC 字符串；只统计长度，不解析内容，避免耦合官方协议细节。
-    if (!payload || payload.type !== "app-host-port-message" || typeof payload.data !== "string") return null;
+    // AppHost message data 只统计字符串或 wire JSON 长度，不解析官方协议内容。
+    if (!payload || payload.type !== "app-host-port-message") return null;
+    const data = typeof payload.data === "string" ? payload.data : JSON.stringify(payload.data);
     return {
-      bytes: byteLength(payload.data),
+      bytes: byteLength(data),
       portId: typeof payload.portId === "string" ? payload.portId : "",
     };
   }
@@ -416,15 +424,67 @@ function createWsHub(
     return ws.__codexAppHostRelays;
   }
 
+  function relayIsCurrent(relays, context) {
+    // map 身份和 active 状态共同构成 generation 护栏，旧回调不能触碰替换后的 relay。
+    return !!context && context.terminalState === "active" && relays.get(context.portId) === context;
+  }
+
+  function failAppHostRelay(relays, context, error, reason) {
+    if (!relayIsCurrent(relays, context)) return false;
+    context.terminalState = "error";
+    relays.delete(context.portId);
+    if (!context.terminalNotified) {
+      context.terminalNotified = true;
+      safeSend(
+        context.ws,
+        {
+          type: "app-host-port-error",
+          portId: context.portId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        { suppressDiagnostic: true }
+      );
+    }
+    // 先更新索引再关闭底层端口，延迟的 onClose 只能看到 terminal 状态。
+    try {
+      context.relay?.close(reason);
+    } catch {}
+    return true;
+  }
+
+  function closeAppHostRelay(relays, context, reason, { notify = true, closePort = true } = {}) {
+    if (!relayIsCurrent(relays, context)) return false;
+    context.terminalState = reason === "replaced" ? "replaced" : "closed";
+    relays.delete(context.portId);
+    if (notify && reason !== "replaced" && !context.terminalNotified) {
+      context.terminalNotified = true;
+      safeSend(
+        context.ws,
+        { type: "app-host-port-close", portId: context.portId, reason },
+        { suppressDiagnostic: true }
+      );
+    }
+    if (closePort) {
+      try {
+        context.relay?.close(reason);
+      } catch {}
+    }
+    return true;
+  }
+
   function closeAppHostRelays(ws, reason) {
     const relays = ws.__codexAppHostRelays;
     if (!relays || relays.size === 0) return;
     // 页面断开时主动关闭官方端口，否则官方 app-host 服务会保留无主连接。
-    for (const [portId, relay] of relays.entries()) {
-      relays.delete(portId);
-      try {
-        relay.close(reason);
-      } catch {}
+    for (const context of [...relays.values()]) {
+      let graceful = false;
+      if (reason === "client_disconnected") {
+        // 断开属于正常 peer-close，先给官方 listener 发送 null 再释放底层端口。
+        try {
+          graceful = context.relay?.postMessage(null) === true;
+        } catch {}
+      }
+      closeAppHostRelay(relays, context, reason, { closePort: !graceful });
     }
   }
 
@@ -585,56 +645,92 @@ function createWsHub(
     const relays = appHostRelaysForSocket(ws);
     const existing = relays.get(portId);
     if (existing) {
-      // 同一个页面重复使用 portId 时以后到者为准，先关闭旧 relay 避免双写。
-      try {
-        existing.close("replaced");
-      } catch {}
-      relays.delete(portId);
+      // 替换前先摘除旧 context，延迟的旧回调不能误伤新 relay。
+      closeAppHostRelay(relays, existing, "replaced", { notify: false });
     }
-    while (!existing && relays.size >= Math.max(1, Number(maxAppHostRelays) || 1)) {
-      const [oldestPortId, oldestRelay] = relays.entries().next().value || [];
-      if (!oldestPortId) break;
-      relays.delete(oldestPortId);
-      try {
-        // 异常页面创建过多 MessagePort 时淘汰最旧端口，正常官方端口数量远低于此上限。
-        oldestRelay?.close("relay_limit");
-      } catch {}
+    while (relays.size >= Math.max(1, Number(maxAppHostRelays) || 1)) {
+      const oldestContext = relays.values().next().value;
+      if (!oldestContext) break;
+      closeAppHostRelay(relays, oldestContext, "relay_limit");
     }
 
+    const context = {
+      clientId,
+      generation: ++nextAppHostRelayGeneration,
+      portId,
+      relay: null,
+      terminalNotified: false,
+      terminalState: "active",
+      ws,
+    };
+    // 先登记 context，再调用工厂，覆盖工厂同步触发 onMessage/onError 的竞态。
+    relays.set(portId, context);
     try {
       const relay = createAppHostRelay({
         clientId,
         portId,
         remoteAddress: req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "",
         onClose(reason) {
-          if (relays.get(portId) === relay) relays.delete(portId);
-          safeSend(ws, { type: "app-host-port-close", portId, reason }, { suppressDiagnostic: true });
+          if (!relayIsCurrent(relays, context)) return;
+          closeAppHostRelay(relays, context, reason);
           if (DEBUG_LOGS) {
             diagnosticLog("ws-hub", "app_host_closed", {
               clientId: shortId(clientId),
               portId: shortId(portId),
+              generation: context.generation,
               reason,
             });
           }
         },
         onError(error) {
-          safeSend(
-            ws,
-            {
-              type: "app-host-port-error",
-              portId,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            { suppressDiagnostic: true }
-          );
+          failAppHostRelay(relays, context, error, "relay_error");
         },
         onMessage(data) {
-          // app-host RPC 是高频字符串流，只转发不逐条写日志，避免首屏日志刷屏和拖慢关键链路。
-          safeSend(ws, { type: "app-host-port-message", portId, data }, { suppressDiagnostic: true });
+          // 结构化值先编码为 JSON-safe AppHost wire 数据，再放入 WebSocket 控制帧。
+          if (!relayIsCurrent(relays, context)) return;
+          let wireData;
+          try {
+            wireData = appHostMessageCodec.encodeMessageData(data);
+          } catch (error) {
+            diagnosticWarn("ws-hub", "app_host_message_encode_failed", {
+              clientId: shortId(clientId),
+              error: error instanceof Error ? error.message : String(error),
+              portId: shortId(portId),
+            });
+            failAppHostRelay(relays, context, new Error("Invalid app-host message data"), "encode_failed");
+            return;
+          }
+          const sent = safeSend(
+            context.ws,
+            { type: "app-host-port-message", portId, ...wireData },
+            { suppressDiagnostic: true }
+          );
+          if (!sent) {
+            failAppHostRelay(
+              relays,
+              context,
+              new Error("Browser WebSocket is unavailable for app-host data"),
+              "forward_to_browser_failed"
+            );
+          }
         },
       });
-      relays.set(portId, relay);
-      safeSend(ws, { type: "app-host-port-connected", portId }, { suppressDiagnostic: true });
+      context.relay = relay;
+      if (context.terminalState !== "active") {
+        try {
+          relay.close("connect_failed");
+        } catch {}
+        return true;
+      }
+      if (!safeSend(ws, { type: "app-host-port-connected", portId }, { suppressDiagnostic: true })) {
+        failAppHostRelay(
+          relays,
+          context,
+          new Error("Browser WebSocket is unavailable for app-host connection"),
+          "forward_to_browser_failed"
+        );
+        return true;
+      }
       if (DEBUG_LOGS) {
         // app-host 端口连接/关闭是前端组件生命周期的一部分，默认只保留失败日志。
         diagnosticLog("ws-hub", "app_host_connect", {
@@ -648,24 +744,15 @@ function createWsHub(
         error: error instanceof Error ? error.message : String(error),
         portId: shortId(portId),
       });
-      safeSend(
-        ws,
-        {
-          type: "app-host-port-error",
-          portId,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        { suppressDiagnostic: true }
-      );
+      failAppHostRelay(relays, context, error, "connect_failed");
     }
     return true;
   }
 
   function handleAppHostPortMessage(ws, req, message) {
-    // 浏览器端 MessagePort 的后续字符串帧都从这里回写到官方 Electron port。
+    // 浏览器端 MessagePort 的后续 AppHost wire 帧先恢复值，再回写到官方 Electron port。
     const clientId = normalizedWsClientId(ws, message);
     const portId = message && typeof message.portId === "string" ? message.portId : "";
-    const data = message ? message.data : undefined;
     if (!clientId || ws.__codexWebClientId !== clientId || !validAppHostPortId(portId)) {
       diagnosticWarn("ws-hub", "app_host_message_rejected", {
         clientId: shortId(clientId),
@@ -674,22 +761,34 @@ function createWsHub(
       });
       return true;
     }
-    if (!(data == null || typeof data === "string")) {
-      // 官方 app-host 当前只使用字符串 JSON-RPC 帧；非字符串直接拒绝，避免污染官方端口。
-      diagnosticWarn("ws-hub", "app_host_non_string_message_rejected", {
+    const relays = appHostRelaysForSocket(ws);
+    let data;
+    try {
+      data = appHostMessageCodec.decodeMessageData(message);
+    } catch (error) {
+      diagnosticWarn("ws-hub", "app_host_message_decode_failed", {
         clientId: shortId(clientId),
-        payloadType: typeof data,
+        error: error instanceof Error ? error.message : String(error),
         portId: shortId(portId),
       });
+      const failedContext = relays.get(portId);
+      if (failedContext) {
+        failAppHostRelay(relays, failedContext, new Error("Invalid app-host message data"), "decode_failed");
+      } else {
+        safeSend(
+          ws,
+          { type: "app-host-port-error", portId, error: "Invalid app-host message data" },
+          { suppressDiagnostic: true }
+        );
+      }
       return true;
     }
-    const relays = appHostRelaysForSocket(ws);
-    let relay = relays.get(portId);
-    if (!relay) {
+    let context = relays.get(portId);
+    if (!context) {
       // WS 重连会释放旧 socket 上的 relay，但浏览器 MessagePort 仍会继续发送；按原身份懒重建后再转发首帧。
       handleAppHostConnect(ws, req, { ...message, type: "app-host-connect" });
-      relay = relays.get(portId);
-      if (!relay) {
+      context = relays.get(portId);
+      if (!context) {
         diagnosticWarn("ws-hub", "app_host_message_missing_relay", {
           clientId: shortId(clientId),
           portId: shortId(portId),
@@ -701,10 +800,34 @@ function createWsHub(
       // 观察器属于独立展示层；hub 仍只负责透明转发，不解析 App Server 协议或路由语义。
       observeAppHostFrame?.({ clientId, data, direction: "client", portId });
     } catch {}
-    if (WS_DEBUG_ENABLED && typeof data === "string") recordAppHostTraffic(ws, "browser-to-official", portId, byteLength(data));
-    relay.postMessage(data);
-    // null 是关闭信号，发送给官方后即可从索引移除，后续 close 回调再到达也不会重复处理。
-    if (data == null && relays.get(portId) === relay) relays.delete(portId);
+    if (WS_DEBUG_ENABLED) {
+      // 诊断只统计收到的 wire 帧，不为 codec 增加额外字节限制。
+      const wireText = typeof message.data === "string" ? message.data : JSON.stringify(message.data);
+      recordAppHostTraffic(ws, "browser-to-official", portId, byteLength(wireText));
+    }
+    if (!relayIsCurrent(relays, context)) return true;
+    try {
+      const forwarded = context.relay?.postMessage(data);
+      if (forwarded === false) throw new Error("Official app-host port is unavailable");
+    } catch (error) {
+      failAppHostRelay(relays, context, error, "forward_to_official_failed");
+      return true;
+    }
+    // nullish 交给官方 listener 后释放 context；官方 relay 会延迟关闭底层端口。
+    if (data == null) closeAppHostRelay(relays, context, "browser_closed", { notify: false, closePort: false });
+    return true;
+  }
+
+  function handleAppHostPortError(ws, message) {
+    const clientId = normalizedWsClientId(ws, message);
+    const portId = message && typeof message.portId === "string" ? message.portId : "";
+    if (!clientId || ws.__codexWebClientId !== clientId || !validAppHostPortId(portId)) return true;
+    const relays = appHostRelaysForSocket(ws);
+    const context = relays.get(portId);
+    if (context) {
+      // 浏览器侧已经报告失败，gateway 只清理该 context，避免反向再发一条 error。
+      closeAppHostRelay(relays, context, "browser_error", { notify: false });
+    }
     return true;
   }
 
@@ -778,6 +901,7 @@ function createWsHub(
     }
     if (message.type === "app-host-connect") return handleAppHostConnect(ws, req, message);
     if (message.type === "app-host-port-message") return handleAppHostPortMessage(ws, req, message);
+    if (message.type === "app-host-port-error") return handleAppHostPortError(ws, message);
     return false;
   }
 
@@ -908,5 +1032,5 @@ function createWsHub(
 
 module.exports = {
   createWsHub,
-  __test: { routeIdFromPayload },
+  __test: { routeIdFromPayload, webSocketServerOptions },
 };
