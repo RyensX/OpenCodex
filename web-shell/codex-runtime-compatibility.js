@@ -173,10 +173,12 @@
     let failed = false;
     const orderedReports = Array.from(queue.values()).sort((left, right) => left.sequence - right.sequence);
     const batchPluginId = orderedReports[0]?.pluginId || "";
-    // 每个请求只提交一个来源，保证插件目录注册与对应状态回执可以整批校验后再落地。
-    const reports = orderedReports
-      .filter((report) => (report.pluginId || "") === batchPluginId)
-      .slice(0, MAX_REPORTS_PER_FLUSH);
+    const reports = [];
+    // 服务端按全局 sequence 接收回执；这里只取同来源的连续前缀，不能跨过其它来源后再发送更大的序号。
+    for (const report of orderedReports) {
+      if ((report.pluginId || "") !== batchPluginId || reports.length >= MAX_REPORTS_PER_FLUSH) break;
+      reports.push(report);
+    }
     const pluginIds = new Set(reports.map((report) => report.pluginId).filter(Boolean));
     const catalogs = [...pluginIds].map((pluginId) => catalogQueue.get(pluginId)).filter(Boolean);
     for (const report of reports) queue.delete(report.point.id);
@@ -212,7 +214,10 @@
         if (failed) {
           scheduleFlush(retryDelayMs);
           retryDelayMs = Math.min(60_000, retryDelayMs * 2);
-        } else scheduleFlush();
+        } else {
+          // 首批保留去抖；开始排空后立即发送下一段连续序列，避免短生命周期页面留下大量待检测点。
+          scheduleFlush(0);
+        }
       }
     }
   }

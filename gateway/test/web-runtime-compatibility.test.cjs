@@ -9,9 +9,9 @@ const REPORTER_SOURCE = fs.readFileSync(
   "utf8"
 );
 
-function pointSnapshot({ active = false, hitCount = 0 } = {}) {
+function pointSnapshot({ active = false, hitCount = 0, id = "web.runtime.bridge.desktop-api" } = {}) {
   return {
-    id: "web.runtime.bridge.desktop-api",
+    id,
     groupId: "renderer-core",
     status: active ? "active" : "ready",
     directAdapterIds: ["adapter.desktop-bridge"],
@@ -31,6 +31,43 @@ function pointSnapshot({ active = false, hitCount = 0 } = {}) {
         reason: "",
       },
     ],
+  };
+}
+
+function pluginSnapshot(plugin, id) {
+  const basePoint = pointSnapshot({ active: true, hitCount: 1, id });
+  const groupId = `${plugin.id}.group`;
+  const directAdapterId = `${plugin.id}.adapter`;
+  const terminalAdapterId = `${plugin.id}.terminal`;
+  const point = {
+    ...basePoint,
+    description: "Plugin point",
+    owner: plugin.id,
+    plugin,
+    groupId,
+    directAdapterIds: [directAdapterId],
+    adapterChainIds: [directAdapterId, terminalAdapterId],
+    contributions: [{
+      ...basePoint.contributions[0],
+      id: `${id}::0.0`,
+      directAdapterId,
+      adapterId: terminalAdapterId,
+      adapterChainIds: [directAdapterId, terminalAdapterId],
+    }],
+  };
+  return {
+    groups: [{ id: groupId, name: "Plugin group", description: "Plugin points", order: 900, pointIds: [id] }],
+    adapterTypes: [
+      { id: terminalAdapterId, name: "Terminal", description: "Terminal adapter", kind: "terminal", dependencies: [] },
+      {
+        id: directAdapterId,
+        name: "Plugin adapter",
+        description: "Plugin adapter",
+        kind: "composite",
+        dependencies: [terminalAdapterId],
+      },
+    ],
+    points: [point],
   };
 }
 
@@ -159,6 +196,34 @@ test("browser Kernel reporter sends structured catalogs for external plugin poin
   assert.deepEqual(calls[0].catalogs[0].plugin, plugin);
   assert.equal(calls[0].reports[0].point.plugin.id, plugin.id);
   assert.equal(calls[0].reports[0].point.id, point.id);
+});
+
+test("browser Kernel reporter preserves global sequence across interleaved plugin sources", async () => {
+  const calls = [];
+  const { context } = createContext(async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return { ok: true, status: 200 };
+  });
+  const reporter = context.OpenCodexRuntimeCompatibility;
+  const plugin = { id: "example.interleaved-plugin", name: "Interleaved plugin" };
+
+  reporter.ingestSnapshot({ points: [pointSnapshot({ id: "web.runtime.bridge.desktop-api" })] });
+  reporter.ingestSnapshot(pluginSnapshot(plugin, "example.interleaved-plugin.mount"), { plugin });
+  reporter.ingestSnapshot({ points: [pointSnapshot({ id: "web.runtime.bridge.ipc-transport" })] });
+
+  // 三个来源段必须按 1、2、3 依次提交；旧实现会先提交 1、3，导致服务端永久拒绝插件回执 2。
+  const deadline = Date.now() + 1_000;
+  while (calls.length < 3 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map((call) => call.reports.map((report) => report.sequence)), [[1], [2], [3]]);
+  assert.deepEqual(calls.map((call) => call.reports[0].point.id), [
+    "web.runtime.bridge.desktop-api",
+    "example.interleaved-plugin.mount",
+    "web.runtime.bridge.ipc-transport",
+  ]);
+  assert.deepEqual(calls.map((call) => call.catalogs.length), [0, 1, 0]);
 });
 
 test("browser Kernel reporter moves its visibility listener to the replacement document", () => {
