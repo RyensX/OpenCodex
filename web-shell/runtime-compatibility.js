@@ -18,6 +18,12 @@
     return t(`web.runtimeCompatibility.${kind}.${id}.${field}`, fallback);
   }
 
+  function adapterPathSegment(adapterId) {
+    const value = String(adapterId || "");
+    // 页面标题保留稳定的适配器语义，同时省略所有适配器共有的命名空间前缀。
+    return value.startsWith("adapter.") ? value.slice("adapter.".length) : value;
+  }
+
   function readAutoRefreshPreference() {
     try {
       return localStorage.getItem(AUTO_REFRESH_STORAGE_KEY) !== "disabled";
@@ -350,7 +356,7 @@
         const item = document.createElement("article");
         item.className = "contribution-item";
         const title = document.createElement("code");
-        title.textContent = contribution.id;
+        title.textContent = `${contribution.id} / ${adapterPathSegment(contribution.adapterId)}`;
         const adapter = document.createElement("span");
         adapter.textContent = metadataText(
           "adapter",

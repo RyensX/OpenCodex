@@ -155,6 +155,14 @@ test("plugin tag is rendered only from structured point ownership", () => {
   assert.doesNotMatch(pointRowSource, /point\.owner/);
 });
 
+test("contribution titles combine contribution and terminal adapter identities", () => {
+  assert.match(
+    PAGE_SCRIPT,
+    /title\.textContent = `\$\{contribution\.id\} \/ \$\{adapterPathSegment\(contribution\.adapterId\)\}`/,
+  );
+  assert.match(PAGE_SCRIPT, /return value\.startsWith\("adapter\."\)/);
+});
+
 test("group overview is centered against the complete title and description block", () => {
   const groupHeaderSource = PAGE_SCRIPT.slice(
     PAGE_SCRIPT.indexOf("function groupHeader"),
