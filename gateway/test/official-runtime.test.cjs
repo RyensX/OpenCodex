@@ -17,6 +17,44 @@ const {
 } = require("../runtime/ipc/official-runtime.cjs");
 const { __test: portableRunnerTest } = require("../runner/platform/portable.cjs");
 
+test("forwards structured official app-host messages and preserves close signals", () => {
+  const forwarded = [];
+  const closed = [];
+  const payload = { id: 1n, sentAt: new Date(1234), value: new Uint8Array([1, 2]) };
+
+  assert.equal(
+    __test.deliverOfficialAppHostMessage(
+      Object.create({ data: payload }),
+      (data) => forwarded.push(data),
+      (reason) => closed.push(reason)
+    ),
+    true
+  );
+  assert.equal(forwarded[0], payload);
+  assert.deepEqual(closed, []);
+
+  assert.equal(
+    __test.deliverOfficialAppHostMessage(
+      { data: undefined },
+      (data) => forwarded.push(data),
+      (reason) => closed.push(reason)
+    ),
+    true
+  );
+  assert.equal(forwarded[1], undefined);
+  assert.deepEqual(closed, []);
+
+  assert.equal(
+    __test.deliverOfficialAppHostMessage(
+      { data: null },
+      (data) => forwarded.push(data),
+      (reason) => closed.push(reason)
+    ),
+    false
+  );
+  assert.deepEqual(closed, ["official_closed"]);
+});
+
 function threadStreamStateMessage(conversationId, sourceClientId, change) {
   return {
     type: "broadcast",

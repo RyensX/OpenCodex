@@ -40,7 +40,7 @@
   // 官方部分工作区/Git 调用自身允许执行 60 秒；桥接层多留 5 秒传输余量，不能先于官方逻辑超时。
   const IPC_INVOKE_TIMEOUT_MS = 65_000;
   const IPC_WS_MAX_PENDING = 4096;
-  // 单个 UTF-16 code unit 最多占 3 个 UTF-8 字节；16MB 阈值可确保外层 JSON 始终低于服务端 64MB WS 帧上限。
+  // 单个 UTF-16 code unit 最多占 3 个 UTF-8 字节；16MB 阈值可确保外层 JSON 始终低于服务端 100MB WS 帧上限。
   const IPC_WS_MAX_BODY_CHARS = 16 * 1024 * 1024;
   const APP_HOST_RELAY_MAX_ENTRIES = 64;
   const BRIDGE_TOAST_BODY_RETRY_MAX = 12;
@@ -61,7 +61,7 @@
   const WS_INBOUND_LARGE_CHARS = Number(cfg.wsInboundLargeChars || 256 * 1024);
   const WS_INBOUND_PARSE_SLOW_MS = Number(cfg.wsInboundParseSlowMs || 30);
   const WS_INBOUND_HANDLE_SLOW_MS = Number(cfg.wsInboundHandleSlowMs || 80);
-  // app-host RPC 首屏会连续发多条字符串帧；WS 未握手完成前先短暂排队，超过上限直接关闭端口。
+  // app-host RPC 首屏会连续发多条 wire 帧；WS 未握手完成前先短暂排队，超过上限直接关闭端口。
   const APP_HOST_PENDING_MESSAGE_LIMIT = 2000;
   const APP_HOST_PENDING_MESSAGE_CHARS_LIMIT = 16 * 1024 * 1024;
   const GATEWAY_AUTH_LOGOUT_LABEL = t("web.auth.logoutGateway");
@@ -1991,6 +1991,7 @@
     for (const state of appHostPortRelays.values()) {
       if (
         !state.closed &&
+        !state.closing &&
         !state.connected &&
         !state.pending.some((payload) => payload.type === "app-host-connect")
       ) {
@@ -2022,6 +2023,22 @@
   function appHostPortId() {
     // portId 只用于 WebSocket JSON 帧复原 MessagePort 边界，不能暴露官方 RPC 细节。
     return `app-host-${clientId}-${w.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
+  }
+
+  function appHostMessageCodec() {
+    const codec = w.__OpenCodexAppHostMessageCodec;
+    if (!codec || typeof codec.encodeMessageData !== "function" || typeof codec.decodeMessageData !== "function") {
+      throw new Error("OpenCodex app-host message codec is unavailable");
+    }
+    return codec;
+  }
+
+  function encodeAppHostMessageData(data) {
+    return appHostMessageCodec().encodeMessageData(data);
+  }
+
+  function decodeAppHostMessageData(message) {
+    return appHostMessageCodec().decodeMessageData(message);
   }
 
   function appHostWsPayload(state, payload) {
@@ -2217,6 +2234,10 @@
         if (!sendAppHostWsPayload(state.pending[0])) return;
         const sentPayload = state.pending.shift();
         state.pendingChars = Math.max(0, state.pendingChars - appHostPendingPayloadChars(sentPayload));
+        if (state.closing && state.pending.length === 0) {
+          finalizeAppHostRelay(state);
+          return;
+        }
       }
     } finally {
       state.flushing = false;
@@ -2230,12 +2251,17 @@
   }
 
   function appHostPendingPayloadChars(payload) {
-    // app-host 绝大部分体积都在 JSON-RPC data 字符串；固定控制字段只计一个小额上界。
-    return 256 + (typeof payload?.data === "string" ? payload.data.length : 0);
+    // 固定控制字段计一个小额上界，结构化 wire 数据只统计现成 JSON-safe 形状，不解码 RPC。
+    if (typeof payload?.data === "string") return 256 + payload.data.length;
+    try {
+      return 256 + (Object.prototype.hasOwnProperty.call(payload || {}, "data") ? JSON.stringify(payload.data).length : 0);
+    } catch {
+      return 256;
+    }
   }
 
   function queueAppHostRelayPayload(state, payload) {
-    if (!state || state.closed) return;
+    if (!state || state.closed || state.closing) return;
     const framedPayload = appHostWsPayload(state, payload);
     const nextPendingChars = state.pendingChars + appHostPendingPayloadChars(framedPayload);
     if (
@@ -2263,26 +2289,43 @@
     flushAppHostRelayMessages(state);
   }
 
-  function closeAppHostRelay(state, reason, notifyGateway) {
+  function finalizeAppHostRelay(state) {
     if (!state || state.closed) return;
     state.closed = true;
-    appHostPortRelays.delete(state.portId);
-    if (notifyGateway) {
-      // null 沿用 MessagePort 关闭信号，gateway 收到后会关闭对应的 Electron port。
-      sendAppHostWsPayload(appHostWsPayload(state, { type: "app-host-port-message", data: null }));
-    }
-    try {
-      state.port.close();
-    } catch {}
+    state.closing = false;
+    if (appHostPortRelays.get(state.portId) === state) appHostPortRelays.delete(state.portId);
     // 端口关闭后立刻释放可能很大的离线 RPC 帧，不等待 MessagePort 闭包被垃圾回收。
     state.pending.length = 0;
     state.pendingChars = 0;
     clientDiagnostic("app-host-port-closed", {
       portId: state.portId,
-      reason,
+      reason: state.closeReason || "closed",
       wsReady,
       wsState: websocketStateName(ws),
     });
+  }
+
+  function closeAppHostRelay(state, reason, notifyGateway) {
+    if (!state || state.closed || state.closing) return;
+    state.closing = true;
+    state.closeReason = reason;
+    if (notifyGateway) {
+      // terminal null 进入同一 FIFO；WS 尚未 ready 时也不能静默丢失关闭信号。
+      state.pending.length = 0;
+      state.pendingChars = 0;
+      const terminalPayload = appHostWsPayload(state, { type: "app-host-port-message", data: null });
+      state.pending.push(terminalPayload);
+      state.pendingChars = appHostPendingPayloadChars(terminalPayload);
+    } else if (reason !== "browser_closed") {
+      // gateway/official 已明确终止时无需继续发送旧队列，立即释放本地 relay。
+      state.pending.length = 0;
+      state.pendingChars = 0;
+    }
+    try {
+      state.port.close();
+    } catch {}
+    if (state.pending.length === 0) finalizeAppHostRelay(state);
+    else flushAppHostRelayMessages(state);
   }
 
   function handleAppHostGatewayMessage(message) {
@@ -2327,13 +2370,16 @@
       closeAppHostRelay(state, message.reason || "gateway_close", false);
       return true;
     }
-    const data = Object.prototype.hasOwnProperty.call(message, "data") ? message.data : undefined;
-    if (!(data === null || typeof data === "string")) {
-      // 官方 app-host 当前只传字符串 JSON-RPC；其它类型保持拒绝，避免破坏 renderer 侧协议假设。
-      clientDiagnostic("app-host-non-string-message", {
-        payloadType: payloadShape(data),
+    let data;
+    try {
+      data = decodeAppHostMessageData(message);
+    } catch (error) {
+      clientDiagnostic("app-host-message-decode-failed", {
+        error: error instanceof Error ? error.message : String(error),
+        errorName: error && error.name ? String(error.name) : "",
         portId,
       });
+      closeAppHostRelay(state, "decode_failed", true);
       return true;
     }
     publishAppHostData(data, "server");
@@ -2369,7 +2415,9 @@
       }
       const state = {
         closed: false,
+        closing: false,
         connected: false,
+        closeReason: "",
         flushing: false,
         pending: [],
         pendingChars: 0,
@@ -2381,22 +2429,31 @@
         if (!oldestRelay) break;
         // 页面组件异常重复创建端口时关闭最旧 relay，不能让每个端口继续持有队列和事件监听。
         closeAppHostRelay(oldestRelay, "relay_limit", true);
+        // 断线期间没有 gateway relay 可通知；必须释放仍在等待 terminal 帧的旧槽位。
+        if (appHostPortRelays.get(oldestRelay.portId) === oldestRelay) finalizeAppHostRelay(oldestRelay);
       }
       appHostPortRelays.set(state.portId, state);
       port.addEventListener("message", (portEvent) => {
-        // MessageEvent.data 可能不是自有属性，直接读取才能拿到官方 RPC 字符串。
+        if (state.closed || state.closing) return;
+        // MessageEvent.data 可能不是自有属性，直接读取才能拿到新版结构化 RPC 值。
         const portData = portEvent ? portEvent.data : undefined;
-        if (!(portData === null || typeof portData === "string")) {
-          clientDiagnostic("app-host-browser-non-string-message", {
-            payloadType: payloadShape(portData),
+        let wireData;
+        try {
+          wireData = encodeAppHostMessageData(portData);
+        } catch (error) {
+          clientDiagnostic("app-host-browser-message-encode-failed", {
+            error: error instanceof Error ? error.message : String(error),
+            errorName: error && error.name ? String(error.name) : "",
             portId: state.portId,
           });
+          closeAppHostRelay(state, "encode_failed", true);
           return;
         }
         // 当前官方 Web 路由固定为根路径；展示模块需从本标签页发出的 RPC 识别正在查看的 thread。
         publishAppHostData(portData, "client");
-        queueAppHostRelayPayload(state, { type: "app-host-port-message", data: portData });
-        if (portData === null) closeAppHostRelay(state, "browser_closed", false);
+        queueAppHostRelayPayload(state, { type: "app-host-port-message", ...wireData });
+        // 保留旧版 null 关闭语义；新版 renderer 的 undefined 终止帧编码后也只发送一次。
+        if (portData === null || portData === undefined) closeAppHostRelay(state, "browser_closed", false);
       });
       port.addEventListener("messageerror", () => {
         clientDiagnostic("app-host-browser-message-error", { portId: state.portId });
@@ -2404,7 +2461,7 @@
       });
       /**
        * 官方 preload 会把 connect-app-host 的 port 直接转给 ipcRenderer.postMessage。
-       * Web 端不能跨进程传 MessagePort，所以这里先发 connect 控制帧，再透明转发后续字符串 RPC。
+       * Web 端不能跨进程传 MessagePort，所以这里先发 connect 控制帧，再兼容转发旧字符串和新版结构化 RPC。
        */
       queueAppHostRelayPayload(state, { type: "app-host-connect" });
       port.start();

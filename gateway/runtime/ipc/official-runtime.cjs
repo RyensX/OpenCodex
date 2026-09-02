@@ -2200,9 +2200,21 @@ async function connectOfficialAppHostPort(port, context = {}) {
   return true;
 }
 
+function deliverOfficialAppHostMessage(event, onMessage, close) {
+  // Electron MessageEvent.data 可能挂在原型 getter 上，必须直接读取，不能用 hasOwnProperty 判断。
+  const data = event ? event.data : undefined;
+  if (data === null) {
+    // 新版 renderer 仍只把 null 当作 peer close；undefined 是合法的结构化消息值。
+    close("official_closed");
+    return false;
+  }
+  onMessage(data);
+  return true;
+}
+
 /**
  * 在 gateway 进程里创建一条“浏览器 MessagePort <-> 官方 MessagePort”的透明中继。
- * 这里不解析 app-host RPC 的 JSON 内容，只保证字符串帧和关闭信号按顺序穿过边界。
+ * 这里不解析 app-host RPC 内容，只保证旧字符串帧、新结构化值和关闭信号按顺序穿过边界。
  */
 function createOfficialAppHostRelay(options = {}) {
   const { clientId = "", onClose, onError, onMessage, portId = "", remoteAddress = "" } = options;
@@ -2213,6 +2225,7 @@ function createOfficialAppHostRelay(options = {}) {
   // port1 交给官方 IPC listener；port2 留在 gateway，用来和浏览器 WebSocket 互转消息。
   const { port1, port2 } = new electron.MessageChannelMain();
   let closed = false;
+  let nullCloseScheduled = false;
 
   function close(reason = "closed") {
     if (closed) return;
@@ -2229,29 +2242,19 @@ function createOfficialAppHostRelay(options = {}) {
   }
 
   port2.on("message", (event) => {
-    // Electron MessageEvent.data 可能挂在原型 getter 上，必须直接读取，不能用 hasOwnProperty 判断。
-    const data = event ? event.data : undefined;
-    if (data == null) {
-      // app-host 约定 null 表示端口关闭，收到后要同步释放两端资源。
-      close("official_closed");
-      return;
-    }
-    if (typeof data !== "string") {
-      diagnosticWarn("official-app-host", "non_string_message_from_official", {
-        clientId: shortId(clientId),
-        payloadType: typeof data,
-        portId: shortId(portId),
-      });
-      return;
-    }
     try {
-      onMessage && onMessage(data);
+      deliverOfficialAppHostMessage(event, (data) => onMessage && onMessage(data), close);
     } catch (error) {
       diagnosticWarn("official-app-host", "forward_to_browser_failed", {
         clientId: shortId(clientId),
         error: error instanceof Error ? error.message : String(error),
         portId: shortId(portId),
       });
+      try {
+        onError && onError(error);
+      } catch {}
+      // 无法编码或下行后继续保留 RPC session 只会让双方永久等待，关闭当前端口供页面重建。
+      close("forward_to_browser_failed");
     }
   });
   port2.on("close", () => close("official_port_closed"));
@@ -2285,9 +2288,14 @@ function createOfficialAppHostRelay(options = {}) {
     postMessage(data) {
       if (closed) return false;
       try {
-        // 浏览器侧也用 null 作为关闭信号；其它 payload 必须保持官方 RPC 字符串原样。
+        // 旧字符串和新版结构化值都原样交给 Electron MessagePort；浏览器侧 nullish 值结束会话。
         port2.postMessage(data);
-        if (data == null) close("browser_closed");
+        if (data == null && !nullCloseScheduled) {
+          nullCloseScheduled = true;
+          // 先让官方 listener 消费 peer-close，再释放端口，避免被误记为 MessagePort message error。
+          const scheduleClose = typeof setImmediate === "function" ? setImmediate : (callback) => setTimeout(callback, 0);
+          scheduleClose(() => close("browser_closed"));
+        }
         return true;
       } catch (error) {
         diagnosticWarn("official-app-host", "forward_to_official_failed", {
@@ -2565,6 +2573,7 @@ module.exports = {
   __test: {
     compactOfficialAppCatalogPayload,
     configureOfficialWebContentsListenerBudget,
+    deliverOfficialAppHostMessage,
     fileManagerPathFromSpawn,
     normalizeInitialSidebarBootstrap,
     OfficialChunkedMessageReceiver,

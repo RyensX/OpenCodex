@@ -29,6 +29,7 @@ const {
 const WEB_SHELL_INDEX = path.resolve(__dirname, "..", "..", "web-shell", "index.html");
 const INTERNAL_PROVIDER_DIR = path.resolve(__dirname, "..", "..", "web-shell", "internal", "providers");
 const BRIDGE_POLYFILL = path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js");
+const APP_HOST_MESSAGE_CODEC = path.resolve(__dirname, "..", "..", "web-shell", "codex-app-host-message-codec.js");
 const SMART_SCHEDULING_SETTINGS = path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-settings.js");
 const SMART_SCHEDULING_INJECTION_HEALTH = path.join(INTERNAL_PROVIDER_DIR, "codex-smart-scheduling-injection-health.js");
 const SMART_SCHEDULING_COMPOSER = path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-composer.js");
@@ -124,6 +125,109 @@ function createBrowserFocusHarness(bridge) {
     },
     windowListeners,
   };
+}
+
+function createAppHostWireHarness(bridge) {
+  const codec = require(APP_HOST_MESSAGE_CODEC);
+  const functionNames = ["appHostMessageCodec", "encodeAppHostMessageData", "decodeAppHostMessageData"];
+  const declarations = functionNames.map((name) => sourceFunctionDeclaration(bridge, name)).join("\n");
+  // 执行 bridge 生产 helper，验证 provider 实际读取提前注入的全局 codec。
+  return vm.runInNewContext(
+    `${declarations}\n({ ${functionNames.join(", ")} })`,
+    { w: { __OpenCodexAppHostMessageCodec: codec } }
+  );
+}
+
+function createAppHostBridgeBehaviorHarness(bridge, { wsReady = true } = {}) {
+  const codec = require(APP_HOST_MESSAGE_CODEC);
+  const windowListeners = new Map();
+  const portListeners = new Map();
+  const wsMessages = [];
+  const diagnostics = [];
+  const publishedData = [];
+  const fakeWindow = {
+    __OpenCodexAppHostMessageCodec: codec,
+    WebSocket: { OPEN: 1 },
+    crypto: { randomUUID: () => "app-host-test-port" },
+  };
+  const fakeSocket = {
+    OPEN: 1,
+    readyState: wsReady ? 1 : 0,
+    send(raw) {
+      wsMessages.push(JSON.parse(String(raw)));
+    },
+  };
+  const fakePort = {
+    closed: false,
+    posted: [],
+    started: false,
+    addEventListener(type, handler) {
+      portListeners.set(type, handler);
+    },
+    close() {
+      this.closed = true;
+    },
+    postMessage(message) {
+      this.posted.push(message);
+    },
+    start() {
+      this.started = true;
+    },
+  };
+  const functionNames = [
+    "appHostPortId",
+    "appHostMessageCodec",
+    "encodeAppHostMessageData",
+    "decodeAppHostMessageData",
+    "appHostWsPayload",
+    "sendAppHostWsPayload",
+    "flushAppHostRelayMessages",
+    "flushAllAppHostRelayMessages",
+    "appHostPendingPayloadChars",
+    "queueAppHostRelayPayload",
+    "finalizeAppHostRelay",
+    "closeAppHostRelay",
+    "handleAppHostGatewayMessage",
+    "installAppHostMessagePortBridge",
+  ];
+  const declarations = functionNames.map((name) => sourceFunctionDeclaration(bridge, name)).join("\n");
+  // 用最小依赖执行生产 bridge，覆盖 provider 生命周期下的 MessagePort/WS 事件闭环。
+  const result = vm.runInNewContext(
+    `
+      const w = windowContext;
+      const ws = socketContext;
+      const wsReady = wsReadyContext;
+      const clientId = "app-host-test-client";
+      const providerGeneration = {};
+      const modificationEffects = null;
+      const APP_HOST_RELAY_MAX_ENTRIES = 64;
+      const APP_HOST_PENDING_MESSAGE_LIMIT = 2000;
+      const APP_HOST_PENDING_MESSAGE_CHARS_LIMIT = 16 * 1024 * 1024;
+      const appHostPortRelays = new Map();
+      const adapterHost = {
+        events: {
+          observe({ target, type, callback }) {
+            if (target === w) windowListeners.set(type, callback);
+          },
+        },
+      };
+      function clientDiagnostic(name, payload) { diagnostics.push({ name, payload }); }
+      function publishAppHostData(data, direction) { publishedData.push({ data, direction }); }
+      function payloadShape(value) { return value === null ? "null" : typeof value; }
+      function websocketStateName() { return "open"; }
+      ${declarations}
+      ({ appHostPortRelays, installAppHostMessagePortBridge, handleAppHostGatewayMessage, w })
+    `,
+    {
+      diagnostics,
+      publishedData,
+      socketContext: fakeSocket,
+      windowContext: fakeWindow,
+      windowListeners,
+      wsReadyContext: wsReady,
+    }
+  );
+  return { ...result, diagnostics, fakePort, portListeners, publishedData, windowListeners, wsMessages };
 }
 
 function makeTempDir(t) {
@@ -594,6 +698,112 @@ test("bridge reconnects active app-host ports after websocket hello", () => {
   // WS 瞬时断线只能让升级前已允许重试的安全读取回退 HTTP，写操作不得重复提交。
   assert.match(bridge, /clientDiagnostic\("ipc-ws-fallback"/);
   assert.match(bridge, /retryDelays\.length === 1 \|\| !isTransientGatewayFetchError\(error\)/);
+});
+
+test("injects the app-host codec before the bridge provider", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const service = createService(webviewDir);
+  const runtime = runtimeBootstrapSource(service);
+  const codecIndex = runtime.indexOf("__OpenCodexAppHostMessageCodec");
+  const bridgeIndex = runtime.indexOf("__codexBridgePolyfillInstalled");
+
+  assert.notEqual(codecIndex, -1);
+  assert.notEqual(bridgeIndex, -1);
+  assert.equal(codecIndex < bridgeIndex, true);
+  assert.equal(service.staticFile("/codex-app-host-message-codec.js"), APP_HOST_MESSAGE_CODEC);
+});
+
+test("bridge encodes and decodes structured app-host message data", () => {
+  const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
+  const harness = createAppHostWireHarness(bridge);
+  const wireData = harness.encodeAppHostMessageData({ id: 7n, sentAt: new Date(1234) });
+  const restored = harness.decodeAppHostMessageData(JSON.parse(JSON.stringify(wireData)));
+
+  assert.equal(wireData.dataEncoding, "opencodex-structured-clone-v1");
+  assert.equal(restored.id, 7n);
+  assert.equal(restored.sentAt.getTime(), 1234);
+});
+
+test("bridge forwards structured and legacy app-host frames with compatible close semantics", () => {
+  const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
+  const codec = require(APP_HOST_MESSAGE_CODEC);
+
+  function connectPort(harness) {
+    harness.installAppHostMessagePortBridge();
+    harness.windowListeners.get("message")({
+      source: harness.w,
+      data: { type: "connect-app-host", port: harness.fakePort },
+      ports: [harness.fakePort],
+    });
+    assert.equal(harness.fakePort.started, true);
+    return harness.portListeners.get("message");
+  }
+
+  const structuredHarness = createAppHostBridgeBehaviorHarness(bridge);
+  const structuredMessage = connectPort(structuredHarness);
+  structuredMessage({ data: { id: 7n, sentAt: new Date(1234) } });
+  const structuredFrames = structuredHarness.wsMessages.filter((message) => message.type === "app-host-port-message");
+  assert.equal(structuredFrames.length, 1);
+  assert.equal(structuredFrames[0].dataEncoding, codec.encoding);
+  assert.deepEqual(codec.decodeMessageData(structuredFrames[0]), { id: 7n, sentAt: new Date(1234) });
+
+  structuredMessage({ data: "legacy-json-rpc" });
+  const legacyFrames = structuredHarness.wsMessages.filter((message) => message.type === "app-host-port-message");
+  assert.equal(legacyFrames[1].data, "legacy-json-rpc");
+  assert.equal(Object.prototype.hasOwnProperty.call(legacyFrames[1], "dataEncoding"), false);
+
+  const undefinedHarness = createAppHostBridgeBehaviorHarness(bridge);
+  const undefinedMessage = connectPort(undefinedHarness);
+  undefinedMessage({ data: undefined });
+  const undefinedFrames = undefinedHarness.wsMessages.filter((message) => message.type === "app-host-port-message");
+  assert.equal(undefinedFrames.length, 1);
+  assert.equal(codec.decodeMessageData(undefinedFrames[0]), undefined);
+  assert.equal(undefinedHarness.fakePort.closed, true);
+
+  const nullHarness = createAppHostBridgeBehaviorHarness(bridge);
+  const nullMessage = connectPort(nullHarness);
+  nullMessage({ data: null });
+  const nullFrames = nullHarness.wsMessages.filter((message) => message.type === "app-host-port-message");
+  assert.deepEqual(nullFrames.map((message) => message.data), [null]);
+  assert.equal(nullHarness.fakePort.closed, true);
+});
+
+test("bridge closes malformed app-host frames and retains offline terminal data", () => {
+  const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
+  const codec = require(APP_HOST_MESSAGE_CODEC);
+
+  function connectedHarness(options) {
+    const harness = createAppHostBridgeBehaviorHarness(bridge, options);
+    harness.installAppHostMessagePortBridge();
+    harness.windowListeners.get("message")({
+      source: harness.w,
+      data: { type: "connect-app-host", port: harness.fakePort },
+      ports: [harness.fakePort],
+    });
+    return { harness, state: [...harness.appHostPortRelays.values()][0] };
+  }
+
+  const malformed = connectedHarness();
+  malformed.harness.handleAppHostGatewayMessage({
+    type: "app-host-port-message",
+    portId: malformed.state.portId,
+    dataEncoding: codec.encoding,
+    data: ["unknown"],
+  });
+  assert.equal(malformed.state.closed, true);
+  assert.equal(malformed.harness.fakePort.closed, true);
+  assert.equal(
+    malformed.harness.wsMessages.filter((message) => message.type === "app-host-port-message" && message.data === null).length,
+    1
+  );
+
+  const offline = connectedHarness({ wsReady: false });
+  offline.harness.portListeners.get("message")({ data: undefined });
+  assert.equal(offline.state.closed, false);
+  assert.equal(offline.state.closing, true);
+  assert.equal(offline.harness.fakePort.closed, true);
+  assert.equal(offline.state.pending.some((payload) => payload.dataEncoding === codec.encoding), true);
+  assert.equal(offline.harness.wsMessages.length, 0);
 });
 
 test("bridge resolves window focus from the browser instead of the hidden Electron proxy", () => {
@@ -1339,10 +1549,15 @@ test("external plugins require an SDK-compatible ESM v2 entry and never execute 
     assert.equal(pluginEntryFileFromRequestPath(`/opencodex-plugins/${modern.urlPath}`), modern.entryFile);
     assert.equal(legacy.entryFile, null);
     assert.equal(legacy.urlPath, "");
-    const aggregateSource = runtimeBootstrapSource(createService(makeOfficialWebviewDir(t)));
+    const service = createService(makeOfficialWebviewDir(t));
+    const aggregateSource = runtimeBootstrapSource(service);
     assert.match(aggregateSource, /createPluginScope\(entry\.manifest\)/);
     assert.match(aggregateSource, /modern-plugin\/entry\.mjs/);
     assert.doesNotMatch(aggregateSource, /must not execute/);
+    const html = service.createRendererResponse();
+    const codecIndex = html.indexOf('<script src="/codex-app-host-message-codec.js"></script>');
+    const bridgeIndex = html.indexOf('<script src="/codex-bridge-polyfill.js"></script>');
+    assert.ok(codecIndex >= 0 && bridgeIndex > codecIndex);
   } finally {
     if (previousRoots === undefined) delete process.env.OPENCODEX_PLUGIN_DIRS;
     else process.env.OPENCODEX_PLUGIN_DIRS = previousRoots;

@@ -105,6 +105,42 @@ test("presentation correlates turns and model selections and sends safe route st
   assert.equal(removedListener, null);
 });
 
+test("presentation correlates structured AppHost objects and nested envelopes", () => {
+  const router = fakeRouter();
+  const sent = [];
+  const presentation = createSmartSchedulingPresentation({
+    modelRouter: router,
+    sendTo: (clientId, payload) => sent.push({ clientId, payload }),
+  });
+
+  presentation.observeAppHostFrame({
+    clientId: "structured-client",
+    data: {
+      payload: {
+        method: "turn/start",
+        params: { threadId: "structured-thread" },
+      },
+    },
+  });
+  presentation.observeAppHostFrame({
+    clientId: "nested-client",
+    data: {
+      message: {
+        body: {
+          method: "thread/settings/update",
+          params: { threadId: "nested-thread" },
+        },
+      },
+    },
+  });
+
+  router.emit({ status: "classifying", threadId: "structured-thread" });
+  router.emit({ status: "classifying", threadId: "nested-thread" });
+
+  assert.deepEqual(sent.map((entry) => entry.clientId), ["structured-client", "nested-client"]);
+  presentation.dispose();
+});
+
 test("presentation protocol traversal bounds wide and cyclic batches", () => {
   let reads = 0;
   let visits = 0;

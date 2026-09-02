@@ -442,7 +442,7 @@
       return null;
     }
 
-    function handleTokenUsageEventMessage(message, source, parentThreadId) {
+    function handleTokenUsageEventMessage(message, source, parentThreadId, parentTurnId) {
       if (!tokenUsageConsumerActive() || !message || typeof message !== "object") return;
       const event = tokenUsageEventPayloadFromMessage(message);
       if (!event || typeof event !== "object") return;
@@ -462,7 +462,13 @@
         ) || currentTokenUsageThreadId();
       if (!threadId) return;
       const turnId = normalizeTokenUsageId(
-        event.turnId ?? event.turn_id ?? message.turnId ?? message.turn_id ?? event.turn?.id ?? message.turn?.id
+        event.turnId ??
+          event.turn_id ??
+          message.turnId ??
+          message.turn_id ??
+          event.turn?.id ??
+          message.turn?.id ??
+          parentTurnId
       );
 
       if (eventType === "task_started" || eventType === "turn_started") {
@@ -588,11 +594,11 @@
       tokenUsageDiagnostics.passiveHandled += 1;
     }
 
-    function collectTokenUsageFromTree(root, source) {
+    function collectTokenUsageFromTree(root, source, initialThreadId = null, initialTurnId = null) {
       if (!tokenUsageConsumerActive() || !root || typeof root !== "object") return;
       // 被动解析是优化路径：能从实时 IPC 里拿到就提前缓存，拿不到仍由 getForTurn 懒查 session API。
       const visited = new WeakSet();
-      const stack = [{ depth: 0, threadId: null, turnId: null, value: root }];
+      const stack = [{ depth: 0, threadId: initialThreadId, turnId: initialTurnId, value: root }];
       let scanned = 0;
       let inspectedChildren = 0;
       while (stack.length && scanned < TOKEN_USAGE_TREE_SCAN_LIMIT) {
@@ -608,7 +614,7 @@
         tokenUsageNotificationFromObject(value).forEach((notification) =>
           handleTokenUsageNotification(notification, source)
         );
-        handleTokenUsageEventMessage(value, source, threadId);
+        handleTokenUsageEventMessage(value, source, threadId, turnId);
         const rawUsage = tokenUsagePayloadFromContainer(value);
         if (rawUsage && threadId && turnId) {
           const normalized = normalizeTokenUsagePayload(rawUsage, threadId, turnId, source);
@@ -655,7 +661,11 @@
           handleTokenUsageNotification(notification, source)
         );
       }
-      collectTokenUsageFromTree(treeRoot, source);
+      // 只扫描原有 result/payload 子树，同时把 wrapper 上的会话标识传入，兼容新版结构化 envelope。
+      const initialThreadId =
+        message.threadId ?? message.thread_id ?? message.conversationId ?? message.conversation_id ?? null;
+      const initialTurnId = message.turnId ?? message.turn_id ?? message.turn?.id ?? null;
+      collectTokenUsageFromTree(treeRoot, source, initialThreadId, initialTurnId);
     }
 
     function handleTokenUsageAppHostData(data, rawFrame = data, decodeFrame = null) {

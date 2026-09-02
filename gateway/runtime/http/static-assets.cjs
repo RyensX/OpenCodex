@@ -65,6 +65,7 @@ const RUNTIME_COMPATIBILITY_SCRIPT_PATH = "/opencodex/runtime-compatibility.js";
 const RUNTIME_COMPATIBILITY_STYLE_PATH = "/opencodex/runtime-compatibility.css";
 const OPENCODEX_SIDEBAR_PREVIEW_PATH = "/codex-sidebar-preview.js";
 const OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH = "/codex-offscreen-animation-guard.js";
+const CODEX_APP_HOST_MESSAGE_CODEC_PATH = "/codex-app-host-message-codec.js";
 const CODEX_BRIDGE_POLYFILL_PATH = "/codex-bridge-polyfill.js";
 const CODEX_REMOTE_FILE_ACTIONS_PATH = "/codex-remote-file-actions.js";
 const CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH = "/codex-workspace-root-picker.css";
@@ -283,6 +284,7 @@ const WEB_SHELL_STATIC_FILES = new Map([
     OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH,
     path.join(INTERNAL_PROVIDER_DIR, "codex-offscreen-animation-guard.js"),
   ],
+  [CODEX_APP_HOST_MESSAGE_CODEC_PATH, path.join(WEB_SHELL_DIR, "codex-app-host-message-codec.js")],
   [CODEX_BRIDGE_POLYFILL_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js")],
   [CODEX_REMOTE_FILE_ACTIONS_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-remote-file-actions.js")],
   [CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH, path.join(WEB_SHELL_DIR, "codex-workspace-root-picker.css")],
@@ -690,6 +692,7 @@ function createStaticAssetService({
         CODEX_SMART_SCHEDULING_SUMMARY_PATH,
         OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH,
         OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH,
+        CODEX_APP_HOST_MESSAGE_CODEC_PATH,
         CODEX_BRIDGE_POLYFILL_PATH,
         CODEX_REMOTE_FILE_ACTIONS_PATH,
         CODEX_WORKSPACE_ROOT_PICKER_PATH,
@@ -944,6 +947,8 @@ function createStaticAssetService({
           `<script src="${CODEX_SMART_SCHEDULING_SUMMARY_PATH}"></script>`,
           `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
           `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
+          // codec 先于 bridge 执行，确保新版 AppHost 的首批结构化帧可以立即编码。
+          `<script src="${CODEX_APP_HOST_MESSAGE_CODEC_PATH}"></script>`,
           `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
           `<script src="${CODEX_REMOTE_FILE_ACTIONS_PATH}"></script>`,
           `<script src="${CODEX_WORKSPACE_ROOT_PICKER_PATH}"></script>`,

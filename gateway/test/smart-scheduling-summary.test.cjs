@@ -407,7 +407,8 @@ function createHarness() {
       }
     },
     sendClientMessage(message) {
-      summary.handleAppHostData(JSON.stringify(message), "client");
+      // 新版 AppHost 直接交付结构化对象；openThread/sendServerMessage 继续覆盖旧字符串帧。
+      summary.handleAppHostData(message, "client");
     },
     sendServerMessage(message) {
       summary.handleAppHostData(JSON.stringify(message), "server");

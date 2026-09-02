@@ -79,17 +79,24 @@ function createSmartSchedulingPresentation({ compatibilityService, modelRouter, 
   }
 
   function observeAppHostFrame({ clientId, data, direction = "client" } = {}) {
-    if (
-      direction !== "client" ||
-      typeof data !== "string" ||
-      (!data.includes("turn/") && !data.includes("thread/"))
+    if (direction !== "client") return;
+    let message = null;
+    if (data && typeof data === "object") {
+      // 新版 AppHost 已由 transport codec 恢复对象，直接沿有界 envelope visitor 处理。
+      message = data;
+    } else if (
+      typeof data === "string" &&
+      (data.includes("turn/") || data.includes("thread/"))
     ) {
-      return;
+      try {
+        message = JSON.parse(data);
+      } catch {}
     }
+    if (!message || typeof message !== "object") return;
     try {
-      visitProtocolMessages(JSON.parse(data), (message) => {
-        if (!["turn/start", "thread/settings/update"].includes(message?.method)) return;
-        rememberClient(message.params?.threadId || message.params?.thread?.id, clientId);
+      visitProtocolMessages(message, (protocolMessage) => {
+        if (!["turn/start", "thread/settings/update"].includes(protocolMessage?.method)) return;
+        rememberClient(protocolMessage.params?.threadId || protocolMessage.params?.thread?.id, clientId);
       });
     } catch {}
   }
