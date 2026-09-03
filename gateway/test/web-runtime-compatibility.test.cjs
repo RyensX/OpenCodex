@@ -226,6 +226,86 @@ test("browser Kernel reporter preserves global sequence across interleaved plugi
   assert.deepEqual(calls.map((call) => call.catalogs.length), [0, 1, 0]);
 });
 
+test("browser Kernel reporter replays every latest point after the server report epoch changes", async () => {
+  const calls = [];
+  const reportEpoch = "gateway_instance_2:4";
+  const { context } = createContext(async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    calls.push(payload);
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          ok: true,
+          accepted: payload.reports.length,
+          reportEpoch,
+          resync: calls.length === 1,
+        };
+      },
+    };
+  });
+  const pointIds = Array.from(
+    { length: 20 },
+    (_value, index) => `web.runtime.test.resync-${String(index).padStart(2, "0")}`,
+  );
+  context.OpenCodexRuntimeCompatibility.ingestSnapshot({
+    points: pointIds.map((id) => pointSnapshot({ id })),
+  });
+
+  const deadline = Date.now() + 1_000;
+  while (calls.length < 3 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].reportEpoch, "");
+  assert.equal(calls[0].reports.length, 16);
+  assert.equal(calls.slice(1).every((call) => call.reportEpoch === reportEpoch), true);
+  const replayReports = calls.slice(1).flatMap((call) => call.reports);
+  assert.deepEqual(replayReports.map((report) => report.point.id), pointIds);
+  // 首批尚未发送的旧序号也必须被完整重放替换，避免服务端把较小序号当成过期回执忽略。
+  assert.equal(
+    Math.min(...replayReports.map((report) => report.sequence)) >
+      Math.max(...calls[0].reports.map((report) => report.sequence)),
+    true,
+  );
+});
+
+test("browser Kernel reporter replays an external plugin catalog with its latest point", async () => {
+  const calls = [];
+  const reportEpoch = "gateway_instance_3:2";
+  const { context } = createContext(async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    calls.push(payload);
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          ok: true,
+          accepted: payload.reports.length,
+          reportEpoch,
+          resync: calls.length === 1,
+        };
+      },
+    };
+  });
+  const plugin = { id: "example.resync-plugin", name: "Resync plugin" };
+  const pointId = "example.resync-plugin.mount";
+  context.OpenCodexRuntimeCompatibility.ingestSnapshot(pluginSnapshot(plugin, pointId), { plugin });
+
+  const deadline = Date.now() + 1_000;
+  while (calls.length < 2 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map((call) => call.catalogs[0]?.plugin.id), [plugin.id, plugin.id]);
+  assert.deepEqual(calls.map((call) => call.reports[0]?.point.id), [pointId, pointId]);
+  assert.equal(calls[1].reportEpoch, reportEpoch);
+});
+
 test("browser Kernel reporter moves its visibility listener to the replacement document", () => {
   const harness = createContext(async () => ({ ok: true, status: 200 }));
   assert.equal(harness.documentListeners.has("visibilitychange"), true);

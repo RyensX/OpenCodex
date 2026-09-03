@@ -147,6 +147,33 @@ test("production coordinator compiles same-adapter points as one host batch", as
   assert.equal(snapshots.get(gatewayPoints.dialogOpen.id).contributions[0].activation, "disposed");
 });
 
+test("production coordinator replays every active snapshot without applying operations again", () => {
+  const published = [];
+  let applicationCount = 0;
+  const coordinator = createProductionModificationCoordinator({
+    host: "gateway",
+    publish(point) { published.push(point); },
+  });
+  for (const point of [gatewayPoints.dialogOpen, gatewayPoints.browserWindow]) {
+    coordinator.execute(point, () => {
+      applicationCount += 1;
+      return point.id;
+    });
+  }
+  assert.equal(applicationCount, 2);
+
+  published.length = 0;
+  coordinator.refreshAll();
+
+  // Runtime 身份重置只需要恢复诊断快照，不能再次安装真实 Hook 或重复业务副作用。
+  assert.equal(applicationCount, 2);
+  assert.deepEqual(new Set(published.map((point) => point.id)), new Set([
+    gatewayPoints.dialogOpen.id,
+    gatewayPoints.browserWindow.id,
+  ]));
+  assert.equal(published.every((point) => point.status === "ready"), true);
+});
+
 test("production coordinator resets semantic hits across modification enable cycles", () => {
   const snapshots = new Map();
   const coordinator = createProductionModificationCoordinator({

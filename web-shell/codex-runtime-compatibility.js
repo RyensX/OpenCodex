@@ -9,6 +9,7 @@
     w.crypto?.randomUUID?.() || `browser_page_${Math.random().toString(36).slice(2, 18)}`;
   const queue = new Map();
   const catalogQueue = new Map();
+  const latestReports = new Map();
   const latestCatalogs = new Map();
   const sentSignatures = new Map();
   const sentCatalogSignatures = new Map();
@@ -18,6 +19,8 @@
   let generation = 1;
   let sequence = 0;
   let observedDocument = null;
+  let serverReportEpoch = "";
+  let replayedReportEpoch = "";
 
   function handleVisibilityChange() {
     if (document.visibilityState === "visible" && queue.size > 0) scheduleFlush();
@@ -167,6 +170,25 @@
     queue.set(report.point.id, report);
   }
 
+  function replayLatestReports() {
+    // 服务端重置后旧去重签名已经无效；用新序号重放本页掌握的完整最新状态。
+    queue.clear();
+    catalogQueue.clear();
+    sentSignatures.clear();
+    sentCatalogSignatures.clear();
+    for (const entry of latestCatalogs.values()) {
+      if (entry.generation === generation) catalogQueue.set(entry.catalog.plugin.id, entry);
+    }
+    for (const entry of latestReports.values()) {
+      if (entry.generation !== generation) continue;
+      queue.set(entry.point.id, {
+        ...entry,
+        sequence: ++sequence,
+      });
+    }
+    scheduleFlush(0);
+  }
+
   async function flush() {
     if (flushing || queue.size === 0) return;
     flushing = true;
@@ -188,9 +210,29 @@
         credentials: "same-origin",
         cache: "no-store",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ clientId, generation, catalogs: catalogs.map((entry) => entry.catalog), reports }),
+        body: JSON.stringify({
+          clientId,
+          generation,
+          reportEpoch: serverReportEpoch,
+          catalogs: catalogs.map((entry) => entry.catalog),
+          reports,
+        }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      let responsePayload = null;
+      try {
+        if (typeof response.json === "function") responsePayload = await response.json();
+      } catch {
+        // 兼容尚未返回代际字段的旧 Gateway；成功响应仍按原有确认逻辑处理。
+      }
+      const responseEpoch = typeof responsePayload?.reportEpoch === "string"
+        ? responsePayload.reportEpoch
+        : "";
+      const responseMatchesGeneration = reports[0]?.generation === generation;
+      const shouldReplay = responseMatchesGeneration && !!responseEpoch && (
+        responsePayload?.resync === true || responseEpoch !== serverReportEpoch
+      ) && responseEpoch !== replayedReportEpoch;
+      if (responseMatchesGeneration && responseEpoch) serverReportEpoch = responseEpoch;
       for (const report of reports) {
         if (report.generation === generation) sentSignatures.set(report.point.id, report.signature);
       }
@@ -198,6 +240,10 @@
         if (entry.generation !== generation) continue;
         sentCatalogSignatures.set(entry.catalog.plugin.id, entry.signature);
         if (catalogQueue.get(entry.catalog.plugin.id) === entry) catalogQueue.delete(entry.catalog.plugin.id);
+      }
+      if (shouldReplay) {
+        replayedReportEpoch = responseEpoch;
+        replayLatestReports();
       }
       retryDelayMs = 1000;
     } catch {
@@ -244,6 +290,12 @@
       if (point.contributions.length === 0) continue;
       if (pluginId && options.disabled === true) point = disabledPoint(point, options.reason);
       const pointSignature = signature(point);
+      latestReports.set(point.id, {
+        generation,
+        point,
+        signature: pointSignature,
+        pluginId,
+      });
       if (sentSignatures.get(point.id) === pointSignature && !queue.has(point.id)) continue;
       queue.set(point.id, {
         generation,
@@ -262,9 +314,12 @@
     sequence = 0;
     queue.clear();
     catalogQueue.clear();
+    latestReports.clear();
     latestCatalogs.clear();
     sentSignatures.clear();
     sentCatalogSignatures.clear();
+    serverReportEpoch = "";
+    replayedReportEpoch = "";
   }
 
   const api = Object.freeze({

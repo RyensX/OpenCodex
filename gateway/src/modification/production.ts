@@ -79,6 +79,7 @@ export interface ProductionModificationCoordinator {
   useFallback(point: ModificationPointDefinition, reason?: string): void;
   setEnabled(point: ModificationPointDefinition, enabled: boolean, reason?: string): void;
   refresh(point: ModificationPointDefinition): void;
+  refreshAll(): void;
   dispose(): Promise<void>;
 }
 
@@ -496,6 +497,11 @@ export function createProductionModificationCoordinator(options: {
     publish(state);
   }
 
+  function refreshAll(): void {
+    // Registry 因运行时身份变化清空状态后，从仍存活的生产批次重放完整快照，不重复执行业务安装逻辑。
+    for (const state of states.values()) publish(state);
+  }
+
   async function dispose(): Promise<void> {
     const results = await Promise.allSettled([...batches].reverse().map(disposeBatch));
     const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -513,6 +519,7 @@ export function createProductionModificationCoordinator(options: {
     useFallback,
     setEnabled,
     refresh,
+    refreshAll,
     dispose,
   });
 }

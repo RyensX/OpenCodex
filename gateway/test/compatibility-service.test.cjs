@@ -215,6 +215,67 @@ test("a replaced browser client cannot overwrite the current page generation", (
   service.dispose();
 });
 
+test("browser report epoch requests a complete replay after a known client takes over again", () => {
+  let currentTime = 1_000;
+  const service = createCompatibilityService({ now: () => currentTime });
+  const projectPoint = browserKernelPoint("web.runtime.plugin.project-recent-sort");
+  const bridgePoint = browserKernelPoint("web.runtime.bridge.desktop-api");
+
+  const firstA = service.browserKernelReportResult({
+    clientId: "browser_page_a",
+    generation: 1,
+    reportEpoch: "",
+    report: { sequence: 1, point: projectPoint },
+  });
+  assert.equal(firstA.accepted, true);
+  assert.equal(firstA.resync, true);
+  const epochA = firstA.reportEpoch;
+  assert.equal(service.browserKernelReportResult({
+    clientId: "browser_page_a",
+    generation: 1,
+    reportEpoch: epochA,
+    report: { sequence: 2, point: bridgePoint },
+  }).resync, false);
+
+  const firstB = service.browserKernelReportResult({
+    clientId: "browser_page_b",
+    generation: 1,
+    reportEpoch: "",
+    report: { sequence: 1, point: projectPoint },
+  });
+  assert.equal(firstB.resync, true);
+  assert.notEqual(firstB.reportEpoch, epochA);
+  assert.equal(service.browserKernelReportResult({
+    clientId: "browser_page_b",
+    generation: 1,
+    reportEpoch: firstB.reportEpoch,
+    report: { sequence: 2, point: bridgePoint },
+  }).resync, false);
+
+  currentTime += BROWSER_REPORTER_STALE_MS + 1;
+  const takeover = service.browserKernelReportResult({
+    clientId: "browser_page_a",
+    generation: 1,
+    reportEpoch: epochA,
+    report: { sequence: 3, point: bridgePoint },
+  });
+  assert.equal(takeover.accepted, true);
+  assert.equal(takeover.resync, true);
+  assert.equal(service.registry.point(projectPoint.id).status, "pending");
+
+  // 新代际确认后重放未变化的项目排序快照，服务端即可恢复完整 Contribution 状态。
+  const replay = service.browserKernelReportResult({
+    clientId: "browser_page_a",
+    generation: 1,
+    reportEpoch: takeover.reportEpoch,
+    report: { sequence: 4, point: projectPoint },
+  });
+  assert.equal(replay.resync, false);
+  assert.equal(service.registry.point(projectPoint.id).status, "ready");
+  assert.equal(service.registry.point(projectPoint.id).contributions.length > 0, true);
+  service.dispose();
+});
+
 test("compatibility report store writes latest and bounded per-runtime history atomically", (t) => {
   const directory = temporaryDirectory(t);
   const filePath = path.join(directory, "runtime", "compatibility-report.json");
@@ -278,6 +339,24 @@ test("repeating the same runtime identity keeps Kernel capabilities valid", () =
   service.dispose();
 });
 
+test("runtime identity reset replays active Gateway modification snapshots", () => {
+  const service = createCompatibilityService();
+  service.setRuntimeIdentity({ version: "26.8", build: "1", bundleHash: "bundle-a" });
+  const point = service.modificationPoints.gateway.internalSession;
+  service.modifications.execute(point, () => undefined, { verify: () => true });
+  assert.equal(service.registry.point(point.id).status, "ready");
+
+  service.setRuntimeIdentity({ version: "26.9", build: "2", bundleHash: "bundle-b" });
+  const replayed = service.registry.point(point.id);
+  assert.equal(replayed.status, "ready");
+  assert.equal(replayed.location.status, "resolved");
+  assert.equal(replayed.application.status, "applied");
+  assert.equal(replayed.verification.status, "verified");
+  assert.equal(replayed.activation.status, "ready");
+  assert.equal(replayed.contributions.length, 1);
+  service.dispose();
+});
+
 test("public compatibility API exposes only the read-only sanitized snapshot", () => {
   const service = createCompatibilityService();
   const getResponse = responseRecorder();
@@ -335,6 +414,9 @@ test("authenticated API accepts only validated Browser Kernel reports", async ()
     service,
   );
   assert.equal(reportResponse.status, 200);
+  const reportPayload = JSON.parse(reportResponse.body);
+  assert.equal(reportPayload.resync, true);
+  assert.match(reportPayload.reportEpoch, /^[a-f0-9]{32}:\d+$/);
   assert.equal(service.registry.point(point.id).status, "healthy");
 
   const spoofedResponse = responseRecorder();

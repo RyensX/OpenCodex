@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const path = require("path");
 const { registerCompatibilityCatalog } = require("./catalog.cjs");
 const {
@@ -30,7 +31,9 @@ function createCompatibilityService({
   );
   const browserKernelReporters = new Map();
   const browserPluginPointIds = new Set();
+  const browserReportInstanceId = crypto.randomUUID().replace(/-/g, "");
   let activeBrowserReporter = null;
+  let browserReportRevision = 0;
   const store = reportStore || (
     runtimeDir && reportsDir
       ? createCompatibilityReportStore({
@@ -53,6 +56,15 @@ function createCompatibilityService({
     },
   });
 
+  function currentBrowserReportEpoch() {
+    return `${browserReportInstanceId}:${browserReportRevision}`;
+  }
+
+  function advanceBrowserReportEpoch() {
+    browserReportRevision += 1;
+    return currentBrowserReportEpoch();
+  }
+
   function persistNow() {
     if (!store) return registry.snapshot();
     if (persistTimer) clearTimeout(persistTimer);
@@ -73,29 +85,33 @@ function createCompatibilityService({
     if (persistTimer.unref) persistTimer.unref();
   }
 
-  const stopRegistryListener = registry.onChanged(() => {
+  let replayingRuntimeState = false;
+  const stopRegistryListener = registry.onChanged((event) => {
     cachedSummary = null;
+    if (event?.type === "runtime-reset") {
+      browserKernelReporters.clear();
+      activeBrowserReporter = null;
+      advanceBrowserReportEpoch();
+      if (!replayingRuntimeState) {
+        replayingRuntimeState = true;
+        try {
+          // Runtime 身份切换只清空诊断 Registry；仍存活的 Gateway Provider 必须立即重放当前状态。
+          modifications.refreshAll();
+        } catch {
+          // 状态重放属于旁路诊断，不能让 Runtime 身份同步失败。
+        } finally {
+          replayingRuntimeState = false;
+        }
+      }
+    }
     schedulePersist();
   });
 
-  function currentIdentity() {
-    return normalizedRuntimeIdentity(explicitRuntimeIdentity || getRuntimeIdentity());
-  }
-
   function setRuntimeIdentity(identity) {
-    const previousIdentity = currentIdentity();
     const nextIdentity = normalizedRuntimeIdentity(identity);
     explicitRuntimeIdentity = nextIdentity;
-    const identityChanged =
-      previousIdentity.version !== nextIdentity.version ||
-      previousIdentity.build !== nextIdentity.build ||
-      previousIdentity.bundleHash !== nextIdentity.bundleHash;
-    // 相同身份的重复同步必须幂等；身份变化由 Registry generation 统一使旧 Kernel 报告失效。
-    if (identityChanged) {
-      browserKernelReporters.clear();
-      activeBrowserReporter = null;
-    }
     cachedSummary = null;
+    // Registry 的 runtime-reset 事件统一负责浏览器代际失效与 Gateway 状态重放。
     registry.snapshot();
     schedulePersist();
     return { ...explicitRuntimeIdentity };
@@ -157,8 +173,15 @@ function createCompatibilityService({
     }
   }
 
-  function browserKernelReport({ clientId, generation, report }) {
-    if (!canAcceptBrowserKernelReport({ clientId, generation, report })) return false;
+  function browserKernelReportResult({ clientId, generation, report, reportEpoch }) {
+    const requestEpoch = typeof reportEpoch === "string" && reportEpoch.length <= 160 ? reportEpoch : "";
+    const result = (accepted) => Object.freeze({
+      accepted,
+      reportEpoch: currentBrowserReportEpoch(),
+      // 客户端确认的服务端代际不同，说明它必须重放本页保存的全部最新快照。
+      resync: accepted && requestEpoch !== currentBrowserReportEpoch(),
+    });
+    if (!canAcceptBrowserKernelReport({ clientId, generation, report })) return result(false);
     const normalizedClientId = String(clientId).trim();
     const normalizedGeneration = Number(generation);
     const sequence = Number(report.sequence);
@@ -180,29 +203,30 @@ function createCompatibilityService({
     ) {
       // 已被新页面替代的旧标签页仍可能补发请求；确认但忽略，避免它覆盖当前页面快照并无限重试。
       reporter.updatedAt = now();
-      return true;
+      return result(true);
     }
     if (
       !activeBrowserReporter ||
       activeBrowserReporter.clientId !== normalizedClientId ||
       normalizedGeneration > reporter.generation
     ) {
-      if (normalizedGeneration < reporter.generation) return false;
+      if (normalizedGeneration < reporter.generation) return result(false);
       reporter.generation = normalizedGeneration;
       reporter.sequence = 0;
       activeBrowserReporter = { clientId: normalizedClientId, generation: normalizedGeneration };
+      advanceBrowserReportEpoch();
       registry.resetPointsByPrefix("web.runtime.");
       registry.resetPoints([...browserPluginPointIds].filter((pointId) => !pointId.startsWith("web.runtime.")));
       // 新页面尚未重新上报的外部插件按“已关闭”展示，避免已卸载插件长期停留在待检测状态。
       for (const pointId of browserPluginPointIds) registry.disablePoint(pointId, "Plugin not reported by current page");
     }
-    if (normalizedGeneration < reporter.generation) return false;
+    if (normalizedGeneration < reporter.generation) return result(false);
     // 响应在网络中丢失时浏览器会重发同一批；旧 sequence 已经成功落入 Registry，可幂等确认。
-    if (sequence <= reporter.sequence) return true;
+    if (sequence <= reporter.sequence) return result(true);
     try {
       registry.ingestKernelPoint(report.point.id, report.point);
     } catch {
-      return false;
+      return result(false);
     }
     reporter.sequence = sequence;
     reporter.updatedAt = now();
@@ -211,7 +235,11 @@ function createCompatibilityService({
         .sort((left, right) => left[1].updatedAt - right[1].updatedAt)[0]?.[0];
       if (oldest) browserKernelReporters.delete(oldest);
     }
-    return true;
+    return result(true);
+  }
+
+  function browserKernelReport(input) {
+    return browserKernelReportResult(input).accepted;
   }
 
   schedulePersist();
@@ -223,6 +251,7 @@ function createCompatibilityService({
     reportStore: store,
     setRuntimeIdentity,
     browserKernelReport,
+    browserKernelReportResult,
     canAcceptBrowserKernelReport,
     canAcceptBrowserPluginCatalog,
     registerBrowserPluginCatalog,
