@@ -341,6 +341,43 @@ test("browser protocol pipeline decodes each frame once and fans out by channel"
   assert.equal(host.diagnostics().protocolSubscriberCount, 0);
 });
 
+test("browser protocol pipeline applies ordered point-scoped transforms and restores the original value", () => {
+  const { host } = createHarness();
+  const channel = host.protocol.channels.gateway;
+  const calls = [];
+  const disposeLate = host.protocol.transform({
+    key: {},
+    channel,
+    order: 20,
+    callback(frame) {
+      calls.push("late");
+      return { ...frame.value, total: frame.value.total + 2 };
+    },
+  });
+  const disposeEarly = host.protocol.transform({
+    key: {},
+    channel,
+    order: 10,
+    callback(frame) {
+      calls.push("early");
+      return { ...frame.value, total: frame.value.total * 3 };
+    },
+  });
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(host.protocol.process({ channel, value: '{"total":4}' }))),
+    { total: 14 }
+  );
+  assert.deepEqual(calls, ["early", "late"]);
+  assert.equal(host.diagnostics().protocolTransformCount, 2);
+  assert.equal(host.diagnostics().protocolTransformerCount, 2);
+
+  disposeEarly();
+  disposeLate();
+  assert.equal(host.protocol.process({ channel, value: "unchanged" }), "unchanged");
+  assert.equal(host.diagnostics().protocolTransformerCount, 0);
+});
+
 test("browser providers execute through Kernel and emit Contribution-level snapshots", async () => {
   const harness = createHarness();
   const snapshots = [];
@@ -448,22 +485,30 @@ test("browser provider resources are released and reinstalled for each document 
         type: "provider-generation-test",
         callback() {},
       });
+      harness.host.protocol.transform({
+        key: {},
+        channel: harness.host.protocol.channels.gateway,
+        callback() {},
+      });
     });
   };
 
   installProvider();
   await harness.host.providers.activate();
   assert.equal(harness.window.listenerCount("provider-generation-test"), 1);
+  assert.equal(harness.host.diagnostics().protocolTransformerCount, 1);
 
   const nextRoot = new EventTargetStub();
   harness.host.providers.beginPage(nextRoot);
   assert.equal(harness.window.listenerCount("provider-generation-test"), 0);
+  assert.equal(harness.host.diagnostics().protocolTransformerCount, 0);
   installProvider();
   await harness.host.providers.activate();
 
   assert.equal(installCount, 2);
   assert.deepEqual(generations, [1, 2]);
   assert.equal(harness.window.listenerCount("provider-generation-test"), 1);
+  assert.equal(harness.host.diagnostics().protocolTransformerCount, 1);
 });
 
 test("browser provider cleans partial resources when a later installer fails", async () => {

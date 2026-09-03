@@ -134,8 +134,8 @@ export const SEMANTIC_ADAPTERS = Object.freeze({
   projectOrdering: composite<"browser">(
     "adapter.project-ordering",
     "项目排序",
-    "以项目和会话排序语义声明 Bridge Hook。",
-    [BASE_ADAPTERS.runtimeHook],
+    "以项目和会话排序语义声明 Bridge Hook 与协议转换。",
+    [BASE_ADAPTERS.runtimeHook, BASE_ADAPTERS.protocolPipeline],
   ),
   gatewayIpc: composite<"gateway">(
     "adapter.gateway-ipc",

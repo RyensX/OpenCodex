@@ -13,25 +13,55 @@ const FLAT_PREFERENCES_KEY = "flat-project-sidebar-preferences-v1";
 const LEGACY_SORT_MODE_KEY = "codex-sidebar-sort-mode-v1";
 const PROJECT_ORDER_KEY = "project-order";
 
+function defaultBootstrap() {
+  return {
+    globalStateEntries: [
+      { key: PROJECT_ORDER_KEY, value: ["gamehub", "current", "empty"] },
+      {
+        key: "local-projects",
+        value: {
+          gamehub: { id: "gamehub", rootPaths: ["/work/Gamehub"], createdAt: 10, updatedAt: 100 },
+          current: { id: "current", rootPaths: ["/work/Current"], createdAt: 20, updatedAt: 200 },
+          empty: { id: "empty", rootPaths: ["/work/Empty"], createdAt: 5, updatedAt: 50 },
+        },
+      },
+      { key: "thread-project-assignments", value: {} },
+    ],
+    catalogSnapshot: {
+      entries: [
+        { threadId: "gamehub-old", cwd: "/work/Gamehub", createdAt: 1000, recencyAt: 1000 },
+        { threadId: "current-new", cwd: "/work/Current", createdAt: 2000, recencyAt: 2000 },
+      ],
+    },
+  };
+}
+
+function decodedProtocolValue(value) {
+  if (typeof value !== "string") return value;
+  const source = value.trim();
+  if (!source.startsWith("{") && !source.startsWith("[")) return value;
+  try {
+    return JSON.parse(source);
+  } catch {
+    return value;
+  }
+}
+
 function createHarness({
-  flatPreferences = { projectSortMode: "priority" },
+  flatPreferences = { projectSortMode: "updated_at" },
   legacySortMode,
-  bootstrapEntries = [
-    { key: PROJECT_ORDER_KEY, value: ["project-a", "project-b"] },
-    { key: "local-projects", value: { "project-a": {} } },
-  ],
+  initialBootstrap = defaultBootstrap(),
 } = {}) {
   const bridgeListeners = new Map();
   const forwardedMessages = [];
   const postedMessages = [];
   const dispatchedMessages = [];
   const microtasks = [];
+  const protocolTransforms = new Map();
+  const channels = { appHost: {}, gateway: {} };
   let registeredPlugin = null;
-  const initialBootstrap = { globalStateEntries: bootstrapEntries };
 
-  const persistedAtomSnapshot = {
-    [FLAT_PREFERENCES_KEY]: flatPreferences,
-  };
+  const persistedAtomSnapshot = { [FLAT_PREFERENCES_KEY]: flatPreferences };
   if (legacySortMode !== undefined) persistedAtomSnapshot[LEGACY_SORT_MODE_KEY] = legacySortMode;
 
   const bridge = {
@@ -54,8 +84,38 @@ function createHarness({
     },
   };
 
+  const protocol = {
+    channels,
+    process({ channel, value, metadata = {} }) {
+      let current = value;
+      const entries = [...(protocolTransforms.get(channel)?.values() || [])]
+        .sort((left, right) => left.order - right.order);
+      for (const entry of entries) {
+        const next = entry.callback({
+          raw: current,
+          metadata,
+          value: decodedProtocolValue(current),
+          decode() { return decodedProtocolValue(current); },
+        });
+        if (next !== undefined) current = next;
+      }
+      return current;
+    },
+    publish() {},
+    transform({ key, channel, order = 0, callback }) {
+      if (!protocolTransforms.has(channel)) protocolTransforms.set(channel, new Map());
+      protocolTransforms.get(channel).set(key, { callback, order });
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        protocolTransforms.get(channel)?.delete(key);
+      };
+    },
+  };
+
   const window = {
-    __CODEX_WEB_CONFIG__: { persistedAtomSnapshot },
+    __CODEX_WEB_CONFIG__: { initialSidebarBootstrap: initialBootstrap, persistedAtomSnapshot },
     __codexWebDispatch(type, payload) {
       dispatchedMessages.push({ type, payload });
     },
@@ -90,27 +150,42 @@ function createHarness({
         };
       },
     },
+    protocol,
   };
   window.window = window;
 
   vm.runInNewContext(PLUGIN_SOURCE, { console, window });
-  const dispose = registeredPlugin.activate({
-    plugin: { isEnabled: () => true },
-    scope: "renderer",
-  });
+  const dispose = registeredPlugin.activate({ plugin: { isEnabled: () => true }, scope: "renderer" });
   window.electronBridge = bridge;
 
-  // 实际页面会在 bridge 脚本结束后、官方模块执行前清空微任务；测试显式复现这一加载顺序。
-  while (microtasks.length > 0) microtasks.shift()();
+  function flushMicrotasks() {
+    while (microtasks.length > 0) microtasks.shift()();
+  }
+  flushMicrotasks();
 
   return {
     bridge,
     dispatchedMessages,
     dispose,
+    flushMicrotasks,
     forwardedMessages,
     initialBootstrap,
     plugin: registeredPlugin,
     postedMessages,
+    processAppHost(value, direction) {
+      return protocol.process({ channel: channels.appHost, value, metadata: { direction, transport: "app-host" } });
+    },
+    processGateway(channel, payload, direction) {
+      const result = protocol.process({
+        channel: channels.gateway,
+        value: { channel, payload },
+        metadata: { channel, direction, transport: "bridge" },
+      });
+      return result.payload;
+    },
+    protocolTransformerCount() {
+      return [...protocolTransforms.values()].reduce((total, entries) => total + entries.size, 0);
+    },
     window,
   };
 }
@@ -125,8 +200,51 @@ function projectOrderFetch(requestId) {
   };
 }
 
+function fetchResponse(requestId, value) {
+  return {
+    type: "fetch-response",
+    requestId,
+    responseType: "success",
+    status: 200,
+    headers: { "content-type": "application/json" },
+    bodyJsonString: JSON.stringify({ value }),
+  };
+}
+
 function parsed(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function emittedProjectOrder(harness, requestId) {
+  const response = harness.postedMessages.find(
+    (message) => message.type === "fetch-response" && message.requestId === requestId
+  );
+  assert.ok(response);
+  return JSON.parse(response.bodyJsonString).value;
+}
+
+function announceThreadList(harness, requestId, threads) {
+  harness.processGateway("mcp-request", {
+    type: "mcp-request",
+    hostId: "local",
+    request: { id: requestId, method: "thread/list", params: {} },
+  }, "client");
+  harness.processGateway("mcp-response", {
+    type: "mcp-response",
+    hostId: "local",
+    message: { id: requestId, result: { data: threads } },
+  }, "server");
+  harness.flushMicrotasks();
+}
+
+function announceNotification(harness, method, params) {
+  harness.processGateway("mcp-notification", {
+    type: "mcp-notification",
+    hostId: "local",
+    method,
+    params,
+  }, "server");
+  harness.flushMicrotasks();
 }
 
 test("project recent sort plugin is discovered with localized copy", () => {
@@ -134,7 +252,6 @@ test("project recent sort plugin is discovered with localized copy", () => {
   const zh = pluginMessagesForLocale("zh-CN");
   const en = pluginMessagesForLocale("en-US");
 
-  // 插件必须由现有内置 loader 自动发现，且默认开关和文案能出现在插件设置中。
   assert.ok(entry);
   assert.equal(entry.sourceId, "builtin");
   assert.equal(entry.urlPath, "");
@@ -142,119 +259,200 @@ test("project recent sort plugin is discovered with localized copy", () => {
   assert.equal(en["plugin.projectRecentSort.label"], "Sort projects by recent activity");
 });
 
-test("recent mode masks project order in both bootstrap and global-state fetches", async () => {
-  const harness = createHarness({ flatPreferences: { projectSortMode: "updated_at" } });
-
-  // 新版 AppHost 查询补丁读取同一个实时开关；旧 bridge 拦截仍按原路径工作。
-  assert.equal(harness.window.__OpenCodexProjectRecentSortActive, true);
-
-  const bootstrap = parsed(harness.bridge.getInitialSidebarBootstrap());
-  assert.deepEqual(
-    bootstrap.globalStateEntries.find((entry) => entry.key === PROJECT_ORDER_KEY)?.value,
-    []
-  );
-  assert.deepEqual(
-    harness.initialBootstrap.globalStateEntries.find((entry) => entry.key === PROJECT_ORDER_KEY)?.value,
-    ["project-a", "project-b"]
-  );
-
-  await harness.bridge.sendMessageFromView(projectOrderFetch("recent-request"));
-  assert.equal(harness.forwardedMessages.length, 0);
-  const response = harness.postedMessages.find(
-    (message) => message.type === "fetch-response" && message.requestId === "recent-request"
-  );
-  assert.ok(response);
-  assert.deepEqual(JSON.parse(response.bodyJsonString), { value: [] });
-
-  harness.dispose();
-});
-
-test("manual mode keeps the saved project order and forwards the official request", async () => {
-  const harness = createHarness({ flatPreferences: { projectSortMode: "manual" } });
-
-  assert.equal(harness.window.__OpenCodexProjectRecentSortActive, false);
+test("recent mode derives the full project order from each project's latest thread", async () => {
+  const harness = createHarness();
 
   assert.deepEqual(
     parsed(harness.bridge.getInitialSidebarBootstrap()).globalStateEntries.find(
       (entry) => entry.key === PROJECT_ORDER_KEY
-    )?.value,
-    ["project-a", "project-b"]
+    ).value,
+    ["current", "gamehub", "empty"]
   );
 
-  const request = projectOrderFetch("manual-request");
-  await harness.bridge.sendMessageFromView(request);
-  assert.equal(harness.forwardedMessages.length, 1);
-  assert.equal(harness.forwardedMessages[0], request);
-  assert.equal(
-    harness.postedMessages.some(
-      (message) => message.type === "fetch-response" && message.requestId === "manual-request"
-    ),
-    false
-  );
+  announceNotification(harness, "thread/started", {
+    thread: { id: "gamehub-new", cwd: "/work/Gamehub", createdAt: 3000, updatedAt: 3000, recencyAt: 3000 },
+  });
+  await harness.bridge.sendMessageFromView(projectOrderFetch("recent-request"));
 
+  assert.deepEqual(emittedProjectOrder(harness, "recent-request"), ["gamehub", "current", "empty"]);
+  assert.equal(harness.forwardedMessages.some((message) => message.requestId === "recent-request"), false);
   harness.dispose();
 });
 
-test("switching between recent and manual invalidates the project-order query immediately", async () => {
+test("full virtual order drives both first-five projects and show-more projects", async () => {
+  const projects = {};
+  const projectOrder = [];
+  const entries = [];
+  for (let index = 1; index <= 6; index += 1) {
+    const id = `project-${index}`;
+    projectOrder.push(id);
+    projects[id] = { id, rootPaths: [`/work/${id}`], createdAt: index, updatedAt: index };
+    entries.push({ threadId: `thread-${index}`, cwd: `/work/${id}`, recencyAt: index * 100 });
+  }
+  const harness = createHarness({
+    initialBootstrap: {
+      globalStateEntries: [
+        { key: PROJECT_ORDER_KEY, value: projectOrder },
+        { key: "local-projects", value: projects },
+      ],
+      catalogSnapshot: { entries },
+    },
+  });
+  announceThreadList(harness, "thread-list-project-1", [
+    { id: "project-1-now", cwd: "/work/project-1", createdAt: 1000, recencyAt: 1000 },
+  ]);
+
+  await harness.bridge.sendMessageFromView(projectOrderFetch("all-projects"));
+  const order = emittedProjectOrder(harness, "all-projects");
+  assert.equal(order.length, 6);
+  assert.equal(order[0], "project-1");
+  assert.equal(order.slice(0, 5).includes("project-1"), true);
+  assert.deepEqual([...order].sort(), [...projectOrder].sort());
+  harness.dispose();
+});
+
+test("new AppHost protocol path transforms only the matching project-order response", () => {
+  const harness = createHarness();
+  announceThreadList(harness, "app-host-gamehub-list", [
+    { id: "gamehub-app-host", cwd: "/work/Gamehub", createdAt: 4000, recencyAt: 4000 },
+  ]);
+
+  harness.processAppHost(JSON.stringify({ payload: projectOrderFetch("app-host-order") }), "client");
+  const transformed = harness.processAppHost(
+    JSON.stringify({ message: fetchResponse("app-host-order", ["empty", "gamehub", "current"]) }),
+    "server"
+  );
+  const response = JSON.parse(transformed).message;
+  assert.deepEqual(JSON.parse(response.bodyJsonString).value, ["gamehub", "current", "empty"]);
+
+  const unrelated = fetchResponse("unrelated", ["saved"]);
+  assert.equal(harness.processAppHost(JSON.stringify(unrelated), "server"), JSON.stringify(unrelated));
+  harness.dispose();
+});
+
+test("explicit project assignment wins and cwd fallback selects the longest project root", async () => {
+  const harness = createHarness({
+    initialBootstrap: {
+      globalStateEntries: [
+        { key: PROJECT_ORDER_KEY, value: ["root", "nested", "assigned"] },
+        {
+          key: "local-projects",
+          value: {
+            root: { id: "root", rootPaths: ["/repo"], updatedAt: 10 },
+            nested: { id: "nested", rootPaths: ["/repo/packages/game"], updatedAt: 20 },
+            assigned: { id: "assigned", rootPaths: ["/elsewhere"], updatedAt: 30 },
+          },
+        },
+        {
+          key: "thread-project-assignments",
+          value: { "assigned-thread": { projectKind: "local", projectId: "assigned" } },
+        },
+      ],
+      catalogSnapshot: { entries: [] },
+    },
+  });
+  announceThreadList(harness, "mapping-list", [
+    { id: "nested-thread", cwd: "/repo/packages/game/src", recencyAt: 2000 },
+    { id: "assigned-thread", cwd: "/repo", projectId: "assigned", recencyAt: 3000 },
+  ]);
+  await harness.bridge.sendMessageFromView(projectOrderFetch("mapping-order"));
+  assert.deepEqual(emittedProjectOrder(harness, "mapping-order"), ["assigned", "nested", "root"]);
+  harness.dispose();
+});
+
+test("projects without resolvable thread activity keep their official relative order", async () => {
+  const harness = createHarness({
+    initialBootstrap: {
+      globalStateEntries: [
+        { key: PROJECT_ORDER_KEY, value: ["unknown-b", "known", "unknown-a"] },
+        {
+          key: "local-projects",
+          value: { known: { id: "known", rootPaths: ["/known"], updatedAt: 500 } },
+        },
+      ],
+      catalogSnapshot: { entries: [] },
+    },
+  });
+  await harness.bridge.sendMessageFromView(projectOrderFetch("stable-unknown-order"));
+  assert.deepEqual(
+    emittedProjectOrder(harness, "stable-unknown-order"),
+    ["known", "unknown-b", "unknown-a"]
+  );
+  harness.dispose();
+});
+
+test("manual mode preserves saved order, pinned state, and official requests", async () => {
   const harness = createHarness({ flatPreferences: { projectSortMode: "manual" } });
-  const initialInvalidations = harness.postedMessages.filter(
-    (message) => message.type === "global-state-updated"
-  ).length;
-
-  await harness.bridge.sendMessageFromView({
-    type: "persisted-atom-update",
-    key: FLAT_PREFERENCES_KEY,
-    value: { projectSortMode: "updated_at" },
-  });
-  await harness.bridge.sendMessageFromView(projectOrderFetch("after-recent"));
-  assert.equal(harness.forwardedMessages.some((message) => message.requestId === "after-recent"), false);
-
-  await harness.bridge.sendMessageFromView({
-    type: "persisted-atom-update",
-    key: FLAT_PREFERENCES_KEY,
-    value: { projectSortMode: "manual" },
-  });
-  await harness.bridge.sendMessageFromView(projectOrderFetch("after-manual"));
-  assert.equal(harness.forwardedMessages.some((message) => message.requestId === "after-manual"), true);
-
-  const invalidations = harness.postedMessages.filter(
-    (message) => message.type === "global-state-updated"
+  const bootstrap = parsed(harness.bridge.getInitialSidebarBootstrap());
+  assert.deepEqual(
+    bootstrap.globalStateEntries.find((entry) => entry.key === PROJECT_ORDER_KEY).value,
+    ["gamehub", "current", "empty"]
   );
-  assert.equal(invalidations.length, initialInvalidations + 2);
-  assert.deepEqual(parsed(invalidations.at(-1).keys), [PROJECT_ORDER_KEY]);
 
+  const orderRequest = projectOrderFetch("manual-request");
+  await harness.bridge.sendMessageFromView(orderRequest);
+  assert.equal(harness.forwardedMessages.at(-1), orderRequest);
+
+  const pinnedRequest = {
+    ...projectOrderFetch("pinned-request"),
+    body: JSON.stringify({ key: "pinned-project-ids" }),
+  };
+  const pinnedResponse = fetchResponse("pinned-request", ["gamehub"]);
+  harness.processAppHost(JSON.stringify(pinnedRequest), "client");
+  assert.equal(harness.processAppHost(JSON.stringify(pinnedResponse), "server"), JSON.stringify(pinnedResponse));
   harness.dispose();
 });
 
-test("legacy unified sort override follows the same precedence as the official renderer", async () => {
+test("legacy unified sort preference keeps official precedence and mode switches invalidate", async () => {
   const harness = createHarness({
     flatPreferences: { projectSortMode: "updated_at" },
     legacySortMode: "manual",
   });
-
   await harness.bridge.sendMessageFromView(projectOrderFetch("legacy-manual"));
   assert.equal(harness.forwardedMessages.some((message) => message.requestId === "legacy-manual"), true);
 
+  const invalidationsBefore = harness.postedMessages.filter((message) => message.type === "global-state-updated").length;
   await harness.bridge.sendMessageFromView({
     type: "persisted-atom-update",
     key: LEGACY_SORT_MODE_KEY,
     deleted: true,
     value: null,
   });
+  harness.flushMicrotasks();
   await harness.bridge.sendMessageFromView(projectOrderFetch("legacy-removed"));
   assert.equal(harness.forwardedMessages.some((message) => message.requestId === "legacy-removed"), false);
 
+  await harness.bridge.sendMessageFromView({
+    type: "persisted-atom-update",
+    key: FLAT_PREFERENCES_KEY,
+    value: { projectSortMode: "manual" },
+  });
+  assert.equal(
+    harness.postedMessages.filter((message) => message.type === "global-state-updated").length >= invalidationsBefore + 2,
+    true
+  );
   harness.dispose();
 });
 
-test("disabling the plugin restores the original bridge methods and real project order", async () => {
-  const harness = createHarness({ flatPreferences: { projectSortMode: "updated_at" } });
+test("disabling the plugin removes protocol transforms and restores official behavior", async () => {
+  const harness = createHarness();
+  assert.equal(harness.protocolTransformerCount(), 2);
   harness.dispose();
-
-  assert.equal(harness.window.__OpenCodexProjectRecentSortActive, false);
+  assert.equal(harness.protocolTransformerCount(), 0);
   assert.equal(harness.bridge.getInitialSidebarBootstrap(), harness.initialBootstrap);
+
   const request = projectOrderFetch("after-dispose");
   await harness.bridge.sendMessageFromView(request);
   assert.equal(harness.forwardedMessages.at(-1), request);
-  assert.equal(harness.postedMessages.at(-1)?.type, "global-state-updated");
+  const response = fetchResponse("after-dispose", ["saved"]);
+  assert.equal(harness.processAppHost(JSON.stringify(response), "server"), JSON.stringify(response));
+});
+
+test("project sort implementation no longer depends on static bundle globals", () => {
+  assert.doesNotMatch(PLUGIN_SOURCE, /__OpenCodexProjectRecentSort(?:Active|Owner|Hit)/);
+  const staticAssets = fs.readFileSync(
+    path.resolve(__dirname, "..", "runtime", "http", "static-assets.cjs"),
+    "utf-8"
+  );
+  assert.doesNotMatch(staticAssets, /patchProjectRecentSortAppHostQuery|PROJECT_RECENT_GROUP_ORDER/);
 });

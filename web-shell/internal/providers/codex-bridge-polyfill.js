@@ -165,6 +165,7 @@
   }
 
   const appHostProtocolChannel = adapterHost.protocol.channels.appHost;
+  const gatewayProtocolChannel = adapterHost.protocol.channels.gateway;
   adapterHost.protocol.observe({
     key: {},
     channel: appHostProtocolChannel,
@@ -177,8 +178,38 @@
   });
 
   function publishAppHostData(data, direction) {
-    // 同一帧只在 ProtocolPipeline 中解码一次，再分发给 Token 与智能调度消费者。
-    adapterHost.protocol.publish({ channel: appHostProtocolChannel, value: data, metadata: { direction } });
+    // 转换先于观察和真实转发执行；修改点关闭后 Provider 会自动移除对应转换器。
+    const metadata = { direction, transport: "app-host" };
+    const transformed = adapterHost.protocol.process?.({
+      channel: appHostProtocolChannel,
+      value: data,
+      metadata,
+    }) ?? data;
+    adapterHost.protocol.publish({ channel: appHostProtocolChannel, value: transformed, metadata });
+    return transformed;
+  }
+
+  function publishGatewayData(channel, payload, direction, transport = "bridge") {
+    const metadata = { channel, direction, transport };
+    const envelope = { channel, payload };
+    const transformed = adapterHost.protocol.process?.({
+      channel: gatewayProtocolChannel,
+      value: envelope,
+      metadata,
+    }) ?? envelope;
+    const authoritative =
+      transformed &&
+      typeof transformed === "object" &&
+      transformed.channel === channel &&
+      Object.prototype.hasOwnProperty.call(transformed, "payload")
+        ? transformed
+        : envelope;
+    adapterHost.protocol.publish({
+      channel: gatewayProtocolChannel,
+      value: authoritative,
+      metadata,
+    });
+    return authoritative.payload;
   }
 
   w.__OpenCodexSmartSchedulingBridgeDiagnostics = Object.freeze({
@@ -1395,8 +1426,9 @@
 
   /** Web 适配模块生成的官方入站消息需要同时覆盖 bridge 订阅和 window message 两种消费方式。 */
   function deliverLocalRendererMessage(channel, payload) {
-    const delivered = dispatch(channel, payload);
-    emitWindowMessage(channel, payload);
+    const authoritativePayload = publishGatewayData(channel, payload, "server", "local");
+    const delivered = dispatch(channel, authoritativePayload);
+    emitWindowMessage(channel, authoritativePayload);
     return delivered;
   }
 
@@ -1801,8 +1833,7 @@
 
   /** 发送 fetch-response 给官方 vscode-api 请求管理器。 */
   function emitFetchResponse(payload) {
-    dispatch("fetch-response", payload);
-    emitWindowMessage("fetch-response", payload);
+    deliverLocalRendererMessage("fetch-response", payload);
   }
 
   /** 成功响应 vscode://codex/... fetch IPC，bodyJsonString 必须是 JSON 字符串。 */
@@ -2382,7 +2413,7 @@
       closeAppHostRelay(state, "decode_failed", true);
       return true;
     }
-    publishAppHostData(data, "server");
+    data = publishAppHostData(data, "server");
     try {
       state.port.postMessage(data);
       if (data === null) closeAppHostRelay(state, "official_closed", false);
@@ -2436,7 +2467,8 @@
       port.addEventListener("message", (portEvent) => {
         if (state.closed || state.closing) return;
         // MessageEvent.data 可能不是自有属性，直接读取才能拿到新版结构化 RPC 值。
-        const portData = portEvent ? portEvent.data : undefined;
+        const originalPortData = portEvent ? portEvent.data : undefined;
+        const portData = publishAppHostData(originalPortData, "client");
         let wireData;
         try {
           wireData = encodeAppHostMessageData(portData);
@@ -2449,11 +2481,9 @@
           closeAppHostRelay(state, "encode_failed", true);
           return;
         }
-        // 当前官方 Web 路由固定为根路径；展示模块需从本标签页发出的 RPC 识别正在查看的 thread。
-        publishAppHostData(portData, "client");
         queueAppHostRelayPayload(state, { type: "app-host-port-message", ...wireData });
         // 保留旧版 null 关闭语义；新版 renderer 的 undefined 终止帧编码后也只发送一次。
-        if (portData === null || portData === undefined) closeAppHostRelay(state, "browser_closed", false);
+        if (originalPortData === null || originalPortData === undefined) closeAppHostRelay(state, "browser_closed", false);
       });
       port.addEventListener("messageerror", () => {
         clientDiagnostic("app-host-browser-message-error", { portId: state.portId });
@@ -3178,6 +3208,11 @@
     target.startFileDrag = () => false;
     target.sendMessageFromView = async (payload) =>
       Promise.resolve().then(() => {
+        const protocolChannel =
+          payload && typeof payload === "object" && typeof payload.type === "string"
+            ? payload.type
+            : "view:message";
+        payload = publishGatewayData(protocolChannel, payload, "client");
         if (payload && typeof payload === "object" && payload.type === "persisted-atom-sync-request") {
           modificationEffects?.persistedAtom?.emit();
           // 官方 renderer 首屏会很早请求 persisted atom；这里先本地回包，避免 WS 未连接导致回包丢失。
@@ -3696,9 +3731,11 @@
             effectiveChannel === "shared-object-updated"
               ? cacheSharedObjectUpdatedPayload(messagePayload)
               : messagePayload;
-          const rendererMessagePayload = browserRendererMessagePayload(
+          const rendererMessagePayload = publishGatewayData(
             effectiveChannel,
-            authoritativeMessagePayload
+            browserRendererMessagePayload(effectiveChannel, authoritativeMessagePayload),
+            "server",
+            "gateway-ws"
           );
           if (shouldDispatchGatewayMessage(msg.channel, effectiveChannel)) {
             dispatch(effectiveChannel, rendererMessagePayload);

@@ -212,7 +212,7 @@ function createAppHostBridgeBehaviorHarness(bridge, { wsReady = true } = {}) {
         },
       };
       function clientDiagnostic(name, payload) { diagnostics.push({ name, payload }); }
-      function publishAppHostData(data, direction) { publishedData.push({ data, direction }); }
+      function publishAppHostData(data, direction) { publishedData.push({ data, direction }); return data; }
       function payloadShape(value) { return value === null ? "null" : typeof value; }
       function websocketStateName() { return "open"; }
       ${declarations}
@@ -496,56 +496,6 @@ test("patched official renderer hides the app-host application menu capability",
   assert.match(source, /services\.applicationMenu\.getSnapshot\(\)/);
   assert.match(source, /capabilitySnapshot=services\.applicationMenu!=null/);
   assert.doesNotMatch(source, /isWindows\(\)&&services\.applicationMenu!=null/);
-});
-
-test("patched official renderer masks project order on the new AppHost query path", async (t) => {
-  const webviewDir = makeOfficialWebviewDir(t);
-  const assetsDir = path.join(webviewDir, "assets");
-  fs.mkdirSync(assetsDir, { recursive: true });
-  const assetName = "app-initial-project-order-test.js";
-  fs.writeFileSync(
-    path.join(assetsDir, assetName),
-    [
-      "const fkn=()=>({});",
-      "const lD={getInstance(){return{post:async(_url,body)=>({body:{value:JSON.parse(body).key===`project-order`?[`saved-project`]:`other`}})}}};",
-      "async function ukn(e,t,n,r,i){let a=(await lD.getInstance().post(`vscode://codex/${e}`,JSON.stringify(t),fkn(i),r)).body;return n?n(a):a}",
-      "function Mvi(e,_t){return [...e]}",
-      "function Iki({groups:e,projectOrder:t}){return Mvi(e,t)}",
-      "globalThis.queryGlobalState=ukn;",
-      "globalThis.sortProjectGroups=Iki;",
-    ].join("")
-  );
-  const service = createService(webviewDir);
-  const source = serveOfficialAsset(service, `${PATCHED_OFFICIAL_PREFIX}assets/${assetName}`, "localhost:3737");
-  const context = { __OpenCodexProjectRecentSortActive: true };
-  context.globalThis = context;
-  vm.runInNewContext(source, context);
-
-  // 新版只虚拟 project-order；关闭插件或读取其它 key 时必须保留官方 AppHost 返回值。
-  assert.deepEqual(JSON.parse(JSON.stringify(await context.queryGlobalState("get-global-state", { key: "project-order" }))), {
-    value: [],
-  });
-  assert.deepEqual(JSON.parse(JSON.stringify(await context.queryGlobalState("get-global-state", { key: "other" }))), {
-    value: "other",
-  });
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(context.sortProjectGroups({
-      groups: [{ projectId: "older" }, { projectId: "newer" }],
-      projectOrder: [],
-    }))).map((group) => group.projectId),
-    ["newer", "older"]
-  );
-  context.__OpenCodexProjectRecentSortActive = false;
-  assert.deepEqual(JSON.parse(JSON.stringify(await context.queryGlobalState("get-global-state", { key: "project-order" }))), {
-    value: ["saved-project"],
-  });
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(context.sortProjectGroups({
-      groups: [{ projectId: "older" }, { projectId: "newer" }],
-      projectOrder: ["older", "newer"],
-    }))).map((group) => group.projectId),
-    ["older", "newer"]
-  );
 });
 
 test("large official renderer patches complete off the gateway event loop", async (t) => {

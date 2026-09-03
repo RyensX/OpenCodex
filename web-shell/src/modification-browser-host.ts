@@ -57,6 +57,14 @@ interface ProtocolSubscription {
   readonly propagateErrors: boolean;
 }
 
+interface ProtocolTransformSubscription {
+  readonly key: object;
+  readonly owner: BrowserProviderScope | null;
+  readonly order: number;
+  readonly callback: (frame: ProtocolFrame) => unknown;
+  readonly propagateErrors: boolean;
+}
+
 interface EventEntry {
   readonly target: EventTarget;
   readonly type: string;
@@ -91,6 +99,8 @@ interface AdapterHostDiagnostics {
   readonly protocolDecodeCount: number;
   readonly protocolDispatchCount: number;
   readonly protocolSubscriberCount: number;
+  readonly protocolTransformCount: number;
+  readonly protocolTransformerCount: number;
 }
 
 interface BrowserKernelTransport {
@@ -288,9 +298,11 @@ let eventDispatchCount = 0;
 let hookInvocationCount = 0;
 let protocolDecodeCount = 0;
 let protocolDispatchCount = 0;
+let protocolTransformCount = 0;
 let eventTargetSequence = 0;
 const protocolChannelTokens = new WeakSet<object>();
 const protocolSubscriptions = new Map<ProtocolChannelRef, Map<object, ProtocolSubscription>>();
+const protocolTransformSubscriptions = new Map<ProtocolChannelRef, Map<object, ProtocolTransformSubscription>>();
 
 function ownProviderDisposer(dispose: () => void): () => void {
   const scope = window.__OpenCodexCurrentProviderScope;
@@ -508,6 +520,7 @@ function defineProtocolChannel(id: string): ProtocolChannelRef {
   const channel = Object.freeze({ id });
   protocolChannelTokens.add(channel);
   protocolSubscriptions.set(channel, new Map());
+  protocolTransformSubscriptions.set(channel, new Map());
   return channel;
 }
 
@@ -707,6 +720,33 @@ function decodeProtocolValue(raw: unknown): unknown {
   }
 }
 
+function createProtocolFrame(
+  raw: unknown,
+  metadata: Readonly<Record<string, unknown>> = {},
+): ProtocolFrame {
+  let decoded = false;
+  let decodedValue: unknown;
+  const decodeOnce = () => {
+    if (!decoded) {
+      decodedValue = decodeProtocolValue(raw);
+      decoded = true;
+    }
+    return decodedValue;
+  };
+  return Object.freeze(Object.defineProperties({}, {
+    raw: { enumerable: true, value: raw },
+    metadata: { enumerable: true, value: Object.freeze({ ...metadata }) },
+    value: {
+      enumerable: true,
+      get: decodeOnce,
+    },
+    decode: {
+      enumerable: false,
+      value: decodeOnce,
+    },
+  })) as ProtocolFrame;
+}
+
 function observeProtocol(input: {
   key: object;
   channel: ProtocolChannelRef;
@@ -730,6 +770,67 @@ function observeProtocol(input: {
   });
 }
 
+function transformProtocol(input: {
+  key: object;
+  channel: ProtocolChannelRef;
+  order?: number;
+  propagateErrors?: boolean;
+  callback: (frame: ProtocolFrame) => unknown;
+}): () => void {
+  if (!protocolChannelTokens.has(input.channel as object)) throw new TypeError("协议转换必须引用宿主 Channel 对象");
+  if (!input.key || typeof input.callback !== "function") throw new TypeError("协议转换声明不完整");
+  const subscriptions = protocolTransformSubscriptions.get(input.channel);
+  if (!subscriptions) throw new TypeError("协议 Channel 未注册");
+  const order = Number(input.order || 0);
+  if (!Number.isFinite(order)) throw new TypeError("协议转换顺序必须是有限数字");
+  subscriptions.set(input.key, {
+    key: input.key,
+    owner: window.__OpenCodexCurrentProviderScope || null,
+    order,
+    callback: input.callback,
+    propagateErrors: input.propagateErrors === true,
+  });
+  let active = true;
+  return ownProviderDisposer(() => {
+    if (!active) return;
+    active = false;
+    subscriptions.delete(input.key);
+  });
+}
+
+function processProtocol(input: {
+  channel: ProtocolChannelRef;
+  value: unknown;
+  metadata?: Readonly<Record<string, unknown>>;
+}): unknown {
+  if (!protocolChannelTokens.has(input.channel as object)) throw new TypeError("协议转换必须引用宿主 Channel 对象");
+  const subscriptions = protocolTransformSubscriptions.get(input.channel);
+  if (!subscriptions) throw new TypeError("协议 Channel 未注册");
+  if (subscriptions.size === 0) return input.value;
+
+  let currentValue = input.value;
+  let currentFrame = createProtocolFrame(currentValue, input.metadata);
+  const ordered = [...subscriptions.values()].sort((left, right) => left.order - right.order);
+  for (const subscription of ordered) {
+    try {
+      protocolTransformCount += 1;
+      const transformed = runInProviderScope(
+        subscription.owner,
+        () => subscription.callback(currentFrame),
+      );
+      // undefined 明确表示“保持原值”，避免只观察消息的转换器意外改变传输形态。
+      if (transformed !== undefined && transformed !== currentValue) {
+        currentValue = transformed;
+        currentFrame = createProtocolFrame(currentValue, input.metadata);
+      }
+    } catch (error) {
+      if (subscription.propagateErrors) throw error;
+      console.warn("[opencodex-adapter] protocol transformer failed", error);
+    }
+  }
+  return currentValue;
+}
+
 function publishProtocol(input: {
   channel: ProtocolChannelRef;
   value: unknown;
@@ -739,27 +840,7 @@ function publishProtocol(input: {
   const subscriptions = protocolSubscriptions.get(input.channel);
   if (!subscriptions) throw new TypeError("协议 Channel 未注册");
   protocolDispatchCount += 1;
-  let decoded = false;
-  let decodedValue: unknown;
-  const decodeOnce = () => {
-    if (!decoded) {
-      decodedValue = decodeProtocolValue(input.value);
-      decoded = true;
-    }
-    return decodedValue;
-  };
-  const frame = Object.freeze(Object.defineProperties({}, {
-    raw: { enumerable: true, value: input.value },
-    metadata: { enumerable: true, value: Object.freeze({ ...(input.metadata || {}) }) },
-    value: {
-      enumerable: true,
-      get: decodeOnce,
-    },
-    decode: {
-      enumerable: false,
-      value: decodeOnce,
-    },
-  })) as ProtocolFrame;
+  const frame = createProtocolFrame(input.value, input.metadata);
   const results: unknown[] = [];
   for (const subscription of [...subscriptions.values()]) {
     try {
@@ -1202,6 +1283,11 @@ function diagnostics(): AdapterHostDiagnostics {
     protocolDecodeCount,
     protocolDispatchCount,
     protocolSubscriberCount: [...protocolSubscriptions.values()].reduce((total, entries) => total + entries.size, 0),
+    protocolTransformCount,
+    protocolTransformerCount: [...protocolTransformSubscriptions.values()].reduce(
+      (total, entries) => total + entries.size,
+      0,
+    ),
   });
 }
 
@@ -1209,7 +1295,13 @@ const adapterHost = Object.freeze({
   dom: Object.freeze({ observe: observeDom }),
   events: Object.freeze({ observe: observeEvent }),
   hooks: Object.freeze({ around: installAroundHook }),
-  protocol: Object.freeze({ channels: protocolChannels, observe: observeProtocol, publish: publishProtocol }),
+  protocol: Object.freeze({
+    channels: protocolChannels,
+    observe: observeProtocol,
+    process: processProtocol,
+    publish: publishProtocol,
+    transform: transformProtocol,
+  }),
   lifecycle: Object.freeze({ createScope: createBrowserResourceScope }),
   plugins: Object.freeze({ register: registerOwnedPlugin }),
   scheduler: Object.freeze({ capture: captureProviderScheduler }),
