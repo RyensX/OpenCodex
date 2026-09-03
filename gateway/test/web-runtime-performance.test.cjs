@@ -238,6 +238,7 @@ function createScheduler() {
 
 function installAdapterHost(window, MutationObserverClass) {
   // 单元测试用最小 Provider 门面；真实共享、去重和引用计数由 browser-host 专项测试覆盖。
+  const managedFactories = new Map();
   window.__OpenCodexAdapterHost = {
     dom: {
       observe({ root, options, callback }) {
@@ -268,6 +269,18 @@ function installAdapterHost(window, MutationObserverClass) {
           cancelAnimationFrame: (...args) => window.cancelAnimationFrame(...args),
         };
       },
+    },
+    providers: {
+      registerManaged(key, pointAlias, factory) {
+        managedFactories.set(`${key}:${pointAlias}`, factory);
+      },
+    },
+  };
+  return {
+    activateManaged(key, onHit = () => {}, pointAlias = "primary") {
+      const factory = managedFactories.get(`${key}:${pointAlias}`);
+      assert.equal(typeof factory, "function", `missing managed provider factory: ${key}:${pointAlias}`);
+      return factory({ onHit });
     },
   };
 }
@@ -851,7 +864,7 @@ test("WCO heavy observers exist only while the overlay is visible", () => {
     requestAnimationFrame: scheduler.requestAnimationFrame,
     setTimeout: scheduler.setTimeout,
   });
-  installAdapterHost(window, TestMutationObserver);
+  const adapterHarness = installAdapterHost(window, TestMutationObserver);
   window.window = window;
 
   vm.runInNewContext(WCO_SOURCE, {
@@ -864,7 +877,13 @@ test("WCO heavy observers exist only while the overlay is visible", () => {
     window,
   });
 
+  // Provider 脚本只声明托管工厂，Kernel apply 之前不得接触当前文档。
+  assert.equal(root.dataset.opencodexWcoVisible, undefined);
+  assert.equal(head.children.length, 0);
+  const contribution = adapterHarness.activateManaged("window-controls");
   assert.equal(root.dataset.opencodexWcoVisible, "false");
+  assert.equal(head.children.length, 1);
+  contribution.verify();
   assert.equal(mutationObservers.length, 0);
   assert.equal(resizeObservers.length, 0);
   scheduler.flushFrames();
@@ -924,9 +943,11 @@ test("WCO heavy observers exist only while the overlay is visible", () => {
   window.emit("resize");
   assert.equal(mutationObservers.length, 2);
   assert.equal(resizeObservers.length, 2);
-  window.__opencodexWindowControlsOverlayState.cleanup();
+  contribution.dispose();
   assert.equal(window.listenerCount("resize"), 0);
   assert.equal(document.listenerCount("visibilitychange"), 0);
+  assert.equal(root.dataset.opencodexWcoVisible, undefined);
+  assert.equal(head.children.length, 0);
 });
 
 test("WCO aligns header actions to the visible right-panel boundary", () => {
@@ -1046,7 +1067,7 @@ test("WCO aligns header actions to the visible right-panel boundary", () => {
     observe() {}
   }
   class TestResizeObserver extends TestMutationObserver {}
-  installAdapterHost(window, TestMutationObserver);
+  const adapterHarness = installAdapterHost(window, TestMutationObserver);
   window.window = window;
 
   vm.runInNewContext(WCO_SOURCE, {
@@ -1059,6 +1080,7 @@ test("WCO aligns header actions to the visible right-panel boundary", () => {
     window,
   });
 
+  const contribution = adapterHarness.activateManaged("window-controls");
   overlay.visible = true;
   overlay.emit("geometrychange");
   scheduler.flushFrames();
@@ -1102,6 +1124,10 @@ test("WCO aligns header actions to the visible right-panel boundary", () => {
   // 下一轮同步仍应命中同一个 slot，不能退回到真正的最后子节点。
   scheduler.flushFrames();
   assert.equal(slot.getAttribute("data-opencodex-wco-right-slot"), "true");
+  contribution.dispose();
+  assert.equal(slot.getAttribute("data-opencodex-wco-right-slot"), null);
+  assert.equal(root.style.getPropertyValue("--opencodex-wco-right-slot-width"), "");
+  assert.equal(root.style.getPropertyValue("--opencodex-wco-right-panel-toolbar-extend"), "400px");
 });
 
 test("composer observer ignores streaming content and hidden-page mutations", () => {

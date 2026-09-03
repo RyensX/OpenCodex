@@ -362,10 +362,16 @@ test("English diagnostics metadata covers every built-in group, adapter, and poi
 
 test("compatibility capabilities preserve renderer HTML output byte for byte", (t) => {
   const webviewDir = makeOfficialWebviewDir(t);
-  const baseline = createService(webviewDir).createRendererResponse();
+  const baselineService = createService(webviewDir);
+  const baseline = baselineService.createRendererResponse();
   const compatibilityService = createCompatibilityService();
   const migrated = createService(webviewDir, compatibilityService).createRendererResponse();
   assert.equal(migrated, baseline);
+  // WCO 样式由 RuntimeView Contribution 挂载，HTML 只负责按顺序加载 Provider 声明和 Kernel 激活脚本。
+  assert.doesNotMatch(baseline, /<link id="codex-web-window-controls-overlay-styles"/);
+  const bootstrap = runtimeBootstrapSource(baselineService);
+  assert.match(bootstrap, /providers\.register\("window-controls"/);
+  assert.match(bootstrap, /providers\.registerManaged\("window-controls", "primary"/);
   assert.equal(
     compatibilityService.registry.point("static.cache.renderer.html.runtime-bootstrap").status,
     "healthy"
@@ -404,6 +410,7 @@ test("web shell manifest requests credentials for protected origins", () => {
   const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
 
   assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest" crossorigin="use-credentials" \/>/);
+  assert.doesNotMatch(html, /<link id="codex-web-window-controls-overlay-styles"/);
 });
 
 test("web shell scripts revalidate unchanged content instead of retransferring it", (t) => {

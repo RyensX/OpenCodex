@@ -1,21 +1,15 @@
 (function () {
   const w = window;
-  const modificationScope = w.__OpenCodexCurrentProviderScope;
-  const modificationEffects = modificationScope?.effects;
   const adapterHost = w.__OpenCodexAdapterHost;
-  const scheduler = adapterHost?.scheduler?.capture?.() || w;
-  if (!adapterHost?.dom?.observe || !adapterHost?.events?.observe) return;
-  const activeRoot = document.documentElement || null;
-  const previousInstallState = w.__opencodexWindowControlsOverlayState;
-  if (previousInstallState?.document === document && previousInstallState?.root === activeRoot) return;
-  try {
-    previousInstallState?.cleanup?.();
-  } catch {
-    // 旧页面可能已经被 document.write 清空，清理失败时不能阻断当前页面重新安装。
-  }
-  // Web shell 会先加载登录壳，再用 document.write 写入官方 renderer；guard 必须跟随当前根节点。
-  const installState = { document, root: activeRoot, cleanup: null };
-  w.__opencodexWindowControlsOverlayState = installState;
+  if (!adapterHost?.providers?.registerManaged) return;
+
+  // 脚本加载只登记实现；DOM 副作用由 RuntimeView Contribution 的 apply/dispose 生命周期托管。
+  adapterHost.providers.registerManaged("window-controls", "primary", ({ onHit }) => {
+    const scheduler = adapterHost.scheduler?.capture?.() || w;
+    if (!adapterHost.dom?.observe || !adapterHost.events?.observe) {
+      throw new Error("PWA 标题栏 Provider 缺少共享 DOM 或事件能力");
+    }
+    let contributionStyles = null;
 
   /**
    * PWA window-controls-overlay 会把页面铺到系统标题栏下方。
@@ -31,6 +25,20 @@
     const root = document.documentElement;
     const rootStyle = root.style;
     const cleanupHandlers = [];
+    const initialRootStyles = new Map();
+    const managedAttributeNodes = new Map();
+    const managedRootDatasetKeys = [
+      "opencodexWcoVisible",
+      "opencodexWcoTitlebarScheme",
+      "opencodexWcoImagePreviewOpen",
+      "opencodexWcoImagePreviewScheme",
+    ];
+    const initialRootDataset = new Map(
+      managedRootDatasetKeys.map((key) => [
+        key,
+        Object.prototype.hasOwnProperty.call(root.dataset, key) ? root.dataset[key] : undefined,
+      ])
+    );
 
     function addCleanup(handler) {
       if (typeof handler === "function") cleanupHandlers.push(handler);
@@ -88,6 +96,7 @@
       link.href = "/codex-window-controls-overlay.css";
       // WCO 适配样式体积较大，独立 CSS 文件比塞进 polyfill 更容易维护。
       (document.head || document.documentElement).appendChild(link);
+      contributionStyles = link;
     }
 
     function setInsets(visible, insets) {
@@ -157,6 +166,7 @@
     ].join(",");
 
     function setManagedRootStyle(name, value) {
+      rememberRootStyle(name);
       const nextValue = String(value);
       if (rootStyle.getPropertyValue(name) === nextValue) return;
       // 每次实际自写对应一个 style MutationRecord，observer 据此只过滤自身产生的记录。
@@ -165,9 +175,53 @@
     }
 
     function removeManagedRootStyle(name) {
+      rememberRootStyle(name);
       if (!rootStyle.getPropertyValue(name)) return;
       if (disposeMutationObservation) managedRootStyleMutationBudget += 1;
       rootStyle.removeProperty(name);
+    }
+
+    function rememberRootStyle(name) {
+      if (initialRootStyles.has(name)) return;
+      initialRootStyles.set(name, {
+        priority: rootStyle.getPropertyPriority(name),
+        value: rootStyle.getPropertyValue(name),
+      });
+    }
+
+    function restoreManagedDomState() {
+      for (const [name, initial] of initialRootStyles) {
+        if (initial.value) rootStyle.setProperty(name, initial.value, initial.priority);
+        else rootStyle.removeProperty(name);
+      }
+      for (const [key, initial] of initialRootDataset) {
+        if (initial === undefined) delete root.dataset[key];
+        else root.dataset[key] = initial;
+      }
+      // 只清理由当前实例实际标记过的节点，页面代际切换时不会误触新文档中的同名节点。
+      for (const [attribute, nodes] of managedAttributeNodes) {
+        for (const node of nodes) node.removeAttribute(attribute);
+      }
+      managedAttributeNodes.clear();
+      contributionStyles?.remove();
+      contributionStyles = null;
+    }
+
+    function setManagedNodeAttribute(node, attribute, value = "true") {
+      if (!node) return;
+      node.setAttribute(attribute, value);
+      let nodes = managedAttributeNodes.get(attribute);
+      if (!nodes) {
+        nodes = new Set();
+        managedAttributeNodes.set(attribute, nodes);
+      }
+      nodes.add(node);
+    }
+
+    function removeManagedNodeAttribute(node, attribute) {
+      if (!node) return;
+      node.removeAttribute(attribute);
+      managedAttributeNodes.get(attribute)?.delete(node);
     }
 
     function visibleLayoutElement(element) {
@@ -434,20 +488,20 @@
       setImagePreviewThemeColor(root.dataset.opencodexWcoVisible === "true" ? scrimColor : "");
 
       for (const node of document.querySelectorAll('[data-opencodex-wco-image-preview="true"]')) {
-        if (node !== previewRoot) node.removeAttribute("data-opencodex-wco-image-preview");
+        if (node !== previewRoot) removeManagedNodeAttribute(node, "data-opencodex-wco-image-preview");
       }
       for (const node of document.querySelectorAll('[data-opencodex-wco-image-preview-controls="true"]')) {
-        node.removeAttribute("data-opencodex-wco-image-preview-controls");
+        removeManagedNodeAttribute(node, "data-opencodex-wco-image-preview-controls");
       }
       if (!previewRoot) return;
 
-      previewRoot.setAttribute("data-opencodex-wco-image-preview", "true");
+      setManagedNodeAttribute(previewRoot, "data-opencodex-wco-image-preview");
       const controls = Array.from(previewRoot.children).find((child) => {
         if (!(child instanceof HTMLElement)) return false;
         return child.classList.contains("top-3") && child.classList.contains("right-3") && child.querySelector("a,button");
       });
       // 官方图片预览没有稳定 test id，这里按直接子节点的 top/right 工具条特征补一个稳定标记。
-      controls?.setAttribute("data-opencodex-wco-image-preview-controls", "true");
+      setManagedNodeAttribute(controls, "data-opencodex-wco-image-preview-controls");
     }
 
     function syncRightHeaderSlotMetrics() {
@@ -456,13 +510,13 @@
       const slots = directHeaderSlots(header);
       const slot = slots[slots.length - 1] || null;
       for (const node of document.querySelectorAll('[data-opencodex-wco-right-slot="true"]')) {
-        if (node !== slot) node.removeAttribute("data-opencodex-wco-right-slot");
+        if (node !== slot) removeManagedNodeAttribute(node, "data-opencodex-wco-right-slot");
       }
       for (const node of document.querySelectorAll('[data-opencodex-wco-align-right-panel="true"]')) {
-        if (node !== slot) node.removeAttribute("data-opencodex-wco-align-right-panel");
+        if (node !== slot) removeManagedNodeAttribute(node, "data-opencodex-wco-align-right-panel");
       }
       // 官方 header 末尾可能继续挂载标题栏障碍节点，不能再用 :last-child 判断右侧 slot。
-      slot?.setAttribute("data-opencodex-wco-right-slot", "true");
+      setManagedNodeAttribute(slot, "data-opencodex-wco-right-slot");
       const headerRect = header?.getBoundingClientRect();
       const rightPanel = headerRect
         ? Array.from(document.querySelectorAll(`aside${RIGHT_PANEL_FOCUS_SELECTOR}`)).find((candidate) => {
@@ -482,9 +536,9 @@
           : 0;
       const alignedWidth = Math.round(overlapWidth * 100) / 100;
       if (slot && alignedWidth > 0) {
-        slot.setAttribute("data-opencodex-wco-align-right-panel", "true");
+        setManagedNodeAttribute(slot, "data-opencodex-wco-align-right-panel");
       } else {
-        slot?.removeAttribute("data-opencodex-wco-align-right-panel");
+        removeManagedNodeAttribute(slot, "data-opencodex-wco-align-right-panel");
       }
       setManagedRootStyle("--opencodex-wco-right-slot-width", `${alignedWidth}px`);
 
@@ -511,7 +565,7 @@
       const toolbarCandidate = strip?.closest?.('[data-app-shell-tab-row]') || strip?.parentElement;
       const toolbar = toolbarCandidate instanceof HTMLElement ? toolbarCandidate : null;
       for (const node of document.querySelectorAll('[data-opencodex-wco-right-panel-toolbar="true"]')) {
-        if (node !== toolbar) node.removeAttribute("data-opencodex-wco-right-panel-toolbar");
+        if (node !== toolbar) removeManagedNodeAttribute(node, "data-opencodex-wco-right-panel-toolbar");
       }
       // 清除旧版跨分栏位移留下的状态，热更新后也不能继续影响当前页面。
       for (const [selector, attribute] of [
@@ -529,7 +583,7 @@
         header.removeAttribute("data-opencodex-wco-has-right-panel-toolbar");
       }
       removeManagedRootStyle("--opencodex-wco-right-panel-toolbar-extend");
-      toolbar?.setAttribute("data-opencodex-wco-right-panel-toolbar", "true");
+      setManagedNodeAttribute(toolbar, "data-opencodex-wco-right-panel-toolbar");
     }
 
     function syncHeaderAndPanelMetrics() {
@@ -648,7 +702,7 @@
       if (visible && overlay && typeof overlay.getTitlebarAreaRect === "function") {
         if (!compatibilityHitReported) {
           compatibilityHitReported = true;
-          modificationEffects?.primary?.emit();
+          onHit();
         }
         startHeavyObservers();
         const rect = overlay.getTitlebarAreaRect();
@@ -659,7 +713,7 @@
       if (visible) {
         if (!compatibilityHitReported) {
           compatibilityHitReported = true;
-          modificationEffects?.primary?.emit();
+          onHit();
         }
         startHeavyObservers();
         setInsets(true, null);
@@ -708,17 +762,28 @@
       }
       cssLengthProbe?.remove();
       cssColorProbe?.remove();
+      restoreManagedDomState();
     };
   }
 
-  installState.cleanup = installWindowControlsOverlaySafeArea() || null;
-  if (installState.cleanup && modificationScope?.own) {
-    const cleanup = installState.cleanup;
-    installState.cleanup = modificationScope.own(() => {
-      cleanup();
-      if (w.__opencodexWindowControlsOverlayState === installState) {
-        w.__opencodexWindowControlsOverlayState = null;
-      }
+    const cleanup = installWindowControlsOverlaySafeArea();
+    if (!cleanup) throw new Error("PWA 标题栏 Provider 无法定位当前文档根节点");
+    let active = true;
+    return Object.freeze({
+      verify() {
+        if (!active) throw new Error("PWA 标题栏 Contribution 已经释放");
+        const styles = document.getElementById("codex-web-window-controls-overlay-styles") || contributionStyles;
+        const stylesConnected = styles ? styles.isConnected ?? Boolean(styles.parentNode) : false;
+        if (!stylesConnected) {
+          throw new Error("PWA 标题栏样式没有连接到当前页面");
+        }
+      },
+      dispose() {
+        if (!active) return;
+        active = false;
+        cleanup();
+      },
     });
-  }
+
+  });
 })();

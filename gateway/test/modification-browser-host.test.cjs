@@ -471,6 +471,54 @@ test("mobile sidebar touch scrolling is a separate v2 point owned by the plugin 
   assert.equal(harness.document.head.children.length, 0);
 });
 
+test("WCO is created and released as a managed runtime-view contribution", async () => {
+  const harness = createHarness();
+  const snapshots = [];
+  let createCount = 0;
+  let disposeCount = 0;
+  harness.window.OpenCodexRuntimeCompatibility = {
+    clientId: "browser_wco_managed_contribution",
+    ingestSnapshot(snapshot) {
+      snapshots.push(snapshot);
+    },
+  };
+  harness.host.providers.register("window-controls", () => {
+    assert.equal(harness.document.head.children.length, 0);
+    harness.host.providers.registerManaged("window-controls", "primary", ({ onHit }) => {
+      createCount += 1;
+      const style = harness.document.createElement("style");
+      style.id = "test-wco-managed-style";
+      harness.document.head.appendChild(style);
+      onHit();
+      return {
+        verify() {
+          assert.equal(style.isConnected, true);
+        },
+        dispose() {
+          disposeCount += 1;
+          style.parentNode?.removeChild(style);
+        },
+      };
+    });
+  });
+
+  await harness.host.providers.activate();
+  await Promise.resolve();
+  assert.equal(createCount, 1);
+  assert.equal(harness.document.head.children.length, 1);
+  const point = snapshots.at(-1).points.find((item) => item.id === "web.runtime.dom.window-controls-overlay");
+  assert.equal(point.directAdapterIds[0], "adapter.semantic-view");
+  assert.equal(point.contributions[0].adapterId, "adapter.runtime-view");
+  assert.equal(point.status, "active");
+
+  // 页面代际切换会先回滚 RuntimeView Contribution，再释放 Provider 注册和资源。
+  harness.host.providers.beginPage(new EventTargetStub());
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(disposeCount, 1);
+  assert.equal(harness.document.head.children.length, 0);
+});
+
 test("browser provider resources are released and reinstalled for each document generation", async () => {
   const harness = createHarness();
   const generations = [];

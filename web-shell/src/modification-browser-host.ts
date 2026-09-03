@@ -113,6 +113,14 @@ interface BrowserProviderInstaller {
   (): void | (() => void);
 }
 
+interface BrowserManagedContributionContext {
+  readonly onHit: () => void;
+}
+
+interface BrowserManagedContributionFactory {
+  (context: BrowserManagedContributionContext): ManagedBrowserContribution;
+}
+
 interface BrowserProviderDefinition {
   readonly key: string;
   readonly points: Readonly<Record<string, string>>;
@@ -141,6 +149,7 @@ interface BrowserProviderState {
   readonly applications: Set<symbol>;
   readonly enabledCallbacks: Set<(enabled: boolean, reason: string) => void>;
   readonly lifecycleCallbacks: Set<(enabled: boolean) => void>;
+  readonly managedFactories: Map<string, BrowserManagedContributionFactory>;
   scope: BrowserProviderScope | null;
   enabled: boolean | null;
   installed: boolean;
@@ -244,6 +253,12 @@ function isMobileSidebarTouchScrollContribution(contribution: BoundContribution)
   const declaration = contribution.declaration as { readonly target?: unknown };
   return contribution.adapter === BASE_ADAPTERS.runtimeView &&
     declaration.target === BUILTIN_BROWSER_TARGETS.mobileSidebarTouchScroll;
+}
+
+function isWindowControlsOverlayContribution(contribution: BoundContribution): boolean {
+  const declaration = contribution.declaration as { readonly target?: unknown };
+  return contribution.adapter === BASE_ADAPTERS.runtimeView &&
+    declaration.target === BUILTIN_BROWSER_TARGETS.windowControlsOverlay;
 }
 
 function installMobileSidebarTouchScrollContribution(
@@ -944,6 +959,7 @@ function createBrowserProviderRegistry() {
       applications: new Set(),
       enabledCallbacks: new Set(),
       lifecycleCallbacks: new Set(),
+      managedFactories: new Map(),
       scope: null,
       enabled: null,
       installed: false,
@@ -1046,6 +1062,7 @@ function createBrowserProviderRegistry() {
     state.scope?.close();
     state.scope = null;
     state.installed = false;
+    state.managedFactories.clear();
     let firstError: unknown = null;
     for (const dispose of state.disposers.splice(0).reverse()) {
       try {
@@ -1120,6 +1137,21 @@ function createBrowserProviderRegistry() {
             if (isMobileSidebarTouchScrollContribution(contribution)) {
               const managed = installMobileSidebarTouchScrollContribution(state, () => emit(contribution.point.id));
               managedContributions.set(contribution.key, managed);
+            }
+            if (isWindowControlsOverlayContribution(contribution)) {
+              const factory = state.managedFactories.get(contribution.point.id);
+              if (!factory) throw new Error("PWA 标题栏 Provider 没有注册托管 Contribution 工厂");
+              // 工厂也在当前 Provider scope 中运行，DOM 监听、计时器等资源因此归属于同一页面代际。
+              try {
+                const managed = runInProviderScope(state.scope, () => factory({
+                  onHit: () => emit(contribution.point.id),
+                }));
+                managedContributions.set(contribution.key, managed);
+              } catch (error) {
+                // 工厂可能已申请部分共享资源；apply 失败时立即释放，不能等待下一次页面切换兜底。
+                releaseStateResources(state);
+                throw error;
+              }
             }
             state.applications.add(contribution.key);
             reporter.applied(contribution);
@@ -1207,6 +1239,25 @@ function createBrowserProviderRegistry() {
     state.installers.push(installer);
   }
 
+  function registerManaged(
+    key: string,
+    pointAlias: string,
+    factory: BrowserManagedContributionFactory,
+  ): void {
+    const state = stateByKey.get(String(key || ""));
+    if (!state) throw new TypeError(`未知浏览器 Provider key：${key}`);
+    const pointId = state.definition.points[String(pointAlias || "")];
+    if (!pointId) throw new TypeError(`浏览器 Provider ${key} 没有修改点别名：${pointAlias}`);
+    if (typeof factory !== "function") throw new TypeError(`浏览器 Provider ${key} 缺少托管工厂`);
+    if (window.__OpenCodexCurrentProviderScope !== state.scope || !state.installing) {
+      throw new Error(`浏览器 Provider ${key} 只能在安装阶段注册托管工厂`);
+    }
+    if (state.managedFactories.has(pointId)) {
+      throw new Error(`浏览器 Provider ${key} 重复注册托管工厂：${pointAlias}`);
+    }
+    state.managedFactories.set(pointId, factory);
+  }
+
   function beginPage(root: Element | null): void {
     if (pageRoot === root) return;
     if (pageRoot) transport()?.beginGeneration?.();
@@ -1230,6 +1281,7 @@ function createBrowserProviderRegistry() {
         console.warn("[opencodex-adapter] browser Provider cleanup failed", state.definition.key, error);
       }
       state.installers.splice(0);
+      state.managedFactories.clear();
       state.enabled = null;
       state.enabledCallbacks.clear();
       state.installing = false;
@@ -1267,7 +1319,7 @@ function createBrowserProviderRegistry() {
     return activationPromise;
   }
 
-  return Object.freeze({ beginPage, register, activate });
+  return Object.freeze({ beginPage, register, registerManaged, activate });
 }
 
 const browserProviders = createBrowserProviderRegistry();

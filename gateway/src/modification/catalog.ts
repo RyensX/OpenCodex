@@ -254,6 +254,22 @@ const G = POINT_GROUPS;
 const A = ADAPTERS;
 const P = BUILTIN_PLUGINS;
 let mobileSidebarTouchScrollTarget: ModificationTargetRef<"browser"> | null = null;
+let windowControlsOverlayTarget: ModificationTargetRef<"browser"> | null = null;
+
+function windowControlsOverlayPoint(): ModificationPointDefinition {
+  const definition = point(
+    "web.runtime.dom.window-controls-overlay",
+    "适配 PWA 标题栏和安全区",
+    "web-shell",
+    G.rendererUi,
+    A.semanticView,
+  );
+  const declaration = definition.contributions[0]?.declaration as CatalogDeclaration<"browser"> | undefined;
+  if (!declaration) throw new Error("PWA 标题栏修改点缺少语义目标");
+  // RuntimeView Provider 通过目标对象身份识别需要托管完整生命周期的 WCO Contribution。
+  windowControlsOverlayTarget = declaration.target;
+  return definition;
+}
 
 function mobileSidebarTouchScrollPoint(): ModificationPointDefinition {
   const definition = pluginPoint(
@@ -300,7 +316,7 @@ export const POINT_DEFINITIONS = Object.freeze([
   point("web.runtime.dom.late-module-preload", "延迟加载非首屏官方模块", "web-shell", G.startupHistory, A.semanticView),
   point("web.runtime.dom.offscreen-animation", "暂停离屏官方动画", "web-shell", G.backgroundEfficiency, A.semanticView),
   point("web.runtime.dom.tooltip-dismiss", "适配官方 Tooltip 挂载和关闭", "web-shell", G.rendererUi, A.semanticView),
-  point("web.runtime.dom.window-controls-overlay", "适配 PWA 标题栏和安全区", "web-shell", G.rendererUi, A.semanticView),
+  windowControlsOverlayPoint(),
   pluginPoint("web.runtime.smart-router.composer", "定位并适配官方模型选择器", "smart-router", G.smartRouting, P.smartModelRouter, A.semanticView),
   pluginPoint("web.runtime.smart-router.settings", "向官方设置注入智能调度页面", "smart-router", G.smartRouting, P.smartModelRouter, A.semanticView),
   pluginPoint("web.runtime.smart-router.summary", "在官方线程界面展示调度结果", "smart-router", G.smartRouting, P.smartModelRouter, A.semanticView),
@@ -385,8 +401,10 @@ export const POINT_DEFINITIONS = Object.freeze([
 export const POINT_GROUP_DEFINITIONS = Object.freeze(Object.values(POINT_GROUPS));
 export const POINT_TARGETS = Object.freeze(pointTargets);
 if (!mobileSidebarTouchScrollTarget) throw new Error("移动端侧栏触摸滚动语义目标没有完成注册");
+if (!windowControlsOverlayTarget) throw new Error("PWA 标题栏语义目标没有完成注册");
 export const BUILTIN_BROWSER_TARGETS = Object.freeze({
   mobileSidebarTouchScroll: mobileSidebarTouchScrollTarget,
+  windowControlsOverlay: windowControlsOverlayTarget,
 });
 export const ADAPTER_DEFINITIONS = Object.freeze(
   [...new Map(Object.values(ADAPTERS).map((adapter) => [adapter.id, adapter])).values()],
