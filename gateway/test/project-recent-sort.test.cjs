@@ -279,6 +279,53 @@ test("recent mode derives the full project order from each project's latest thre
   harness.dispose();
 });
 
+test("cold startup actively loads thread recency before a project is opened", async () => {
+  const harness = createHarness({
+    initialBootstrap: {
+      globalStateEntries: [
+        { key: PROJECT_ORDER_KEY, value: ["current", "gamehub"] },
+        {
+          key: "local-projects",
+          value: {
+            current: { id: "current", rootPaths: ["/work/Current"], updatedAt: 2000 },
+            gamehub: { id: "gamehub", rootPaths: ["/work/Gamehub"], updatedAt: 1000 },
+          },
+        },
+      ],
+      // 真实冷启动快照可能只有项目状态，不能依赖用户先打开某条会话来补齐 cwd 和 recencyAt。
+      catalogSnapshot: { entries: [] },
+    },
+  });
+  const coldStartRequest = harness.forwardedMessages.find(
+    (message) => message.type === "mcp-request" && message.request?.method === "thread/list"
+  );
+  assert.ok(coldStartRequest);
+  assert.equal(coldStartRequest.hostId, "local");
+  assert.equal(coldStartRequest.request.params.sortKey, "updated_at");
+  assert.equal(coldStartRequest.request.params.useStateDbOnly, true);
+
+  const coldStartResponse = harness.processGateway("mcp-response", {
+    type: "mcp-response",
+    hostId: "local",
+    message: {
+      id: coldStartRequest.request.id,
+      result: {
+        data: [
+          { id: "gamehub-recent", cwd: "/work/Gamehub", recencyAt: 5000, updatedAt: 5000 },
+          { id: "current-older", cwd: "/work/Current", recencyAt: 3000, updatedAt: 3000 },
+        ],
+        nextCursor: null,
+      },
+    },
+  }, "server");
+  assert.equal(coldStartResponse.type, "opencodex-project-recent-sort-response");
+  harness.flushMicrotasks();
+
+  await harness.bridge.sendMessageFromView(projectOrderFetch("cold-start-order"));
+  assert.deepEqual(emittedProjectOrder(harness, "cold-start-order"), ["gamehub", "current"]);
+  harness.dispose();
+});
+
 test("full virtual order drives both first-five projects and show-more projects", async () => {
   const projects = {};
   const projectOrder = [];
@@ -383,6 +430,12 @@ test("projects without resolvable thread activity keep their official relative o
 
 test("manual mode preserves saved order, pinned state, and official requests", async () => {
   const harness = createHarness({ flatPreferences: { projectSortMode: "manual" } });
+  assert.equal(
+    harness.forwardedMessages.some(
+      (message) => message.type === "mcp-request" && message.request?.method === "thread/list"
+    ),
+    false
+  );
   const bootstrap = parsed(harness.bridge.getInitialSidebarBootstrap());
   assert.deepEqual(
     bootstrap.globalStateEntries.find((entry) => entry.key === PROJECT_ORDER_KEY).value,

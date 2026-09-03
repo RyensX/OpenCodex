@@ -15,6 +15,7 @@
   const REMOTE_PROJECTS_KEY = "remote-projects";
   const PROJECT_ORDER_KEY = "project-order";
   const THREAD_PROJECT_ASSIGNMENTS_KEY = "thread-project-assignments";
+  const OWNED_RPC_RESPONSE_TYPE = "opencodex-project-recent-sort-response";
   const RECENT_SORT_MODES = new Set(["created_at", "updated_at"]);
   const TRACKED_GLOBAL_STATE_KEYS = new Set([
     LOCAL_PROJECTS_KEY,
@@ -26,6 +27,10 @@
   const GET_GLOBAL_STATE_URL = "vscode://codex/get-global-state";
   const BRIDGE_INSTALL_RETRY_MS = 20;
   const BRIDGE_INSTALL_MAX_ATTEMPTS = 100;
+  const COLD_START_THREAD_PAGE_LIMIT = 100;
+  const COLD_START_MAX_PAGES_PER_HOST = 64;
+  const COLD_START_MAX_HOSTS = 32;
+  const COLD_START_REQUEST_TIMEOUT_MS = 15_000;
   const MAX_PENDING_REQUESTS = 1024;
   const MAX_PROJECTS = 2048;
   const MAX_PROTOCOL_SCAN_NODES = 256;
@@ -144,11 +149,15 @@
       let installTimer = null;
       let invalidationScheduled = false;
       let unsubscribePersistedAtom = null;
+      let activeBridge = null;
+      let coldStartRequestSequence = 0;
       const projects = new Map();
       const threads = new Map();
       const threadProjectAssignments = new Map();
       const pendingFetchKeys = new Map();
       const pendingRpcRequests = new Map();
+      const ownedRpcRequests = new Map();
+      const coldStartHosts = new Map();
       const bridgePatches = [];
       const transformedProtocols = [];
       const patchedBridges = new WeakSet();
@@ -286,8 +295,11 @@
       }
 
       function rememberGlobalState(key, value) {
-        if (key === LOCAL_PROJECTS_KEY) return replaceProjects("local", value);
-        if (key === REMOTE_PROJECTS_KEY) return replaceProjects("remote", value);
+        if (key === LOCAL_PROJECTS_KEY || key === REMOTE_PROJECTS_KEY) {
+          const changed = replaceProjects(key === LOCAL_PROJECTS_KEY ? "local" : "remote", value);
+          if (changed) requestColdStartThreads();
+          return changed;
+        }
         if (key === THREAD_PROJECT_ASSIGNMENTS_KEY) return replaceThreadProjectAssignments(value);
         if (key === PROJECT_ORDER_KEY) {
           const nextOrder = stringArray(value);
@@ -451,7 +463,10 @@
         }
         const isRecent = usesRecentProjectSort();
         if (wasRecent !== isRecent) {
-          if (isRecent) scheduleProjectOrderInvalidation();
+          if (isRecent) {
+            requestColdStartThreads();
+            scheduleProjectOrderInvalidation();
+          }
           else emitProjectOrderInvalidation();
         } else if (isRecent) {
           scheduleProjectOrderInvalidation();
@@ -494,6 +509,136 @@
         return typeof value?.hostId === "string" && value.hostId ? value.hostId : fallback;
       }
 
+      function nextColdStartRequestId() {
+        try {
+          const requestId = w.crypto?.randomUUID?.();
+          if (requestId) return requestId;
+        } catch {}
+        coldStartRequestSequence += 1;
+        return `opencodex-project-recent-sort-${Date.now().toString(36)}-${coldStartRequestSequence}`;
+      }
+
+      function knownProjectHostIds() {
+        const result = ["local"];
+        const seen = new Set(result);
+        for (const project of projects.values()) {
+          const hostId = project.hostId;
+          if (!hostId || seen.has(hostId)) continue;
+          seen.add(hostId);
+          result.push(hostId);
+          if (result.length >= COLD_START_MAX_HOSTS) break;
+        }
+        return result;
+      }
+
+      function finishColdStartRequest(requestId, failed = false) {
+        const owned = ownedRpcRequests.get(requestId);
+        if (!owned) return null;
+        ownedRpcRequests.delete(requestId);
+        const state = coldStartHosts.get(owned.hostId);
+        if (state?.requestId === requestId) {
+          state.inFlight = false;
+          state.requestId = "";
+          if (failed) state.complete = true;
+        }
+        return owned;
+      }
+
+      function requestColdStartThreadPage(hostId, requestedCursor) {
+        const state = coldStartHosts.get(hostId);
+        if (
+          disposed ||
+          !usesRecentProjectSort() ||
+          !state ||
+          state.complete ||
+          state.inFlight ||
+          state.pagesRequested >= COLD_START_MAX_PAGES_PER_HOST ||
+          typeof activeBridge?.sendMessageFromView !== "function"
+        ) {
+          return;
+        }
+
+        const cursor = requestedCursor === undefined ? state.nextCursor : requestedCursor;
+        const requestId = nextColdStartRequestId();
+        const params = {
+          archived: false,
+          cursor,
+          limit: COLD_START_THREAD_PAGE_LIMIT,
+          modelProviders: null,
+          sortKey: "updated_at",
+          useStateDbOnly: true,
+        };
+        state.inFlight = true;
+        state.pagesRequested += 1;
+        state.requestId = requestId;
+        ownedRpcRequests.set(requestId, { cursor, hostId });
+        pendingRpcRequests.set(requestId, { hostId, method: "thread/list", params });
+
+        // 冷启动时隐藏 renderer 的 thread/list 响应不会广播给浏览器，因此由修改点补拉只读索引。
+        let sending;
+        try {
+          sending = activeBridge.sendMessageFromView({
+            type: "mcp-request",
+            hostId,
+            request: { id: requestId, method: "thread/list", params },
+            priority: "background",
+            source: "thread_list",
+            timeoutMs: COLD_START_REQUEST_TIMEOUT_MS,
+            expiresAtMs: Date.now() + COLD_START_REQUEST_TIMEOUT_MS,
+          });
+        } catch {
+          pendingRpcRequests.delete(requestId);
+          finishColdStartRequest(requestId, true);
+          return;
+        }
+        Promise.resolve(sending).catch(() => {
+          pendingRpcRequests.delete(requestId);
+          finishColdStartRequest(requestId, true);
+        });
+      }
+
+      function requestColdStartThreads(bridge = activeBridge) {
+        if (disposed || !usesRecentProjectSort() || typeof bridge?.sendMessageFromView !== "function") return;
+        activeBridge = bridge;
+        for (const hostId of knownProjectHostIds()) {
+          const existing = coldStartHosts.get(hostId);
+          if (existing?.complete || existing?.inFlight) continue;
+          if (!existing) {
+            coldStartHosts.set(hostId, {
+              complete: false,
+              inFlight: false,
+              nextCursor: null,
+              pagesRequested: 0,
+              requestId: "",
+              seenCursors: new Set(),
+            });
+          }
+          requestColdStartThreadPage(hostId);
+        }
+      }
+
+      function continueColdStartThreads(owned, result) {
+        if (!owned) return;
+        const state = coldStartHosts.get(owned.hostId);
+        if (!state || disposed) return;
+        const nextCursor = result?.nextCursor;
+        if (nextCursor == null || state.pagesRequested >= COLD_START_MAX_PAGES_PER_HOST) {
+          state.complete = true;
+          state.nextCursor = null;
+          return;
+        }
+        const cursorKey = `${typeof nextCursor}:${String(nextCursor)}`;
+        if (state.seenCursors.has(cursorKey)) {
+          state.complete = true;
+          return;
+        }
+        state.seenCursors.add(cursorKey);
+        state.nextCursor = nextCursor;
+        const loadNextPage = () => requestColdStartThreadPage(owned.hostId);
+        if (typeof w.queueMicrotask === "function") w.queueMicrotask(loadNextPage);
+        else Promise.resolve().then(loadNextPage);
+      }
+
       function rememberRpcRequest(request, hostId) {
         if (!request || typeof request !== "object" || typeof request.method !== "string") return false;
         const requestId = requestIdOf(request);
@@ -520,23 +665,28 @@
       }
 
       function handleRpcResponse(message, fallbackHostId) {
-        if (!message || typeof message !== "object") return;
+        if (!message || typeof message !== "object") return false;
         const requestId = requestIdOf(message);
+        const responseError = message.error ?? message.response?.error;
+        const owned = requestId ? finishColdStartRequest(requestId, !!responseError) : null;
         const pending = requestId ? pendingRpcRequests.get(requestId) : null;
         if (requestId) pendingRpcRequests.delete(requestId);
-        if (!pending || message.error) return;
+        const request = pending || (owned ? { hostId: owned.hostId, method: "thread/list", params: {} } : null);
+        if (!request || responseError) return !!owned;
         const result = message.result ?? message.response?.result ?? message.response;
-        const hostId = pending.hostId || fallbackHostId;
-        if (["thread/list", "thread/search", "thread/loaded/list"].includes(pending.method)) {
+        const hostId = request.hostId || fallbackHostId;
+        if (["thread/list", "thread/search", "thread/loaded/list"].includes(request.method)) {
           rememberThreadCollection(result, hostId);
-          return;
+          continueColdStartThreads(owned, result);
+          return !!owned;
         }
-        if (["thread/start", "thread/read", "thread/resume", "thread/fork"].includes(pending.method)) {
+        if (["thread/start", "thread/read", "thread/resume", "thread/fork"].includes(request.method)) {
           const thread = result?.thread ?? result?.response?.thread ?? result;
-          if (rememberThread(thread, hostId, pending.method === "thread/start" ? Date.now() : null)) {
+          if (rememberThread(thread, hostId, request.method === "thread/start" ? Date.now() : null)) {
             scheduleProjectOrderInvalidation();
           }
         }
+        return !!owned;
       }
 
       function handleNotification(message, fallbackHostId) {
@@ -613,7 +763,11 @@
         } else if (channel === "fetch-response" || value.type === "fetch-response") {
           transformedValue = handleFetchResponse(value);
         } else if (value.type === "mcp-response") {
-          handleRpcResponse(value.message ?? value.response ?? value, hostId);
+          const rpcMessage = plainObject(value.message) ?? plainObject(value.response) ?? value;
+          if (handleRpcResponse(rpcMessage, hostId)) {
+            // 插件自有请求没有官方 Promise；改成内部事件，避免 renderer 把成功回包误报成未知 requestId。
+            transformedValue = { ...value, type: OWNED_RPC_RESPONSE_TYPE };
+          }
         } else if (value.type === "mcp-notification") {
           handleNotification(value, hostId);
         } else if (value.id != null && (Object.prototype.hasOwnProperty.call(value, "result") || value.error)) {
@@ -776,10 +930,12 @@
           return;
         }
         const eventBridge = w.electronBridge || bridges[0];
+        activeBridge = eventBridge;
         if (typeof eventBridge?.on === "function") {
           const unsubscribe = eventBridge.on("persisted-atom-updated", handlePersistedAtomUpdated);
           if (typeof unsubscribe === "function") unsubscribePersistedAtom = unsubscribe;
         }
+        requestColdStartThreads(eventBridge);
         scheduleProjectOrderInvalidation();
       }
 
@@ -796,6 +952,9 @@
         for (const dispose of transformedProtocols.splice(0).reverse()) dispose();
         pendingFetchKeys.clear();
         pendingRpcRequests.clear();
+        ownedRpcRequests.clear();
+        coldStartHosts.clear();
+        activeBridge = null;
         projects.clear();
         threads.clear();
         threadProjectAssignments.clear();
