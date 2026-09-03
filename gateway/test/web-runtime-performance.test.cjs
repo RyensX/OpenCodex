@@ -15,6 +15,7 @@ const IOS_FIX_SOURCE = fs.readFileSync(
   "utf8"
 );
 const WCO_SOURCE = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-window-controls-overlay.js"), "utf8");
+const WCO_STYLE_SOURCE = fs.readFileSync(path.join(WEB_SHELL_DIR, "codex-window-controls-overlay.css"), "utf8");
 const COMPOSER_SOURCE = fs.readFileSync(
   path.join(INTERNAL_PROVIDER_DIR, "codex-smart-model-router-composer.js"),
   "utf8"
@@ -926,6 +927,181 @@ test("WCO heavy observers exist only while the overlay is visible", () => {
   window.__opencodexWindowControlsOverlayState.cleanup();
   assert.equal(window.listenerCount("resize"), 0);
   assert.equal(document.listenerCount("visibilitychange"), 0);
+});
+
+test("WCO aligns header actions to the visible right-panel boundary", () => {
+  const scheduler = createScheduler();
+  const overlay = new ListenerTarget();
+  overlay.visible = false;
+  overlay.getTitlebarAreaRect = () => ({ height: 32, width: 1100, x: 0, y: 0 });
+  const displayMode = new ListenerTarget();
+  displayMode.matches = false;
+  const root = new TestElement("html");
+  const head = new TestElement("head");
+  const body = new TestElement("body");
+  const header = new TestElement("header");
+  const leftSlot = new TestElement("div");
+  const slot = new TestElement("div");
+  const titlebarObstacle = new TestElement("div");
+  const rightPanel = new TestElement("aside");
+  const rightPanelToolbar = new TestElement("div");
+  const rightPanelStrip = new TestElement("div");
+  leftSlot.setAttribute("data-test-id", "header-shell-slot");
+  slot.setAttribute("data-test-id", "header-shell-slot");
+  slot.style.width = "600px";
+  header.appendChild(leftSlot);
+  header.appendChild(slot);
+  header.appendChild(titlebarObstacle);
+  header.style.width = "1200px";
+  header.getBoundingClientRect = () => ({ bottom: 32, height: 32, left: 0, right: 1100, top: 0, width: 1100 });
+  header.setAttribute("data-opencodex-wco-has-right-panel-toolbar", "true");
+  rightPanelToolbar.setAttribute("data-app-shell-tab-row", "true");
+  rightPanel.appendChild(rightPanelToolbar);
+  rightPanelToolbar.appendChild(rightPanelStrip);
+  rightPanelStrip.style.width = "400px";
+  rightPanelStrip.setAttribute("data-opencodex-wco-right-panel-strip", "true");
+  rightPanel.setAttribute("data-opencodex-wco-right-panel-toolbar-clip", "true");
+  root.style.setProperty("--opencodex-wco-right-panel-toolbar-extend", "400px");
+  let rightPanelVisible = true;
+  let rightPanelStripVisible = false;
+  rightPanel.getBoundingClientRect = () => rightPanelVisible
+    ? { bottom: 800, height: 800, left: 800, right: 1200, top: 0, width: 400 }
+    : { bottom: 0, height: 0, left: 0, right: 0, top: 0, width: 0 };
+  rightPanelStrip.closest = (selector) => {
+    if (selector === '[data-app-shell-focus-area="right-panel"]') return rightPanel;
+    if (selector === "[data-app-shell-tab-row]") return rightPanelToolbar;
+    return null;
+  };
+  rightPanelStrip.getBoundingClientRect = () => rightPanelStripVisible
+    ? { bottom: 32, height: 32, left: 800, right: 1200, top: 0, width: 400 }
+    : { bottom: 0, height: 0, left: 0, right: 0, top: 0, width: 0 };
+  const document = new ListenerTarget();
+  Object.assign(document, {
+    body,
+    documentElement: root,
+    head,
+    visibilityState: "visible",
+    createElement: (tagName) => new TestElement(tagName),
+    elementFromPoint: () => null,
+    getElementById: () => null,
+    querySelector: (selector) => {
+      if (selector === "header[data-app-shell-header-edge-scroll]") return header;
+      if (selector.includes('header[data-app-shell-header-edge-scroll] > [data-test-id="header-shell-slot"]')) {
+        return slot;
+      }
+      return null;
+    },
+    querySelectorAll: (selector) => {
+      if (selector === "header[data-app-shell-header-edge-scroll]") return [header];
+      if (selector === '[data-opencodex-wco-right-slot="true"]') {
+        return slot.getAttribute("data-opencodex-wco-right-slot") === "true" ? [slot] : [];
+      }
+      if (selector === '[data-opencodex-wco-align-right-panel="true"]') {
+        return slot.getAttribute("data-opencodex-wco-align-right-panel") === "true" ? [slot] : [];
+      }
+      if (selector === 'aside[data-app-shell-focus-area="right-panel"]') return [rightPanel];
+      if (selector === '[data-app-shell-tab-strip-controller="right"]') return [rightPanelStrip];
+      if (selector === '[data-opencodex-wco-right-panel-toolbar="true"]') {
+        return rightPanelToolbar.getAttribute("data-opencodex-wco-right-panel-toolbar") === "true"
+          ? [rightPanelToolbar]
+          : [];
+      }
+      if (selector === '[data-opencodex-wco-right-panel-strip="true"]') {
+        return rightPanelStrip.getAttribute("data-opencodex-wco-right-panel-strip") === "true"
+          ? [rightPanelStrip]
+          : [];
+      }
+      if (selector === '[data-opencodex-wco-right-panel-toolbar-clip="true"]') {
+        return rightPanel.getAttribute("data-opencodex-wco-right-panel-toolbar-clip") === "true"
+          ? [rightPanel]
+          : [];
+      }
+      if (selector === "header[data-opencodex-wco-has-right-panel-toolbar]") {
+        return header.getAttribute("data-opencodex-wco-has-right-panel-toolbar") == null ? [] : [header];
+      }
+      return [];
+    },
+  });
+  const window = new ListenerTarget();
+  Object.assign(window, {
+    cancelAnimationFrame: scheduler.cancelAnimationFrame,
+    clearTimeout: scheduler.clearTimeout,
+    getComputedStyle: () => ({
+      backgroundColor: "transparent",
+      columnGap: "0",
+      gap: "0",
+      getPropertyValue: () => "",
+    }),
+    innerHeight: 800,
+    innerWidth: 1200,
+    matchMedia: (query) => query === "(display-mode: window-controls-overlay)"
+      ? displayMode
+      : { matches: false },
+    requestAnimationFrame: scheduler.requestAnimationFrame,
+    setTimeout: scheduler.setTimeout,
+  });
+  class TestMutationObserver {
+    constructor() {}
+    disconnect() {}
+    observe() {}
+  }
+  class TestResizeObserver extends TestMutationObserver {}
+  installAdapterHost(window, TestMutationObserver);
+  window.window = window;
+
+  vm.runInNewContext(WCO_SOURCE, {
+    HTMLElement: TestElement,
+    MutationObserver: TestMutationObserver,
+    ResizeObserver: TestResizeObserver,
+    console,
+    document,
+    navigator: { windowControlsOverlay: overlay },
+    window,
+  });
+
+  overlay.visible = true;
+  overlay.emit("geometrychange");
+  scheduler.flushFrames();
+
+  assert.equal(slot.getAttribute("data-opencodex-wco-right-slot"), "true");
+  assert.equal(leftSlot.getAttribute("data-opencodex-wco-right-slot"), null);
+  assert.equal(titlebarObstacle.getAttribute("data-opencodex-wco-right-slot"), null);
+  // 右侧栏宽 400px，其中 100px 被 Chrome 控件排除，header slot 应只占剩余 300px。
+  assert.equal(slot.getAttribute("data-opencodex-wco-align-right-panel"), "true");
+  assert.equal(root.style.getPropertyValue("--opencodex-wco-right-slot-width"), "300px");
+  // 不可见的缓存 strip 不能触发布局，旧版跨分栏位移状态也必须被清除。
+  assert.equal(header.getAttribute("data-opencodex-wco-has-right-panel-toolbar"), null);
+  assert.equal(rightPanelToolbar.getAttribute("data-opencodex-wco-right-panel-toolbar"), null);
+  assert.equal(rightPanelStrip.getAttribute("data-opencodex-wco-right-panel-strip"), null);
+  assert.equal(rightPanel.getAttribute("data-opencodex-wco-right-panel-toolbar-clip"), null);
+  assert.equal(root.style.getPropertyValue("--opencodex-wco-right-panel-toolbar-extend"), "");
+  assert.match(
+    WCO_STYLE_SOURCE,
+    /\[data-opencodex-wco-right-slot="true"\]\[data-opencodex-wco-align-right-panel="true"\][\s\S]*width: var\(--opencodex-wco-right-slot-width\) !important;/
+  );
+  assert.doesNotMatch(WCO_STYLE_SOURCE, /app-shell-header-context-menu-surface/);
+  assert.doesNotMatch(WCO_STYLE_SOURCE, /data-opencodex-wco-has-right-panel-toolbar/);
+  assert.doesNotMatch(WCO_STYLE_SOURCE, /opencodex-wco-right-panel-toolbar-extend/);
+
+  // 真正显示在右侧面板里的 tab row 只获得右侧系统按钮避让，不改变所在分栏。
+  rightPanelStripVisible = true;
+  overlay.emit("geometrychange");
+  scheduler.flushFrames();
+  assert.equal(rightPanelToolbar.getAttribute("data-opencodex-wco-right-panel-toolbar"), "true");
+
+  rightPanelStripVisible = false;
+  overlay.emit("geometrychange");
+  scheduler.flushFrames();
+  assert.equal(rightPanelToolbar.getAttribute("data-opencodex-wco-right-panel-toolbar"), null);
+
+  rightPanelVisible = false;
+  overlay.emit("geometrychange");
+  scheduler.flushFrames();
+  assert.equal(slot.getAttribute("data-opencodex-wco-align-right-panel"), null);
+  assert.equal(root.style.getPropertyValue("--opencodex-wco-right-slot-width"), "0px");
+  // 下一轮同步仍应命中同一个 slot，不能退回到真正的最后子节点。
+  scheduler.flushFrames();
+  assert.equal(slot.getAttribute("data-opencodex-wco-right-slot"), "true");
 });
 
 test("composer observer ignores streaming content and hidden-page mutations", () => {

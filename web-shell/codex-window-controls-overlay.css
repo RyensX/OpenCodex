@@ -11,7 +11,7 @@
   --opencodex-wco-height: var(--opencodex-wco-env-height);
   --opencodex-wco-titlebar-x: var(--opencodex-wco-env-titlebar-x);
   --opencodex-wco-titlebar-width: var(--opencodex-wco-env-titlebar-width);
-  --opencodex-wco-right-panel-toolbar-extend: 0px;
+  --opencodex-wco-right-slot-width: 0px;
   --opencodex-wco-titlebar-background: transparent;
   --opencodex-wco-titlebar-left-background: var(--opencodex-wco-titlebar-background);
   --opencodex-wco-titlebar-right-background: var(--opencodex-wco-titlebar-background);
@@ -57,106 +57,20 @@
   max-width: var(--opencodex-wco-titlebar-width) !important;
   overflow: hidden !important;
 }
-:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll] > [data-test-id="header-shell-slot"]:last-child {
-  max-width: 100% !important;
-}
-:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll][data-opencodex-wco-has-right-leading="true"] > [data-testid="app-shell-header-context-menu-surface"],
-:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll][data-opencodex-wco-has-right-panel-toolbar="true"] > [data-testid="app-shell-header-context-menu-surface"] {
-  /* 侧栏标签打开时，中间上下文区必须退让，否则会占住 WCO 标题栏里的可用横向空间。 */
-  flex: 0 1 0px !important;
-  inline-size: 0 !important;
-  width: 0 !important;
-  min-width: 0 !important;
-  margin-inline-start: 0 !important;
-  padding-inline: 0 !important;
-  overflow: hidden !important;
-  visibility: hidden !important;
-}
-:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll] > [data-test-id="header-shell-slot"]:last-child[data-opencodex-wco-has-leading="true"] {
-  /* 只有右侧 slot 内存在可收缩标签区时才覆盖官方 min-width；默认固定按钮保持官方完整测量宽度。 */
-  flex-shrink: 1 !important;
-  min-width: var(--opencodex-wco-right-slot-min, 0px) !important;
-  overflow: hidden !important;
-}
-:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll] > [data-test-id="header-shell-slot"]:last-child:not([data-opencodex-wco-has-leading="true"]) {
-  flex-shrink: 0 !important;
-  overflow: visible !important;
-}
-:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll] > [data-test-id="header-shell-slot"]:last-child[data-opencodex-wco-has-leading="true"] > div {
-  display: flex !important;
-  min-width: 0 !important;
-  max-width: 100% !important;
-  width: 100% !important;
-  overflow: hidden !important;
-}
-:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll] > [data-test-id="header-shell-slot"]:last-child[data-opencodex-wco-has-leading="true"] > div > [data-opencodex-wco-leading="true"] {
-  /* 只让 .ms-auto 前面的侧栏标签让位，后面的固定控制按钮保持完整。 */
-  flex: 0 1 var(--opencodex-wco-leading-max, 0px) !important;
-  inline-size: var(--opencodex-wco-leading-max, 0px) !important;
-  max-inline-size: var(--opencodex-wco-leading-max, 0px) !important;
-  width: var(--opencodex-wco-leading-max, 0px) !important;
-  min-width: 0 !important;
-  max-width: var(--opencodex-wco-leading-max, 0px) !important;
-  overflow: hidden !important;
-}
-:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll] > [data-test-id="header-shell-slot"]:last-child[data-opencodex-wco-has-leading="true"] > div > [data-opencodex-wco-leading="true"] > * {
-  min-width: 0 !important;
-  max-width: 100% !important;
-  overflow: hidden !important;
-}
-:root[data-opencodex-wco-visible="true"] [data-opencodex-wco-leading="true"] [data-app-shell-tab-strip-controller],
-:root[data-opencodex-wco-visible="true"] [data-opencodex-wco-leading="true"] [role="tablist"] {
-  min-width: 0 !important;
-  max-width: 100% !important;
-  overflow: hidden !important;
-}
-:root[data-opencodex-wco-visible="true"] [data-opencodex-wco-leading="true"] [data-app-shell-tab-strip-controller] {
-  flex: 1 1 auto !important;
-}
-:root[data-opencodex-wco-visible="true"] [data-opencodex-wco-leading="true"] [data-app-shell-tab-strip-controller="right"] {
-  /* data-app-shell-tab-strip-controller 才是整条侧栏标签容器；它负责在剩余宽度内滚动/裁切。 */
-  flex: 1 1 auto !important;
-  inline-size: 100% !important;
-  width: 100% !important;
+:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll] > [data-opencodex-wco-right-slot="true"] {
   max-inline-size: 100% !important;
-  min-inline-size: 0 !important;
-  overflow-x: auto !important;
-  overflow-y: hidden !important;
+  max-width: 100% !important;
 }
-:root[data-opencodex-wco-visible="true"] [data-opencodex-wco-leading="true"] [data-app-shell-tab-strip-controller="right"] > [role="tablist"] {
-  min-inline-size: 0 !important;
-  max-inline-size: none !important;
-}
-:root[data-opencodex-wco-visible="true"] [data-opencodex-wco-leading="true"] [data-app-shell-tab-strip-controller="right"]::-webkit-scrollbar {
-  display: none !important;
-}
-:root[data-opencodex-wco-visible="true"] [data-opencodex-wco-leading="true"] [data-app-shell-tab-controller="right"],
-:root[data-opencodex-wco-visible="true"] [data-opencodex-wco-leading="true"] [data-tab-id] {
-  /* 单个 tab wrapper 官方默认 shrink-0；这里允许它在标签容器内收缩，但不把它误设成整条宽度。 */
-  flex-shrink: 1 !important;
-  min-width: 0 !important;
-  overflow: hidden !important;
-}
-:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll] > [data-test-id="header-shell-slot"]:last-child[data-opencodex-wco-has-leading="true"] > div > [data-opencodex-wco-fixed="true"] {
-  flex: 0 0 auto !important;
+:root[data-opencodex-wco-visible="true"] header[data-app-shell-header-edge-scroll] > [data-opencodex-wco-right-slot="true"][data-opencodex-wco-align-right-panel="true"] {
+  /* 按侧栏与 WCO 可用标题栏的交叠宽度占位，让主区操作停在真实分割线左侧。 */
+  flex: 0 0 var(--opencodex-wco-right-slot-width) !important;
+  inline-size: var(--opencodex-wco-right-slot-width) !important;
+  width: var(--opencodex-wco-right-slot-width) !important;
 }
 :root[data-opencodex-wco-visible="true"] [data-opencodex-wco-right-panel-toolbar="true"] {
-  /* 顶栏父级只负责放开绘制和右侧避让；左侧扩展交给 strip，避免 flex 把扩展量变成空白。 */
-  contain: none !important;
-  overflow: visible !important;
-  padding-inline-end: max(0.5rem, calc(var(--opencodex-wco-right) + 0.5rem)) !important;
-}
-:root[data-opencodex-wco-visible="true"] [data-opencodex-wco-right-panel-strip="true"] {
-  /* strip 的右边界保持不变，只把左边界拉到左侧 header 图标后，空出来的宽度就会变成标签可滚动区域。 */
-  flex: 1 1 auto !important;
-  margin-inline-start: calc(-1 * var(--opencodex-wco-right-panel-toolbar-extend, 0px)) !important;
-  max-inline-size: none !important;
-  min-inline-size: 0 !important;
-}
-:root[data-opencodex-wco-visible="true"] [data-opencodex-wco-right-panel-toolbar-clip="true"] {
-  /* 官方 right panel 多层容器使用 overflow/paint containment；顶栏向左扩展时只放开这些包裹层。 */
-  contain: none !important;
-  overflow: visible !important;
+  /* 工具条留在自己的分栏内，仅避让右侧 Chrome 控件，不能跨过分栏边界向左移动。 */
+  box-sizing: border-box !important;
+  padding-right: max(0.5rem, calc(var(--opencodex-wco-right) + 0.5rem)) !important;
 }
 :root[data-opencodex-wco-visible="true"][data-opencodex-wco-image-preview-open="true"][data-opencodex-wco-image-preview-scheme="dark"] {
   /* 图片预览遮罩色由官方 overlay 计算得出，这里只同步明暗方案给 WCO。 */

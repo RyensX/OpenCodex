@@ -148,9 +148,10 @@
     let inactiveMetricsSynced = false;
     let compatibilityHitReported = false;
     let currentImagePreviewRoot = null;
+    const RIGHT_PANEL_FOCUS_SELECTOR = '[data-app-shell-focus-area="right-panel"]';
     const METRIC_MOUNT_SELECTOR = [
       "header[data-app-shell-header-edge-scroll]",
-      'aside[data-app-shell-focus-area="right-panel"]',
+      RIGHT_PANEL_FOCUS_SELECTOR,
       '[data-app-shell-tab-strip-controller="right"]',
       '[data-testid="image-preview-dismiss-area"]',
     ].join(",");
@@ -167,6 +168,26 @@
       if (!rootStyle.getPropertyValue(name)) return;
       if (disposeMutationObservation) managedRootStyleMutationBudget += 1;
       rootStyle.removeProperty(name);
+    }
+
+    function visibleLayoutElement(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = w.getComputedStyle(element);
+      return style.display !== "none" && style.visibility !== "hidden";
+    }
+
+    function firstVisibleElement(selector) {
+      const candidates = Array.from(document.querySelectorAll(selector));
+      return candidates.find(visibleLayoutElement) || candidates[0] || null;
+    }
+
+    function directHeaderSlots(header) {
+      if (!(header instanceof HTMLElement)) return [];
+      return Array.from(header.children).filter(
+        (child) => child instanceof HTMLElement && child.getAttribute("data-test-id") === "header-shell-slot"
+      );
     }
 
     function parseRgbColor(value) {
@@ -282,7 +303,7 @@
       const titlebarHeight = Math.max(1, measureCssLength("var(--opencodex-wco-height)"));
       const probeY = Math.max(0, Math.min(viewportHeight - 1, titlebarTop + titlebarHeight / 2));
       const minSurfaceWidth = Math.max(titlebarHeight * 3, Math.min(viewportWidth, titlebarWidth) * 0.12);
-      const header = document.querySelector("header[data-app-shell-header-edge-scroll]");
+      const header = firstVisibleElement("header[data-app-shell-header-edge-scroll]");
       const fallback = findTokenSurfaceColor();
       const centerX =
         titlebarWidth > 0
@@ -431,116 +452,84 @@
 
     function syncRightHeaderSlotMetrics() {
       rightHeaderSlotMetricsQueued = false;
-      const header = document.querySelector("header[data-app-shell-header-edge-scroll]");
-      const slot =
-        header?.querySelector(':scope > [data-test-id="header-shell-slot"]:last-child') ||
-        document.querySelector('header[data-app-shell-header-edge-scroll] > [data-test-id="header-shell-slot"]:last-child');
-      const inner = slot?.firstElementChild;
-      let fixedWidth = 0;
-      let leadingWidth = 0;
-      if (inner) {
-        const children = Array.from(inner.children);
-        const fixedIndex = children.findIndex((child) => child.classList.contains("ms-auto"));
-        const hasLeading = fixedIndex > 0;
-        slot.toggleAttribute("data-opencodex-wco-has-leading", hasLeading);
-        header?.toggleAttribute("data-opencodex-wco-has-right-leading", hasLeading);
-        for (const [index, child] of children.entries()) {
-          const isLeading = hasLeading && index < fixedIndex;
-          const isFixed = hasLeading && index >= fixedIndex;
-          // 官方 DOM 没有把「可收缩标签区」包成一组，这里按 .ms-auto 分界补充稳定标记。
-          child.toggleAttribute("data-opencodex-wco-leading", isLeading);
-          child.toggleAttribute("data-opencodex-wco-fixed", isFixed);
-        }
-        if (hasLeading) {
-          const fixedChildren = children.slice(fixedIndex);
-          const fixedRects = fixedChildren
-            .map((child) => child.getBoundingClientRect())
-            .filter((rect) => rect.width > 0 || rect.height > 0);
-          if (fixedRects.length > 0) {
-            const fixedLeft = Math.min(...fixedRects.map((rect) => rect.left));
-            const fixedRight = Math.max(...fixedRects.map((rect) => rect.right));
-            const headerRect = header?.getBoundingClientRect();
-            const innerRect = inner.getBoundingClientRect();
-            const slotRect = slot.getBoundingClientRect();
-            const innerStyle = w.getComputedStyle(inner);
-            const gap = Math.max(
+      const header = firstVisibleElement("header[data-app-shell-header-edge-scroll]");
+      const slots = directHeaderSlots(header);
+      const slot = slots[slots.length - 1] || null;
+      for (const node of document.querySelectorAll('[data-opencodex-wco-right-slot="true"]')) {
+        if (node !== slot) node.removeAttribute("data-opencodex-wco-right-slot");
+      }
+      for (const node of document.querySelectorAll('[data-opencodex-wco-align-right-panel="true"]')) {
+        if (node !== slot) node.removeAttribute("data-opencodex-wco-align-right-panel");
+      }
+      // 官方 header 末尾可能继续挂载标题栏障碍节点，不能再用 :last-child 判断右侧 slot。
+      slot?.setAttribute("data-opencodex-wco-right-slot", "true");
+      const headerRect = header?.getBoundingClientRect();
+      const rightPanel = headerRect
+        ? Array.from(document.querySelectorAll(`aside${RIGHT_PANEL_FOCUS_SELECTOR}`)).find((candidate) => {
+            if (!visibleLayoutElement(candidate)) return false;
+            const panelRect = candidate.getBoundingClientRect();
+            // 只有覆盖标题栏右边缘的物理右侧栏，才应决定 end slot 的占位宽度。
+            return panelRect.left < headerRect.right && panelRect.right >= headerRect.right - 1;
+          })
+        : null;
+      const panelRect = rightPanel?.getBoundingClientRect();
+      const overlapWidth =
+        headerRect && panelRect
+          ? Math.max(
               0,
-              Number.parseFloat(innerStyle.columnGap || innerStyle.gap || "0") || 0
-            );
-            const visibleSlotRight = Math.min(slotRect.right, headerRect?.right ?? slotRect.right);
-            // 固定按钮组要连同右侧 padding 一起保留，避免默认按钮再次被标题栏裁掉。
-            fixedWidth = Math.ceil(Math.max(0, visibleSlotRight - fixedLeft));
-            // 侧栏标签的右边界直接取固定按钮左边界，扣掉 flex gap 后不会再压到按钮上。
-            const leadingRight = Math.min(fixedLeft, visibleSlotRight - Math.max(0, fixedRight - fixedLeft));
-            leadingWidth = Math.max(0, Math.floor(leadingRight - innerRect.left - gap));
-          }
-        }
-      } else if (slot) {
-        slot.removeAttribute("data-opencodex-wco-has-leading");
-        header?.removeAttribute("data-opencodex-wco-has-right-leading");
+              Math.min(headerRect.right, panelRect.right) - Math.max(headerRect.left, panelRect.left)
+            )
+          : 0;
+      const alignedWidth = Math.round(overlapWidth * 100) / 100;
+      if (slot && alignedWidth > 0) {
+        slot.setAttribute("data-opencodex-wco-align-right-panel", "true");
       } else {
-        header?.removeAttribute("data-opencodex-wco-has-right-leading");
+        slot?.removeAttribute("data-opencodex-wco-align-right-panel");
       }
-      const nextSlotMin = `${fixedWidth}px`;
-      if (rootStyle.getPropertyValue("--opencodex-wco-right-slot-min") !== nextSlotMin) {
-        setManagedRootStyle("--opencodex-wco-right-slot-min", nextSlotMin);
+      setManagedRootStyle("--opencodex-wco-right-slot-width", `${alignedWidth}px`);
+
+      // 清理旧版按内部按钮分组收缩 slot 留下的状态。
+      for (const [selector, attribute] of [
+        ['[data-opencodex-wco-has-leading]', "data-opencodex-wco-has-leading"],
+        ['[data-opencodex-wco-leading]', "data-opencodex-wco-leading"],
+        ['[data-opencodex-wco-fixed]', "data-opencodex-wco-fixed"],
+      ]) {
+        for (const node of document.querySelectorAll(selector)) node.removeAttribute(attribute);
       }
-      const nextLeadingMax = `${leadingWidth}px`;
-      if (rootStyle.getPropertyValue("--opencodex-wco-leading-max") !== nextLeadingMax) {
-        setManagedRootStyle("--opencodex-wco-leading-max", nextLeadingMax);
-      }
+      removeManagedRootStyle("--opencodex-wco-right-slot-min");
+      removeManagedRootStyle("--opencodex-wco-leading-max");
     }
 
     function syncRightPanelTabStripMetrics() {
-      const strip =
-        document.querySelector(
-          'aside[data-app-shell-focus-area="right-panel"] [data-app-shell-tab-strip-controller="right"]'
-        ) || document.querySelector('[data-app-shell-tab-strip-controller="right"]');
-      const toolbar = strip?.parentElement instanceof HTMLElement ? strip.parentElement : null;
-      const header = document.querySelector("header[data-app-shell-header-edge-scroll]");
+      const strips = Array.from(
+        document.querySelectorAll('[data-app-shell-tab-strip-controller="right"]')
+      );
+      // 缓存路由里可能残留不可见 strip，只能让当前右侧面板中的可见实例参与布局。
+      const strip = strips.find(
+        (candidate) => candidate.closest?.(RIGHT_PANEL_FOCUS_SELECTOR) && visibleLayoutElement(candidate)
+      ) || null;
+      const toolbarCandidate = strip?.closest?.('[data-app-shell-tab-row]') || strip?.parentElement;
+      const toolbar = toolbarCandidate instanceof HTMLElement ? toolbarCandidate : null;
       for (const node of document.querySelectorAll('[data-opencodex-wco-right-panel-toolbar="true"]')) {
         if (node !== toolbar) node.removeAttribute("data-opencodex-wco-right-panel-toolbar");
       }
-      for (const node of document.querySelectorAll('[data-opencodex-wco-right-panel-strip="true"]')) {
-        if (node !== strip) node.removeAttribute("data-opencodex-wco-right-panel-strip");
-      }
-      header?.toggleAttribute("data-opencodex-wco-has-right-panel-toolbar", Boolean(toolbar));
-      const clipNodes = new Set();
-      let extend = 0;
-      if (toolbar) {
-        const leftSlot = header?.querySelector(':scope > [data-test-id="header-shell-slot"]:first-child');
-        const headerRect = header?.getBoundingClientRect();
-        const leftSlotRect = leftSlot?.getBoundingClientRect();
-        const stripRect = strip.getBoundingClientRect();
-        const appliedExtend =
-          Number.parseFloat(rootStyle.getPropertyValue("--opencodex-wco-right-panel-toolbar-extend") || "0") || 0;
-        const toolbarStyle = w.getComputedStyle(toolbar);
-        const toolbarGap = Math.max(
-          0,
-          Number.parseFloat(toolbarStyle.columnGap || toolbarStyle.gap || "0") || 0
-        );
-        const minStripLeft = Math.max(headerRect?.left ?? 0, (leftSlotRect?.right ?? stripRect.left) + toolbarGap);
-        // stripRect.left 会受上一轮负 margin 影响；加回已应用扩展量后再计算，避免扩展值来回抖动。
-        extend = Math.max(0, Math.floor(stripRect.left + appliedExtend - minStripLeft));
-        for (let node = toolbar.parentElement; node instanceof HTMLElement; node = node.parentElement) {
-          clipNodes.add(node);
-          if (node.matches('aside[data-app-shell-focus-area="right-panel"]')) break;
+      // 清除旧版跨分栏位移留下的状态，热更新后也不能继续影响当前页面。
+      for (const [selector, attribute] of [
+        ['[data-opencodex-wco-right-panel-strip="true"]', "data-opencodex-wco-right-panel-strip"],
+        [
+          '[data-opencodex-wco-right-panel-toolbar-clip="true"]',
+          "data-opencodex-wco-right-panel-toolbar-clip",
+        ],
+      ]) {
+        for (const node of document.querySelectorAll(selector)) {
+          node.removeAttribute(attribute);
         }
-        // 官方 sticky 按钮和 scroll-padding 都在 strip 内部，Web shell 只移动 strip 左边界并保留右边界。
-        toolbar.setAttribute("data-opencodex-wco-right-panel-toolbar", "true");
-        strip.setAttribute("data-opencodex-wco-right-panel-strip", "true");
       }
-      for (const node of document.querySelectorAll('[data-opencodex-wco-right-panel-toolbar-clip="true"]')) {
-        if (!clipNodes.has(node)) node.removeAttribute("data-opencodex-wco-right-panel-toolbar-clip");
+      for (const header of document.querySelectorAll("header[data-opencodex-wco-has-right-panel-toolbar]")) {
+        header.removeAttribute("data-opencodex-wco-has-right-panel-toolbar");
       }
-      for (const node of clipNodes) {
-        node.setAttribute("data-opencodex-wco-right-panel-toolbar-clip", "true");
-      }
-      const nextExtend = `${extend}px`;
-      if (rootStyle.getPropertyValue("--opencodex-wco-right-panel-toolbar-extend") !== nextExtend) {
-        setManagedRootStyle("--opencodex-wco-right-panel-toolbar-extend", nextExtend);
-      }
-      // 不主动改 scrollLeft、tablist padding 或 sticky 子节点；官方 tab strip 自己维护滚动位置。
+      removeManagedRootStyle("--opencodex-wco-right-panel-toolbar-extend");
+      toolbar?.setAttribute("data-opencodex-wco-right-panel-toolbar", "true");
     }
 
     function syncHeaderAndPanelMetrics() {
