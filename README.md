@@ -23,8 +23,10 @@ OpenCodex 是一个 Codex 桌面运行时中间层，同时兼容旧版 Codex De
 - 支持本机访问、局域网访问和配合 Tailscale / ZeroTier / VPN 的远程局域网访问。
 - 支持设置访问密码，避免无认证暴露。
 - 提供桌面启动器，可可视化配置监听地址、端口和访问密码等。
+- 支持显示真实token消耗情况、项目和会话根据最近更新排序等
+- 支持**智能调度**，模型选择Auto时自动根据任务选择模型和推理强度，节省token。
 - 启动时会自动跟随本地 Codex/ChatGPT Desktop 运行时版本，自动兼容新版本功能。
-- 针对移动端提供优化。
+- 提供针对移动端提供的优化。
 
 <p align="center">
   <img src="docs/image/start.jpg" alt="OpenCodex start" width="23%" />
@@ -49,7 +51,12 @@ OpenCodex 是一个 Codex 桌面运行时中间层，同时兼容旧版 Codex De
 
 下载安装：
 
-打开release下载安装包安装
+提供2种下载渠道：
+- [Release](releases): 正式版本，较为稳定，推荐使用
+- [Artifacts](actions): 测试版本，push 时 CI 自动打包，可用于尝鲜新功能。注意下载Artifacts需要登录Github
+
+macOS 首次启动遇到安全提示时，请参考：
+- [macOS 首次启动授权指南](docs/macos-installation.zh.md)
 
 本地调试：
 

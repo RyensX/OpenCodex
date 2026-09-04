@@ -24,8 +24,10 @@ Compared with the official option, OpenCodex still has advantages in several usa
 - Supports local access, LAN access, and remote LAN access with Tailscale / ZeroTier / VPN.
 - Supports setting an access password to avoid unauthenticated exposure.
 - Provides a launcher for visual configuration of the listen address, port, access password, and more.
+- Supports displaying actual token consumption and sorting projects and sessions by recent updates.
+- Supports smart scheduling: when the model is set to Auto, it automatically selects a model and reasoning effort based on the task to save tokens.
 - Automatically follows the local Codex/ChatGPT Desktop runtime version on startup, keeping compatibility with new-version features.
-- Provides optimizations for mobile devices.
+- Provides mobile-oriented optimizations.
 
 <p align="center">
   <img src="image/start.jpg" alt="OpenCodex start" width="23%" />
@@ -50,7 +52,14 @@ Compared with the official option, OpenCodex still has advantages in several usa
 
 Download and install:
 
-Open the release page, download the installer, and install it.
+Two download channels are available:
+
+- [Releases](releases): Stable official versions; recommended.
+- [Artifacts](actions): Test builds automatically packaged by CI on each push for trying new features. Downloading Artifacts requires signing in to GitHub.
+
+For macOS security prompts on first launch, see:
+
+- [macOS first-launch authorization guide](macos-installation.md)
 
 Local debugging:
 
