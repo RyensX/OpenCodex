@@ -1,9 +1,11 @@
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const asar = require("@electron/asar");
 
 const {
   CodexAsarScanner,
@@ -30,9 +32,10 @@ const {
   OfficialRuntimeEntryResolver,
 } = require("../dist/official/OfficialRuntimeEntryResolver.js");
 const { __test: layoutTest } = require("../runner/official-layout.cjs");
+const { createMacRunner } = require("../runner/platform/macos.cjs");
 const { MANIFEST_SCHEMA_VERSION } = require("../dist/official/constants.js");
 const { createCompatibilityService } = require("../runtime/compatibility/service.cjs");
-const { staticMain: staticMainPoints } = require("../runtime/modification/point-refs.cjs");
+const { runner: runnerPoints, staticMain: staticMainPoints } = require("../runtime/modification/point-refs.cjs");
 
 function temporaryDirectory(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencodex-desktop-compat-"));
@@ -1239,6 +1242,66 @@ test("macOS layout reads both ChatGPT and Codex executables from Info.plist", (t
     const layout = layoutTest.macRuntimeLayoutFromAppRoot(appRoot);
     assert.equal(layout.executablePath, path.join(appRoot, "Contents", "MacOS", appName));
   }
+});
+
+test("macOS runner embeds its current ASAR header hash before signing, including cache reuse", async (t) => {
+  const root = temporaryDirectory(t);
+  const appRoot = path.join(root, "ChatGPT.app");
+  const layout = {
+    appRoot,
+    executablePath: path.join(appRoot, "Contents", "MacOS", "ChatGPT"),
+    asarPath: path.join(appRoot, "Contents", "Resources", "app.asar"),
+    frameworksDir: path.join(appRoot, "Contents", "Frameworks"),
+  };
+  writeFile(layout.executablePath, "official executable");
+  writeFile(layout.asarPath, "official archive must remain unchanged");
+  fs.mkdirSync(layout.frameworksDir, { recursive: true });
+  const runtimeDir = path.join(root, "runtime");
+  const logs = [];
+  const hashes = [];
+
+  for (const revision of [1, 2]) {
+    const points = [];
+    await createMacRunner({
+      layout,
+      runtimeDir,
+      logger: (line) => logs.push(line),
+      runCompatibility(point, operation) {
+        points.push(point.id);
+        if (point === runnerPoints.gatewayAsar) {
+          return (async () => {
+            const asarPath = await operation();
+            // 模拟入口升级，让第二次构建的哈希发生变化，覆盖 Frameworks 缓存命中后的重新计算。
+            const sourceDir = path.join(runtimeDir, "official-electron-runner", "app-src");
+            fs.appendFileSync(path.join(sourceDir, "main.cjs"), `\n// fixture revision ${revision}\n`);
+            await asar.createPackage(sourceDir, asarPath);
+            return asarPath;
+          })();
+        }
+        if (point === runnerPoints.macosEntrySignature) {
+          // 只替换平台签名操作；真实执行打包与 plist 生成，并在签名前检查最终产物。
+          const workDir = path.join(runtimeDir, "official-electron-runner");
+          const runnerApp = fs.readdirSync(workDir).find((name) => name.endsWith(".app"));
+          const contentsDir = path.join(workDir, runnerApp, "Contents");
+          const asarPath = path.join(contentsDir, "Resources", "app.asar");
+          const hash = crypto.createHash("sha256").update(asar.getRawHeader(asarPath).headerString).digest("hex");
+          const plist = fs.readFileSync(path.join(contentsDir, "Info.plist"), "utf8");
+          assert.match(plist, /<key>ElectronAsarIntegrity<\/key>\s*<dict>\s*<key>Resources\/app\.asar<\/key>\s*<dict>\s*<key>algorithm<\/key>\s*<string>SHA256<\/string>\s*<key>hash<\/key>/);
+          assert.ok(plist.includes(`<string>${hash}</string>`));
+          assert.match(plist, /<key>LSBackgroundOnly<\/key>\s*<true\/>/);
+          hashes.push(hash);
+          return;
+        }
+        return operation();
+      },
+    });
+    assert.deepEqual(points, [runnerPoints.gatewayAsar.id, runnerPoints.macosBackgroundBundle.id, runnerPoints.macosEntrySignature.id]);
+  }
+
+  assert.notEqual(hashes[0], hashes[1]);
+  assert.ok(logs.some((line) => line.includes("Frameworks cache hit")));
+  assert.equal(fs.readFileSync(layout.asarPath, "utf8"), "official archive must remain unchanged");
+  assert.equal(fs.readFileSync(layout.executablePath, "utf8"), "official executable");
 });
 
 test("Linux executable candidates retain Codex names and add electron fallback", () => {
