@@ -25,7 +25,7 @@ Compared with the official option, OpenCodex still has advantages in several usa
 - Supports setting an access password to avoid unauthenticated exposure.
 - Provides a launcher for visual configuration of the listen address, port, access password, and more.
 - Supports displaying actual token consumption and sorting projects and sessions by recent updates.
-- Supports smart scheduling: when the model is set to Auto, it automatically selects a model and reasoning effort based on the task to save tokens.
+- Supports **smart scheduling**: when the model is set to Auto, it automatically selects a model and reasoning effort based on the task to save tokens, with customizable levels for different use cases.
 - Automatically follows the local Codex/ChatGPT Desktop runtime version on startup, keeping compatibility with new-version features.
 - Provides mobile-oriented optimizations.
 
@@ -54,8 +54,8 @@ Download and install:
 
 Two download channels are available:
 
-- [Releases](releases): Stable official versions; recommended.
-- [Artifacts](actions): Test builds automatically packaged by CI on each push for trying new features. Downloading Artifacts requires signing in to GitHub.
+- [Releases](https://github.com/RyensX/OpenCodex/releases): Stable official versions; recommended.
+- [Artifacts](https://github.com/RyensX/OpenCodex/actions): Test builds automatically packaged by CI on each push for trying new features. Downloading Artifacts requires signing in to GitHub.
 
 For macOS security prompts on first launch, see:
 

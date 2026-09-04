@@ -10,7 +10,7 @@ OpenCodex 的 macOS 安装包没有使用 Apple Developer ID 证书签名，也�
 
 这是 macOS Gatekeeper 的安全保护机制，并不表示系统已经检测到 OpenCodex 包含恶意软件，而是表示 Apple 无法验证其开发者身份和公证状态。
 
-请只从本项目的 [GitHub Releases](/releases) 页面下载安装包。
+请只从本项目的 [GitHub Releases](https://github.com/RyensX/OpenCodex/releases) 页面下载安装包。
 
 ## 推荐方法：在系统设置中允许打开
 
