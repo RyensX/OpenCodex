@@ -14,9 +14,13 @@ jobs:
     outputs:
       is_release: ${{ steps.version.outputs.is_release }}
       version: ${{ steps.version.outputs.version }}
+      should_build_artifacts: ${{ steps.changes.outputs.should_build_artifacts }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          # 需要比较 push 前后的提交，完整历史可以覆盖多提交 push 的变更范围。
+          fetch-depth: 0
 
       - name: Detect version bump commit
         id: version
@@ -45,9 +49,50 @@ jobs:
             echo "version=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check whether artifact build is needed
+        id: changes
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+          IS_RELEASE: ${{ steps.version.outputs.is_release }}
+        run: |
+          # 发布提交必须继续构建安装包，保证 release 任务始终有完整产物可用。
+          if [[ "$IS_RELEASE" == "true" ]]; then
+            echo "should_build_artifacts=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 新分支没有可比较的 before 提交时保守地执行构建，避免遗漏非文档变更。
+          if [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            echo "should_build_artifacts=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 比较失败时保守执行构建，避免因为 Git 历史异常而错误跳过安装包。
+          if ! changed_files="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"; then
+            echo "Unable to compare push commits; building artifacts" >&2
+            echo "should_build_artifacts=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          should_build_artifacts=false
+          while IFS= read -r changed_file; do
+            [[ -n "$changed_file" ]] || continue
+
+            # 只有根目录 README.md 或 docs/ 下的文档变更时跳过安装包构建。
+            if [[ "$changed_file" != "README.md" && "$changed_file" != docs/* ]]; then
+              should_build_artifacts=true
+              break
+            fi
+          done <<< "$changed_files"
+
+          echo "should_build_artifacts=$should_build_artifacts" >> "$GITHUB_OUTPUT"
+
   build-macos:
     name: Build macOS installer (${{ matrix.arch }})
     needs: metadata
+    if: needs.metadata.outputs.is_release == 'true' || needs.metadata.outputs.should_build_artifacts == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -108,6 +153,7 @@ jobs:
   build-windows:
     name: Build Windows installer
     needs: metadata
+    if: needs.metadata.outputs.is_release == 'true' || needs.metadata.outputs.should_build_artifacts == 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout repository
