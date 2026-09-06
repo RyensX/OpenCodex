@@ -128,6 +128,9 @@ const OPEN_IN_FOLDER_LOCALE_VALUE_AT_START_RE = new RegExp(
   "y"
 );
 const APPLICATION_MENU_TOKEN = ".applicationMenu";
+const PENDING_WORKTREES_TOKEN = "pending_worktrees";
+const PENDING_WORKTREES_FIND_RE =
+  /function ([A-Za-z0-9_$]+)\(e,t\)\{return e\.find\(e=>e\.clientThreadId===t\)\?\?null\}/;
 const APPLICATION_MENU_CAPABILITY_CHECK_AT_START_RE =
   /\b[A-Za-z_$][\w$]*\(\)\s*&&\s*[A-Za-z_$][\w$]*\??\.applicationMenu\s*!={1,2}\s*(?:null|void 0)\b/y;
 const APPLICATION_MENU_SERVICE_USAGE_RE =
@@ -332,6 +335,7 @@ function createStaticAssetService({
   const patchedOfficialPrefixes = Array.from(
     new Set([
       PATCHED_OFFICIAL_PREFIX,
+      "/official-patched-v8/",
       "/official-patched-v7/",
       "/official-patched-v6/",
       "/official-patched-v5/",
@@ -930,31 +934,31 @@ function createStaticAssetService({
       ? [
           '<link rel="preload" as="script" href="/codex-web-config.js">',
           `<link rel="preload" as="script" href="${OPENCODEX_RUNTIME_BOOTSTRAP_PATH}">`,
-          '<script src="/codex-web-config.js"></script>',
-          `<script src="${OPENCODEX_RUNTIME_BOOTSTRAP_PATH}"></script>`,
+          '<script defer src="/codex-web-config.js"></script>',
+          `<script defer src="${OPENCODEX_RUNTIME_BOOTSTRAP_PATH}"></script>`,
         ]
       : [
-          '<script src="/codex-web-config.js"></script>',
-          `<script src="${OPENCODEX_MODIFICATION_RUNTIME_PATH}"></script>`,
-          `<script src="${OPENCODEX_RUNTIME_COMPATIBILITY_PATH}"></script>`,
-          `<script src="${OPENCODEX_SIDEBAR_PREVIEW_PATH}"></script>`,
-          `<script src="${OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH}"></script>`,
-          `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
-          `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
-          ...[...BUILTIN_PROVIDER_FILES.keys()].map((url) => `<script src="${url}"></script>`),
-          `<script src="${CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH}"></script>`,
-          `<script src="${CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH}"></script>`,
-          `<script src="${CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH}"></script>`,
-          `<script src="${CODEX_SMART_SCHEDULING_SUMMARY_PATH}"></script>`,
-          `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
-          `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
+          '<script defer src="/codex-web-config.js"></script>',
+          `<script defer src="${OPENCODEX_MODIFICATION_RUNTIME_PATH}"></script>`,
+          `<script defer src="${OPENCODEX_RUNTIME_COMPATIBILITY_PATH}"></script>`,
+          `<script defer src="${OPENCODEX_SIDEBAR_PREVIEW_PATH}"></script>`,
+          `<script defer src="${OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH}"></script>`,
+          `<script defer src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
+          `<script defer src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
+          ...[...BUILTIN_PROVIDER_FILES.keys()].map((url) => `<script defer src="${url}"></script>`),
+          `<script defer src="${CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH}"></script>`,
+          `<script defer src="${CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH}"></script>`,
+          `<script defer src="${CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH}"></script>`,
+          `<script defer src="${CODEX_SMART_SCHEDULING_SUMMARY_PATH}"></script>`,
+          `<script defer src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
+          `<script defer src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
           // codec 先于 bridge 执行，确保新版 AppHost 的首批结构化帧可以立即编码。
-          `<script src="${CODEX_APP_HOST_MESSAGE_CODEC_PATH}"></script>`,
-          `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
-          `<script src="${CODEX_REMOTE_FILE_ACTIONS_PATH}"></script>`,
-          `<script src="${CODEX_WORKSPACE_ROOT_PICKER_PATH}"></script>`,
-          `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
-          `<script src="${OPENCODEX_MODIFICATION_ACTIVATE_PATH}"></script>`,
+          `<script defer src="${CODEX_APP_HOST_MESSAGE_CODEC_PATH}"></script>`,
+          `<script defer src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
+          `<script defer src="${CODEX_REMOTE_FILE_ACTIONS_PATH}"></script>`,
+          `<script defer src="${CODEX_WORKSPACE_ROOT_PICKER_PATH}"></script>`,
+          `<script defer src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
+          `<script defer src="${OPENCODEX_MODIFICATION_ACTIVATE_PATH}"></script>`,
         ];
     // manifest 在 Cloudflare Access 等前置认证后面也必须带同源凭据，否则 Chrome 可能拿不到受保护的 manifest。
     const base = [
@@ -1388,6 +1392,21 @@ ${pluginGatewayStateBootstrapScript()}
     return patched;
   }
 
+  function patchPendingWorktreesNullSafety(source) {
+    /**
+     * 在 Web 端发送新消息转入 client-local-thread 路由时，pending_worktrees atom 在部分时序可能为 null，
+     * 导致其辅助查询函数抛出 Cannot read properties of null (reading 'find')，引发 React 根 Error Boundary 崩溃。
+     */
+    if (!source.includes(PENDING_WORKTREES_TOKEN)) return source;
+    if (!PENDING_WORKTREES_FIND_RE.test(source)) return source;
+    return source
+      .replace(
+        PENDING_WORKTREES_FIND_RE,
+        "function $1(e,t){return e?.find?.(e=>e.clientThreadId===t)??null}"
+      )
+      .replace(/r=n\.find\(t=>t\.id===e\)\?\?null/g, "r=n?.find?.(t=>t.id===e)??null");
+  }
+
   function patchAppServerRequestScheduling(source) {
     /**
      * 官方调度器会把部分首屏必需读取与耗时的能力清单一起放进 background 队列。
@@ -1469,6 +1488,7 @@ ${pluginGatewayStateBootstrapScript()}
     return (
       /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath) ||
       data.includes(APPLICATION_MENU_TOKEN) ||
+      data.includes(PENDING_WORKTREES_TOKEN) ||
       data.includes(APP_SERVER_REQUEST_CLIENT_DISPATCH_ERROR) ||
       (!loopback &&
         (data.includes(OPEN_IN_FOLDER_LOCALE_TOKEN) ||
@@ -1488,6 +1508,7 @@ ${pluginGatewayStateBootstrapScript()}
       ? patchHistorySignalsCompatible(source)
       : source;
     patched = patchApplicationMenuCompatible(patched);
+    patched = patchPendingWorktreesNullSafety(patched);
     patched = patchRequestSchedulingCompatible(patched);
     if (!loopback) {
       patched = patchPluginImageCompatible(patched);
