@@ -17,10 +17,13 @@
   const KEYBOARD_OPENING_GUARD_MS = 900;
   const KEYBOARD_VISIBLE_THRESHOLD_PX = 80;
   const APP_SHELL_MARKER_SELECTOR =
-    ".app-shell-main-content-viewport,.thread-scroll-container,[data-thread-find-composer='true']";
-  const THREAD_SCROLL_SELECTOR = ".thread-scroll-container";
-  const THREAD_FOOTER_SELECTOR = "[data-thread-scroll-footer='true']";
-  const COMPOSER_SELECTOR = "[data-thread-find-composer='true']";
+    ".app-shell-main-content-viewport,.thread-scroll-container,[data-thread-find-composer='true'],[data-app-shell-main-content-layout],[data-codex-composer-root]";
+  const THREAD_SCROLL_SELECTOR =
+    ".thread-scroll-container,[data-app-shell-main-content-layout] [role='main']";
+  const THREAD_FOOTER_SELECTOR =
+    "[data-thread-scroll-footer='true'],[data-codex-composer-root]";
+  const COMPOSER_SELECTOR =
+    "[data-thread-find-composer='true'],[data-codex-composer-root]";
   const DEBUG_GLOBAL = "__opencodexIosFixDebug";
   const SETTLE_DELAYS_MS = [80, 260, 600];
 
@@ -291,7 +294,10 @@
         @media (max-width: 820px), (pointer: coarse) {
           html[data-opencodex-ios-fix="true"] {
             --opencodex-ios-app-height: var(--opencodex-ios-visual-viewport-height, 100svh);
-            --opencodex-ios-footer-padding-bottom: max(env(safe-area-inset-bottom, 0px), 8px);
+            /* Home Indicator 安全区之外再保留基础间距，避免 composer 操作行贴底或被裁切。 */
+            --opencodex-ios-footer-padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+            --spacing-token-safe-header-left: env(safe-area-inset-left, 0px) !important;
+            --spacing-token-safe-header-right: env(safe-area-inset-right, 0px) !important;
             --thread-floating-content-bottom-inset: 0px !important;
             box-sizing: border-box !important;
             width: 100vw !important;
@@ -349,9 +355,19 @@
             min-height: var(--opencodex-ios-app-height) !important;
           }
 
+          html[data-opencodex-ios-fix="true"] header[data-app-shell-header-edge-scroll] > [data-test-id="header-shell-slot"]:first-child {
+            /* 官方 start slot 会继承桌面侧栏宽度；窄屏收回为内容宽度，让左侧按钮回到安全边距。 */
+            inline-size: auto !important;
+            min-inline-size: 0 !important;
+            width: auto !important;
+            min-width: 0 !important;
+          }
+
           html[data-opencodex-ios-fix="true"] .main-surface,
           html[data-opencodex-ios-fix="true"] .app-shell-main-content-viewport,
           html[data-opencodex-ios-fix="true"] .app-shell-main-content-frame,
+          html[data-opencodex-ios-fix="true"] [data-app-shell-main-surface],
+          html[data-opencodex-ios-fix="true"] [data-app-shell-main-content-layout],
           html[data-opencodex-ios-fix="true"] .thread-scroll-container {
             box-sizing: border-box !important;
             min-height: 0 !important;
@@ -375,20 +391,24 @@
             -webkit-overflow-scrolling: touch;
           }
 
-          html[data-opencodex-ios-fix="true"] [data-thread-scroll-footer="true"] {
+          html[data-opencodex-ios-fix="true"] [data-thread-scroll-footer="true"],
+          html[data-opencodex-ios-fix="true"] [data-codex-composer-root] {
             bottom: 0 !important;
             margin-bottom: 0 !important;
             padding-bottom: var(--opencodex-ios-footer-padding-bottom) !important;
           }
 
           html[data-opencodex-ios-fix="true"][data-opencodex-ios-keyboard-visible="true"] [data-thread-scroll-footer="true"],
-          html[data-opencodex-ios-fix="true"] [data-thread-scroll-footer="true"]:focus-within {
+          html[data-opencodex-ios-fix="true"] [data-thread-scroll-footer="true"]:focus-within,
+          html[data-opencodex-ios-fix="true"][data-opencodex-ios-keyboard-visible="true"] [data-codex-composer-root],
+          html[data-opencodex-ios-fix="true"] [data-codex-composer-root]:focus-within {
             /* 键盘态不能叠加 footer padding，否则会在键盘上方留下额外 DOM 空白。 */
             padding-bottom: 0 !important;
             margin-bottom: 0 !important;
           }
 
           html[data-opencodex-ios-fix="true"] [data-thread-find-composer="true"][data-thread-find-composer="true"],
+          html[data-opencodex-ios-fix="true"] [data-codex-composer-root][data-codex-composer-root],
           html[data-opencodex-ios-fix="true"][data-opencodex-ios-keyboard-optimization="true"] [data-thread-find-composer="true"] {
             /* 禁用移动键盘插件的 translate 避让，避免和 visualViewport 收缩重复计算。 */
             transform: translate3d(0, 0, 0) !important;
