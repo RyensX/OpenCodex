@@ -379,6 +379,33 @@ test("compatibility capabilities preserve renderer HTML output byte for byte", (
   compatibilityService.dispose();
 });
 
+test("renderer defers injected runtime only when official scripts preserve its execution order", (t) => {
+  const cases = [
+    ["module", '<script data-official-case="module" type="module" src="./assets/module.js"></script>', true],
+    ["deferred-classic", '<script data-official-case="deferred-classic" defer src="./assets/legacy.js"></script>', true],
+    ["data", '<script data-official-case="data" type="application/json">{}</script>', true],
+    ["inline-classic", '<script data-official-case="inline-classic">window.legacyStarted=true</script>', false],
+    ["classic", '<script data-official-case="classic" src="./assets/legacy.js"></script>', false],
+    ["async-module", '<script data-official-case="async-module" type="module" async src="./assets/module.js"></script>', false],
+  ];
+
+  for (const [name, officialScript, deferred] of cases) {
+    const webviewDir = makeOfficialWebviewDir(t);
+    fs.writeFileSync(
+      path.join(webviewDir, "index.html"),
+      `<html><head>${officialScript}</head><body><div id="root"></div></body></html>`
+    );
+    const html = createService(webviewDir).createRendererResponse();
+    const deferAttribute = deferred ? " defer" : "";
+    const configScript = `<script${deferAttribute} src="/codex-web-config.js"></script>`;
+    const bootstrapScript = `<script${deferAttribute} src="${OPENCODEX_RUNTIME_BOOTSTRAP_PATH}"></script>`;
+
+    assert.equal(html.includes(configScript), true, name);
+    assert.equal(html.includes(bootstrapScript), true, name);
+    assert.ok(html.indexOf(configScript) < html.indexOf(`data-official-case="${name}"`), name);
+  }
+});
+
 test("runtime bootstrap honors an explicit gzip rejection", (t) => {
   const service = createService(makeOfficialWebviewDir(t));
   const identity = makeResponseRecorder();
@@ -1562,8 +1589,8 @@ test("external plugins require an SDK-compatible ESM v2 entry and never execute 
     assert.match(aggregateSource, /modern-plugin\/entry\.mjs/);
     assert.doesNotMatch(aggregateSource, /must not execute/);
     const html = service.createRendererResponse();
-    const codecIndex = html.indexOf('<script src="/codex-app-host-message-codec.js"></script>');
-    const bridgeIndex = html.indexOf('<script src="/codex-bridge-polyfill.js"></script>');
+    const codecIndex = html.indexOf('<script defer src="/codex-app-host-message-codec.js"></script>');
+    const bridgeIndex = html.indexOf('<script defer src="/codex-bridge-polyfill.js"></script>');
     assert.ok(codecIndex >= 0 && bridgeIndex > codecIndex);
   } finally {
     if (previousRoots === undefined) delete process.env.OPENCODEX_PLUGIN_DIRS;
