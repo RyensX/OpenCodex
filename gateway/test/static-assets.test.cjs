@@ -1778,3 +1778,41 @@ test("patched asset cache honors explicit encoding exclusions and evicts old var
   assert.equal(service.assetCacheDiagnostics().entries, 1);
   assert.equal(service.assetCacheDiagnostics().bytes <= service.assetCacheDiagnostics().maxBytes, true);
 });
+
+test("official app-menu icons resolve from the site-root /apps/ prefix", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const iconPath = path.join(webviewDir, "apps");
+  fs.mkdirSync(iconPath, { recursive: true });
+  fs.writeFileSync(path.join(iconPath, "file-explorer.png"), Buffer.from("89504e470d0a1a0a", "hex"));
+  const service = createService(webviewDir);
+
+  // 官方 main 运行时给出相对路径 apps/file-explorer.png，浏览器按站点根解析成 /apps/。
+  assert.equal(
+    service.staticFile("/apps/file-explorer.png"),
+    path.join(iconPath, "file-explorer.png")
+  );
+  const res = makeResponseRecorder();
+  service.serveFile(
+    { headers: { host: "localhost:3737" } },
+    res,
+    service.staticFile("/apps/file-explorer.png"),
+    200,
+    "/apps/file-explorer.png"
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.headers["content-type"], "image/png");
+  assert.equal(res.headers["cache-control"], "public, max-age=3600");
+
+  // 官方相对路径在深链路由下会带上前缀，同样要命中的是官方图标目录。
+  assert.equal(
+    service.staticFile("/settings/thread/apps/file-explorer.png"),
+    path.join(iconPath, "file-explorer.png")
+  );
+
+  // 图标映射只能读单个图片文件，不能穿透成整个 webview 目录的第二个读入口。
+  assert.equal(service.staticFile("/apps/../index.html"), null);
+  assert.equal(service.staticFile("/apps/%2e%2e/index.html"), null);
+  assert.equal(service.staticFile("/apps/sub/icon.png"), null);
+  assert.equal(service.staticFile("/apps/missing.png"), null);
+  assert.equal(service.staticFile("/apps/icon.txt"), null);
+});

@@ -80,6 +80,11 @@ const OFFICIAL_LOADING_SHIMMER_POWER_GUARD = [
   "</style>",
 ].join("");
 const WEB_SHELL_ASSETS_DIR = path.join(WEB_SHELL_DIR, "assets");
+/**
+ * 官方 main 运行时把“打开方式”菜单图标写成相对路径 `apps/<name>.png`。
+ * 浏览器按当前页面 URL 解析它，因此站点根得到 /apps/，深链路由得到 /<route>/apps/。
+ */
+const OFFICIAL_APP_ICON_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|svg|webp|avif|ico|jpe?g|gif)$/i;
 const OPENCODEX_MODIFICATION_RUNTIME_FILE = path.join(
   __dirname,
   "..",
@@ -1060,6 +1065,16 @@ function createStaticAssetService({
     return fileName ? `/official/assets/${fileName}` : null;
   }
 
+  /**
+   * 把浏览器解析出的 apps 图标请求映射回官方 webview/apps/ 目录。
+   * 只接受单个图片文件名，避免 /apps/ 变成整个 webview 目录的第二个读入口；
+   * `..` 与 `%2e%2e` 都进不了这条正则，越界路径还会被 locateOfficialAsset 再校验一次。
+   */
+  function locateOfficialAppIcon(relPath) {
+    if (!OFFICIAL_APP_ICON_FILE.test(relPath)) return null;
+    return locateOfficialAsset(`apps/${relPath}`);
+  }
+
   function officialAssetFileNames(officialBundle = getOfficialBundle()) {
     if (!officialBundle || !officialBundle.webviewDir) return [];
     if (officialAssetFileNamesCache?.webviewDir === officialBundle.webviewDir) {
@@ -1519,6 +1534,9 @@ ${pluginGatewayStateBootstrapScript()}
       const rel = reqPath.slice("/official/".length);
       return locateOfficialAsset(rel);
     }
+    // 官方图标相对路径会带上当前路由前缀，所以按最后一段 apps/<file> 匹配。
+    const appIconMatch = /\/apps\/([^/]+)$/.exec(reqPath);
+    if (appIconMatch) return locateOfficialAppIcon(appIconMatch[1]);
     return null;
   }
 
@@ -1548,6 +1566,8 @@ ${pluginGatewayStateBootstrapScript()}
     if (reqPath.startsWith("/official/assets/")) return "public, max-age=31536000, immutable";
     if (reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX)) return "public, max-age=86400";
     if (reqPath.startsWith("/official/")) return "public, max-age=3600";
+    // 图标名不带 content hash，只做短期缓存，升级换图标后最多一小时内自行刷新。
+    if (/\/apps\/[^/]+\.(?:png|svg|webp|avif|ico|jpe?g|gif)$/i.test(reqPath)) return "public, max-age=3600";
     if (WEB_SHELL_STATIC_FILES.has(reqPath) || reqPath.startsWith(OPENCODEX_PLUGIN_URL_PREFIX)) {
       // 文件名不带 hash，必须每次验证；内容未变时允许 304，避免远端刷新重复传输整套 Web 扩展脚本。
       return "private, no-cache, must-revalidate";
