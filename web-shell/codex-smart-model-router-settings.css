@@ -417,6 +417,8 @@
 .opencodex-router-choice-popover {
   box-sizing: border-box;
   overscroll-behavior: contain;
+  /* 显式设置菜单底色，避免官方工具类缺失时透出下方内容。 */
+  background-color: var(--color-token-dropdown-background, var(--color-token-main-surface-primary, #fff));
 }
 
 .opencodex-router-choice-detail {
