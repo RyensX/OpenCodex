@@ -15,6 +15,7 @@ const {
   markLatestReleaseChecking,
 } = require("./latest-release.cjs");
 const { createBoundedLogWriter } = require("./log-writer.cjs");
+const { openPwaOrBrowser } = require("./pwa-launcher.cjs");
 const { OPENCODEX_VERSION_LABEL } = require("../shared/app-version.cjs");
 const { PREFERRED_LANGUAGES_ENV, formatMessage, resolveOpenCodexI18n } = require("../shared/i18n/index.cjs");
 const {
@@ -678,7 +679,7 @@ function checkLatestReleaseForForeground() {
 }
 
 function openOpenCodexUrl() {
-  // 只有 launcher 主动打开浏览器时固定使用 localhost；展示和复制仍走 primaryUrl 方便局域网访问。
+  // launcher 打开本机 PWA 或浏览器时固定使用 localhost；展示和复制仍走 primaryUrl 方便局域网访问。
   return gatewayState.port ? `http://localhost:${gatewayState.port}` : "";
 }
 
@@ -686,9 +687,22 @@ function canOpenOpenCodex() {
   return !!gatewayState.child && !gatewayState.child.killed && !!openOpenCodexUrl();
 }
 
-function openOpenCodex() {
+let openOpenCodexPromise = null;
+
+async function openOpenCodex() {
   const openUrl = openOpenCodexUrl();
-  if (canOpenOpenCodex()) shell.openExternal(openUrl);
+  if (!canOpenOpenCodex()) return buildState();
+  // 按钮和托盘共用一次检测，连续点击不会重复拉起应用窗口。
+  if (!openOpenCodexPromise) {
+    openOpenCodexPromise = openPwaOrBrowser(openUrl, {
+      shell,
+      desktopPath: app.getPath("desktop"),
+      log: (message) => appendLog(`[launcher] ${message}\n`),
+    }).catch((error) => {
+      appendLog(`[launcher] open OpenCodex failed: ${error.message}\n`, { urgent: true });
+    }).finally(() => { openOpenCodexPromise = null; });
+  }
+  await openOpenCodexPromise;
   return buildState();
 }
 
