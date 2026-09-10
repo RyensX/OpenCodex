@@ -2424,7 +2424,8 @@ function buildGatewayStatus() {
         pendingCount,
         abnormalCount: abnormalPoints.length,
         abnormalPoints,
-        ok: abnormalPoints.length === 0 && pendingCount === 0,
+        // 浏览器认证前尚未上报属于待检查，保留状态与数量，但仅明确异常影响健康结果。
+        ok: abnormalPoints.length === 0,
       };
     }
   } catch {
