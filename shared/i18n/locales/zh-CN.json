@@ -103,7 +103,7 @@
   "web.settings.notificationTestBody": "后续官方通知将通过当前浏览器显示。",
   "web.settings.notificationUnsupported": "当前浏览器不支持",
   "web.settings.developerDiagnostics": "开发者诊断",
-  "web.settings.runtimeCompatibility": "官方运行时兼容性",
+  "web.settings.runtimeCompatibility": "运行时兼容性",
   "web.settings.runtimeCompatibilityDescription": "查看修改点的定位、应用、验证和命中状态",
   "web.settings.about": "关于",
   "web.settings.star": "如果觉得有用，欢迎 Star 支持",

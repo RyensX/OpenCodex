@@ -1,6 +1,6 @@
 {
-  "web.runtimeCompatibility.pageTitle": "OpenCodex Virtual Skeleton Diagnostics",
-  "web.runtimeCompatibility.title": "OpenCodex Virtual Skeleton Diagnostics",
+  "web.runtimeCompatibility.pageTitle": "Runtime Compatibility Diagnostics",
+  "web.runtimeCompatibility.title": "Runtime Compatibility Diagnostics",
   "web.runtimeCompatibility.loading": "Reading runtime status…",
   "web.runtimeCompatibility.autoRefresh": "Auto refresh",
   "web.runtimeCompatibility.pluginTag": "Plugin",

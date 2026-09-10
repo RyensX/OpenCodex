@@ -103,7 +103,7 @@
   "web.settings.notificationTestBody": "Future official notifications will be shown by this browser.",
   "web.settings.notificationUnsupported": "Not supported by this browser",
   "web.settings.developerDiagnostics": "Developer diagnostics",
-  "web.settings.runtimeCompatibility": "Official runtime compatibility",
+  "web.settings.runtimeCompatibility": "Runtime compatibility",
   "web.settings.runtimeCompatibilityDescription": "Inspect modification-point location, application, verification, and hit status",
   "web.settings.about": "About",
   "web.settings.star": "Star OpenCodex on GitHub",
