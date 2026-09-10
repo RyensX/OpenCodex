@@ -373,6 +373,16 @@ export function createModificationRuntime(): ModificationRuntime {
     return state;
   }
 
+  function invalidateLocation(contribution: BoundContribution): void {
+    const state = stateFor(contribution);
+    // 定位失效后旧的成功状态不再代表当前能力；这只是诊断失效，并不声称已经回滚代码。
+    state.application = "pending";
+    state.verification = "pending";
+    state.activation = "inactive";
+    state.exercise = "not-exercised";
+    state.hitCount = 0;
+  }
+
   const reporter = Object.freeze<AdapterExecutionReporter>({
     resolving(contribution) {
       stateFor(contribution).location = "resolving";
@@ -383,16 +393,19 @@ export function createModificationRuntime(): ModificationRuntime {
       state.reason = "";
     },
     unsupported(contribution, reason) {
+      invalidateLocation(contribution);
       const state = stateFor(contribution);
       state.location = "unsupported";
       state.reason = String(reason || "当前运行时不支持该目标");
     },
     ambiguous(contribution, reason) {
+      invalidateLocation(contribution);
       const state = stateFor(contribution);
       state.location = "ambiguous";
       state.reason = String(reason || "定位结果不唯一");
     },
     stale(contribution, reason) {
+      invalidateLocation(contribution);
       const state = stateFor(contribution);
       state.location = "stale";
       state.reason = String(reason || "定位结果已经失效");
@@ -444,10 +457,12 @@ export function createModificationRuntime(): ModificationRuntime {
     },
     hit(contribution, count = 1) {
       const state = stateFor(contribution);
+      if (state.location !== "resolved") return;
       state.exercise = "active";
       state.hitCount += Math.max(1, Math.trunc(Number(count) || 1));
     },
     failed(contribution, phase, error) {
+      if (phase === "location") invalidateLocation(contribution);
       const state = stateFor(contribution);
       state[phase] = "failed";
       state.reason = failureReason(error);

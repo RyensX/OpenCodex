@@ -35,10 +35,11 @@ const OPTIMIZED_NATIVE_PET_PREWARM_PATTERN =
   /async prewarm\([A-Za-z_$][\w$]*\)\{if\(process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`\|\|this\.window!=null\|\|this\.openingWindowPromise!=null\|\|this\.isAppQuitting\)return;/g;
 const OPTIMIZED_NATIVE_PET_RESTORE_PATTERN =
   /async restoreOpenState\(([A-Za-z_$][\w$]*)\)\{process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME!==`1`&&this\.globalState\.get\(`electron-avatar-overlay-open`\)===!0&&await this\.open\(\1\)\}/g;
+// 压缩后的枚举导出名会随官方构建变化，使用平台、Prod 和注册参数共同约束定位。
 const MAC_PUSH_REGISTRATION_PATTERN =
-  /process\.platform!==`darwin`\|\|([A-Za-z_$][\w$]*)!==([A-Za-z_$][\w$]*)\.a\.Prod\|\|([A-Za-z_$][\w$]*)\(\{appServerClient:/g;
+  /process\.platform!==`darwin`\|\|([A-Za-z_$][\w$]*)!==([A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]*\.Prod\|\|([A-Za-z_$][\w$]*)\(\{appServerClient:/g;
 const OPTIMIZED_MAC_PUSH_REGISTRATION_PATTERN =
-  /process\.platform!==`darwin`\|\|process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`\|\|([A-Za-z_$][\w$]*)!==([A-Za-z_$][\w$]*)\.a\.Prod\|\|([A-Za-z_$][\w$]*)\(\{appServerClient:/g;
+  /process\.platform!==`darwin`\|\|process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`\|\|([A-Za-z_$][\w$]*)!==([A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]*\.Prod\|\|([A-Za-z_$][\w$]*)\(\{appServerClient:/g;
 const GIT_ORIGIN_RESOLVER_PATTERN =
   /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=await \3\.getStableMetadata\(\2,\4\);if\(\5==null\)return null;let ([A-Za-z_$][\w$]*)=\3\.getWorktreeRepositoryForRoot\(\5\.root,\4\),([A-Za-z_$][\w$]*)=await \3\.getRepoRepository\(\2,\4\);return \7==null\?null:\{dir:\2,root:\6\.root,originUrl:await \7\.getOriginUrl\(\),commonDir:\7\.getCommonDir\(\)\}\}/g;
 const GIT_LOCAL_PREFILTER_PATTERN =
@@ -160,7 +161,11 @@ class OfficialRuntimeOptimizer {
         const recognizedCount =
           matchCount(source, MAC_PUSH_REGISTRATION_PATTERN) +
           matchCount(source, OPTIMIZED_MAC_PUSH_REGISTRATION_PATTERN);
-        const supported = recognizedCount >= markerCount;
+        // 候选必须与标记一一对应；额外候选同样属于歧义，不能改写无法确认的入口。
+        const patchedPush = this.patchMacPushRegistration(optimized);
+        const supported = recognizedCount === markerCount &&
+          matchCount(patchedPush, OPTIMIZED_MAC_PUSH_REGISTRATION_PATTERN) === markerCount &&
+          matchCount(patchedPush, MAC_PUSH_REGISTRATION_PATTERN) === 0;
         if (supported) macPushReadyFileCount += 1;
         else unsupportedParts.push("mac-push");
         optimized = this.runPatchPoint({
@@ -170,7 +175,7 @@ class OfficialRuntimeOptimizer {
           candidateCount: recognizedCount,
           expectedCandidates: markerCount,
           supported,
-          patcher: (value) => this.patchMacPushRegistration(value),
+          patcher: (value) => supported ? patchedPush : value,
         });
       }
 
@@ -332,7 +337,6 @@ class OfficialRuntimeOptimizer {
     // 兼容骨架只增加状态和受控入口；布局部分变化时继续沿用旧版“安全命中部分仍应用”的行为。
     if (!supported || expectedCandidates < 1) {
       try {
-        this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
         this.modificationCoordinator.locationFailure(
           point,
           candidateCount > expectedCandidates ? "ambiguous" : "unsupported",
@@ -357,8 +361,8 @@ class OfficialRuntimeOptimizer {
   private reportAbsentPoint(point: any, markerFileCount: number, disableWhenAbsent = false): void {
     if (markerFileCount > 0) return;
     try {
-      this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
       if (disableWhenAbsent) {
+        this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
         // 能力整体不存在与“官方布局变化但仍存在”不同，前者不应触发降级告警。
         this.modificationCoordinator.setEnabled(point, false, "Official capability is not present");
         return;

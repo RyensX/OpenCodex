@@ -234,8 +234,8 @@ class LocalCodexBundleProvider {
     for (const group of groups) {
       for (const point of group.points) {
         try {
-          this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
           if (group.state === "not-present" && group.disableWhenAbsent) {
+            this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
             // 缓存命中必须复现首次优化的“不适用”语义，避免重启后又把新版运行时误报为降级。
             this.modificationCoordinator.setEnabled(point, false, "Official capability is not present");
             continue;
@@ -247,6 +247,8 @@ class LocalCodexBundleProvider {
               new Error(group.state === "not-present" ? "Official capability is not present" : "Cached locator did not resolve"),
             );
             this.modificationCoordinator.useFallback(point, "Official behavior");
+          } else {
+            this.modificationCoordinator.execute(point, () => undefined, { verify: () => true });
           }
         } catch {}
       }

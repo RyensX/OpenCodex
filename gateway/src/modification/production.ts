@@ -25,6 +25,7 @@ export interface ProductionExecution<TValue> {
 }
 
 export interface ProductionExecutionOptions<TValue> {
+  readonly locationFailure?: { readonly status: "unsupported" | "ambiguous" | "stale" | "failed"; readonly error: unknown };
   readonly verify?: (value: TValue) => boolean;
   readonly rollback?: (value: TValue) => void;
   readonly hitOnSuccess?: boolean;
@@ -85,6 +86,7 @@ export interface ProductionModificationCoordinator {
 
 interface PointExecutionState {
   readonly point: ModificationPointDefinition;
+  readonly locationFailure?: ProductionExecutionOptions<unknown>["locationFailure"];
   readonly callbacks: Set<(count: number) => void>;
   readonly failureCallbacks: Set<(phase: FailurePhase, error: unknown) => void>;
   readonly locationCallbacks: Set<(
@@ -170,6 +172,24 @@ export function createProductionModificationCoordinator(options: {
                 reporter.unsupported(contribution, "当前宿主没有注册对应生产实现");
                 continue;
               }
+              const locationFailure = (
+                status: "unsupported" | "ambiguous" | "stale" | "failed",
+                error: unknown,
+              ) => {
+                const reason = error instanceof Error ? error.message : String(error || status);
+                if (status === "unsupported") reporter.unsupported(contribution, reason);
+                else if (status === "ambiguous") reporter.ambiguous(contribution, reason);
+                else if (status === "stale") reporter.stale(contribution, reason);
+                else reporter.failed(contribution, "location", error);
+              };
+              const fallback = (reason: string) => reporter.fallback(contribution, reason);
+              state.locationCallbacks.add(locationFailure);
+              state.fallbackCallbacks.add(fallback);
+              // 定位失败直接进入降级状态，不执行空操作来伪造后续阶段成功。
+              if (state.locationFailure) {
+                locationFailure(state.locationFailure.status, state.locationFailure.error);
+                continue;
+              }
               reporter.resolved(contribution, {
                 candidateCount: 1,
                 fingerprint: `${options.host}:${state.point.id}`,
@@ -203,33 +223,18 @@ export function createProductionModificationCoordinator(options: {
             if (!state) throw new Error(`修改点没有生产实现：${contribution.point.id}`);
             const callback = (count: number) => reporter.hit(contribution, count);
             const fail = (phase: FailurePhase, error: unknown) => reporter.failed(contribution, phase, error);
-            const locationFailure = (
-              status: "unsupported" | "ambiguous" | "stale" | "failed",
-              error: unknown,
-            ) => {
-              const reason = error instanceof Error ? error.message : String(error || status);
-              if (status === "unsupported") reporter.unsupported(contribution, reason);
-              else if (status === "ambiguous") reporter.ambiguous(contribution, reason);
-              else if (status === "stale") reporter.stale(contribution, reason);
-              else reporter.failed(contribution, "location", error);
-            };
-            const fallback = (reason: string) => reporter.fallback(contribution, reason);
             const enabledCallback = (enabled: boolean, reason: string) => {
               if (enabled) reporter.enabled(contribution);
               else reporter.disabled(contribution, reason);
             };
             state.callbacks.add(callback);
             state.failureCallbacks.add(fail);
-            state.locationCallbacks.add(locationFailure);
-            state.fallbackCallbacks.add(fallback);
             state.enabledCallbacks.add(enabledCallback);
             if (state.enabled != null) enabledCallback(state.enabled, "修改点已关闭");
             if (state.enabled !== false && state.hitCount > 0) callback(state.hitCount);
             return () => {
               state.callbacks.delete(callback);
               state.failureCallbacks.delete(fail);
-              state.locationCallbacks.delete(locationFailure);
-              state.fallbackCallbacks.delete(fallback);
               state.enabledCallbacks.delete(enabledCallback);
             };
           },
@@ -247,7 +252,10 @@ export function createProductionModificationCoordinator(options: {
           dispose() {
             let firstError: unknown = null;
             for (const state of [...contributionStates].reverse()) {
-              if (!state?.installed) continue;
+              if (!state) continue;
+              state.locationCallbacks.clear();
+              state.fallbackCallbacks.clear();
+              if (!state.installed) continue;
               try {
                 state.rollback?.(state.value);
               } catch (error) {
@@ -294,6 +302,7 @@ export function createProductionModificationCoordinator(options: {
       const executionOptions = entry.options || {};
       return {
         point: entry.point,
+        locationFailure: executionOptions.locationFailure,
         callbacks: new Set<(count: number) => void>(),
         failureCallbacks: new Set<(phase: FailurePhase, error: unknown) => void>(),
         locationCallbacks: new Set(),
@@ -469,8 +478,11 @@ export function createProductionModificationCoordinator(options: {
     status: "unsupported" | "ambiguous" | "stale" | "failed",
     error: unknown,
   ): void {
-    const state = states.get(point);
-    if (!state) throw new Error(`修改点尚未由生产 Provider 激活：${point.id}`);
+    if (!states.has(point)) {
+      executeBatch([{ point, operation: () => undefined, options: { locationFailure: { status, error } } }]);
+      return;
+    }
+    const state = states.get(point)!;
     for (const callback of state.locationCallbacks) callback(status, error);
     publish(state);
   }

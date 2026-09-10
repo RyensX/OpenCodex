@@ -1313,3 +1313,59 @@ test("Linux executable candidates retain Codex names and add electron fallback",
   assert.ok(candidates.includes(path.join(appRoot, "codex-desktop")));
   assert.ok(candidates.includes(path.join(appRoot, "electron")));
 });
+
+// 验证压缩导出名变化后的真实执行语义，同时覆盖旧版与缓存幂等性。
+for (const exportName of ["a", "i", "$new"]) {
+  test(`macOS push accepts enum export ${exportName} and preserves platform behavior`, (t) => {
+    const bundleDir = temporaryDirectory(t);
+    const mainPath = path.join(bundleDir, ".vite", "build", "main-push.js");
+    writeFile(mainPath, `process.platform!==\`darwin\`||flavor!==a.${exportName}.Prod||register({appServerClient:client}).catch(e=>logger.warning(\`Failed to register macOS push notifications\`,e));`);
+    const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+    assert.equal(optimizer.optimize(bundleDir).macPushRegistration, "gateway-disabled");
+    const source = fs.readFileSync(mainPath, "utf8");
+    for (const [platform, hidden, flavor, expected] of [["darwin", "1", "prod", 0], ["darwin", "0", "prod", 1], ["linux", "0", "prod", 0], ["darwin", "0", "dev", 0]]) {
+      let calls = 0;
+      new Function("process", "flavor", "a", "register", "client", "logger", source)(
+        { platform, env: { OPENCODEX_GATEWAY_HIDDEN_RUNTIME: hidden } }, flavor,
+        { [exportName]: { Prod: "prod" } }, () => { calls++; return Promise.resolve(); }, {}, {},
+      );
+      assert.equal(calls, expected);
+    }
+    assert.equal(optimizer.optimize(bundleDir).patchedFileCount, 0);
+    assert.equal(fs.readFileSync(mainPath, "utf8"), source);
+  });
+}
+
+test("unsupported push stays inactive on fresh optimization and cache reuse", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  writeFile(path.join(bundleDir, ".vite", "build", "main-push.js"), "console.log(`Failed to register macOS push notifications`)");
+  for (const cached of [false, true]) {
+    const service = createCompatibilityService();
+    try {
+      if (cached) new LocalCodexBundleProvider({ compatibilityService: service }).reportCachedOptimizationCompatibility({ macPushRegistration: "unsupported-layout" });
+      else new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem(), compatibilityService: service }).optimize(bundleDir);
+      const point = service.registry.point(staticMainPoints.macosPushRegistration.id);
+      assert.equal(point.location.status, "unsupported");
+      assert.equal(point.application.status, "pending");
+      assert.equal(point.verification.status, "pending");
+      assert.equal(point.activation.status, "inactive");
+      assert.equal(point.fallback.active, true);
+    } finally { service.dispose(); }
+  }
+});
+
+// 多余候选可能属于无关调用，必须保留原文并报告歧义。
+test("ambiguous macOS push candidates are not patched", (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const mainPath = path.join(bundleDir, ".vite", "build", "main-push.js");
+  const call = "process.platform!==`darwin`||g!==a.i.Prod||register({appServerClient:client});";
+  const source = call + call + "console.log(`Failed to register macOS push notifications`);";
+  writeFile(mainPath, source);
+  const service = createCompatibilityService();
+  try {
+    const result = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem(), compatibilityService: service }).optimize(bundleDir);
+    assert.equal(result.macPushRegistration, "unsupported-layout");
+    assert.equal(fs.readFileSync(mainPath, "utf8"), source);
+    assert.equal(service.registry.point(staticMainPoints.macosPushRegistration.id).location.status, "ambiguous");
+  } finally { service.dispose(); }
+});

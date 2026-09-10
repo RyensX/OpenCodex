@@ -262,3 +262,31 @@ test("production batch continues cleanup after one business rollback fails", asy
   await assert.doesNotReject(batch.dispose());
   assert.deepEqual(rollbacks, [...applications].reverse());
 });
+
+// 首次定位失败以及激活后的定位失效都不能保留成功状态或被迟到命中重新激活。
+for (const initiallyActive of [false, true]) {
+  for (const status of ["unsupported", "ambiguous", "stale", "failed"]) {
+    test(`location ${status} clears downstream success (active=${initiallyActive})`, () => {
+      const snapshots = [];
+      const coordinator = createProductionModificationCoordinator({
+        host: "gateway", publish(point) { snapshots.push(point); },
+      });
+      const point = gatewayPoints.notification;
+      if (initiallyActive) coordinator.execute(point, () => "installed");
+      coordinator.locationFailure(point, status, new Error("layout changed"));
+      coordinator.useFallback(point, "Official behavior");
+      coordinator.effect(point).emit();
+      const snapshot = snapshots.at(-1);
+      for (const item of snapshot.contributions) {
+        assert.equal(item.location, status);
+        assert.equal(item.application, "pending");
+        assert.equal(item.verification, "pending");
+        assert.equal(item.activation, "inactive");
+        assert.equal(item.exercise, "not-exercised");
+        assert.equal(item.hitCount, 0);
+        assert.equal(item.fallbackActive, true);
+      }
+      if (!initiallyActive) assert.ok(snapshots.every(p => p.contributions.every(c => c.application !== "applied")));
+    });
+  }
+}
