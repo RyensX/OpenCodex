@@ -448,6 +448,10 @@ function createRequestHandler({
     if (pathname === "/api/auth/status") return handleAuthStatus(req, res, url);
     if (pathname === "/api/auth/login") return handleAuthLogin(req, res);
     if (pathname === "/api/auth/logout") return handleAuthLogout(req, res, url);
+    if (pathname === "/api/health") {
+      // 健康检查用于外部探活，必须在通用认证门之前允许匿名读取。
+      return sendJson(res, 200, buildGatewayStatus(), { "cache-control": "no-store" });
+    }
     if (pathname === "/api/service/restart") return handleServiceRestart(req, res);
     if (pathname === "/login") return send(res, 302, { location: "/" }, "");
     if (pathname === "/api/launcher/status") {
@@ -529,10 +533,6 @@ function createRequestHandler({
         )
       );
       return send(res, 200, response.headers, response.body);
-    }
-
-    if (pathname === "/api/health") {
-      return sendJson(res, 200, buildGatewayStatus());
     }
 
     if (pathname === "/api/ipc/handlers") {

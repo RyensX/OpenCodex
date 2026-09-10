@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld("openCodexLauncher", {
   start: () => ipcRenderer.invoke("launcher:start"),
   restart: () => ipcRenderer.invoke("launcher:restart"),
   openUrl: () => ipcRenderer.invoke("launcher:open-url"),
+  // 健康警告通过受限 IPC 打开当前 Gateway 的诊断地址。
+  openHealth: () => ipcRenderer.invoke("launcher:open-health"),
   openLogs: () => ipcRenderer.invoke("launcher:open-logs"),
   openGitHub: () => ipcRenderer.invoke("launcher:open-github"),
   openAuthor: () => ipcRenderer.invoke("launcher:open-author"),

@@ -712,10 +712,8 @@ function broadcastState() {
 
 async function fetchGatewayStatus({ signal } = {}) {
   if (!gatewayState.localUrl) return null;
-  const response = await fetch(`${gatewayState.localUrl}/api/launcher/status`, {
-    headers: {
-      "x-opencodex-launcher-token": gatewayState.token,
-    },
+  // 前台刷新和定时探活共用公开健康接口，保留完整诊断结果供界面展示。
+  const response = await fetch(`${gatewayState.localUrl}/api/health`, {
     ...(signal ? { signal } : {}),
   });
   if (!response.ok) {
@@ -753,6 +751,8 @@ function refreshGatewayStatus() {
     } catch (error) {
       // 窗口隐藏时主动中止的请求不代表 gateway 故障，不能把 AbortError 展示成服务错误。
       if (error?.name === "AbortError" && (!timedOut || !launcherWindowNeedsStatusPolling())) return;
+      // 请求失败后清除旧快照，避免继续展示上一次健康结果。
+      gatewayState.status = null;
       if (error?.name === "AbortError" && timedOut) {
         // 单次探活必须有上限，否则一个挂起 fetch 会让 single-flight 永久阻塞后续状态更新。
         gatewayState.lastError = `gateway status timed out after ${GATEWAY_STATUS_TIMEOUT_MS}ms`;
@@ -1213,6 +1213,10 @@ ipcMain.handle("launcher:start", () => startGateway());
 ipcMain.handle("launcher:restart", () => restartGateway());
 ipcMain.handle("launcher:open-url", () => {
   return openOpenCodex();
+});
+ipcMain.handle("launcher:open-health", () => {
+  // 地址由主进程生成，不接受渲染进程提供任意外链。
+  if (gatewayState.localUrl) return shell.openExternal(`${gatewayState.localUrl}/api/health`);
 });
 ipcMain.handle("launcher:open-logs", async () => {
   await flushGatewayLog();

@@ -13,6 +13,7 @@
   "common.status": "状态",
   "launcher.status.ready": "已就绪",
   "launcher.status.gatewayStarted": "Gateway 已启动",
+  "launcher.status.healthWarning": "健康异常",
   "launcher.status.starting": "启动中",
   "launcher.status.stopped": "未运行",
   "launcher.hero.urlLabel": "访问地址",

@@ -151,6 +151,7 @@ function freshPointState(definition, generation, at) {
     directAdapterIds: definition.directAdapterIds,
     adapterChainIds: definition.adapterChainIds,
     generation,
+    explicitlyDisabled: false,
     location: {
       status: "unresolved",
       locatorRevision: "",
@@ -536,6 +537,7 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
       directAdapterIds: [...state.directAdapterIds],
       adapterChainIds: [...state.adapterChainIds],
       generation: state.generation,
+      explicitlyDisabled: state.explicitlyDisabled,
       status: pointSummaryStatus(state),
       location: { ...state.location },
       application: { ...state.application },
@@ -707,6 +709,8 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     point.lastHitEventAtMs = 0;
     point.lastHitAtMs = 0;
     point.state.generation += 1;
+    // 重新定位表示恢复修改点生命周期，清除整点停用标记。
+    point.state.explicitlyDisabled = false;
     resetDownstreamState(point);
     point.state.location = {
       status: "resolving",
@@ -883,6 +887,8 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     point.currentAttempt = null;
     point.currentHandle = null;
     point.state.generation += 1;
+    // 新的内核报告重新接管生命周期，清除整点停用标记。
+    point.state.explicitlyDisabled = false;
     point.state.location = {
       status: choose("location", ["failed", "stale", "ambiguous", "unsupported", "resolving", "unresolved"], "resolved"),
       locatorRevision: "kernel-v2",
@@ -1004,6 +1010,8 @@ function createCompatibilityRegistry({ getRuntimeIdentity = () => ({}), now = ()
     const point = requiredPoint(id);
     point.currentAttempt = null;
     point.currentHandle = null;
+    // 与多贡献聚合得到的 disabled 区分，健康检查应忽略整点主动停用。
+    point.state.explicitlyDisabled = true;
     point.state.application.status = "disabled";
     point.state.application.lastError = sanitizeCompatibilityText(reason, "Disabled by configuration");
     touch(point);

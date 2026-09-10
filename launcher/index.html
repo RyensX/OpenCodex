@@ -25,7 +25,11 @@
             </div>
           </div>
         </div>
-        <div class="status-pill" id="statusPill" data-i18n="launcher.status.starting">启动中</div>
+        <div class="header-statuses">
+          <!-- 健康警告位于 Gateway 状态左侧，可打开完整诊断信息。 -->
+          <button class="status-pill offline" id="healthWarning" type="button" hidden data-i18n="launcher.status.healthWarning">健康异常</button>
+          <div class="status-pill" id="statusPill" data-i18n="launcher.status.starting">启动中</div>
+        </div>
       </div>
     </header>
 

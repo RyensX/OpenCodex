@@ -101,7 +101,10 @@ function browserNotificationPayload(notification) {
 function publish(payload) {
   if (typeof publishNotification !== "function") return 0;
   try {
-    return Number(publishNotification(payload)) || 0;
+    const sent = Number(publishNotification(payload)) || 0;
+    // 转发恢复后清除当前故障，历史异常仍保留在诊断日志中。
+    state.lastError = null;
+    return sent;
   } catch (error) {
     state.lastError = error instanceof Error ? error.message : String(error);
     diagnosticWarn("official-notification", "publish_failed", { error: state.lastError });

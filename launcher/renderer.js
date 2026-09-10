@@ -182,7 +182,9 @@ function renderUrls(state) {
 function renderStatus(state) {
   const pill = $("statusPill");
   const running = !!state.running;
-  const connected = !!(state.status && state.status.ok);
+  // 服务已响应与整体健康分别展示，修改点失败不应让 Gateway 回到启动中。
+  const connected = !!state.status;
+  $("healthWarning").hidden = !(state.status ? state.status.ok !== true : !!state.lastError);
   const appServerMode = state.status && state.status.appServer ? state.status.appServer.mode : "";
 
   if (connected) {
@@ -326,6 +328,10 @@ document.addEventListener("click", async (event) => {
   }
   if (target.id === "latestReleaseButton") {
     await launcher.openLatestRelease();
+    return;
+  }
+  if (target.id === "healthWarning") {
+    await launcher.openHealth();
     return;
   }
   if (target.classList && target.classList.contains("path")) {

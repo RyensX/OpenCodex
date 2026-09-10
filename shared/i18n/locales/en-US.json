@@ -13,6 +13,7 @@
   "common.status": "Status",
   "launcher.status.ready": "Ready",
   "launcher.status.gatewayStarted": "Gateway started",
+  "launcher.status.healthWarning": "Health warning",
   "launcher.status.starting": "Starting",
   "launcher.status.stopped": "Stopped",
   "launcher.hero.urlLabel": "Access URL",
