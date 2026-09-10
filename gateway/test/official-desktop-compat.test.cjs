@@ -1369,3 +1369,96 @@ test("ambiguous macOS push candidates are not patched", (t) => {
     assert.equal(service.registry.point(staticMainPoints.macosPushRegistration.id).location.status, "ambiguous");
   } finally { service.dispose(); }
 });
+
+// 在真实临时目录中验证备份轮换及失败恢复，不触碰用户运行时。
+function createBackupFixture(t) {
+  const projectRoot = temporaryDirectory(t);
+  const fileSystem = new OfficialBundleFileSystem();
+  const bundleDir = path.join(projectRoot, "bundle");
+  const sourceAsarPath = path.join(projectRoot, "resources", "app.asar");
+  writeFile(sourceAsarPath);
+  const cache = new OfficialBundleCache({ projectRoot, configuredBundleDir: bundleDir, fileSystem, logger: { warn() {} } });
+  function createBundle(dir, version) {
+    for (const file of ["webview/index.html", "webview/assets/app.js", "node_modules/fixture/index.js", ".vite/build/bootstrap.js"]) {
+      writeFile(path.join(dir, file));
+    }
+    writeFile(path.join(dir, "package.json"), "{}");
+    writeFile(path.join(dir, "manifest.json"), JSON.stringify({ schemaVersion: MANIFEST_SCHEMA_VERSION, runtimeOptimizations: {}, sourceAsarPath, version }));
+    return dir;
+  }
+  const versionAt = (dir) => JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"))).version;
+  return { projectRoot, fileSystem, bundleDir, cache, createBundle, versionAt };
+}
+
+test("bundle updates retain exactly the previous backup and restore it", (t) => {
+  const { projectRoot, bundleDir, cache, createBundle, versionAt } = createBackupFixture(t);
+  cache.replaceWith(createBundle(path.join(projectRoot, "first"), "1"));
+  assert.equal(fs.existsSync(cache.backupDir), false);
+  cache.replaceWith(createBundle(path.join(projectRoot, "second"), "2"));
+  assert.equal(versionAt(cache.backupDir), "1");
+  cache.replaceWith(createBundle(path.join(projectRoot, "third"), "3"));
+  assert.equal(versionAt(cache.backupDir), "2");
+  assert.equal(cache.backupState().available, true);
+  cache.restoreBackup();
+  assert.equal(versionAt(bundleDir), "2");
+  assert.equal(fs.existsSync(cache.backupDir), false);
+  assert.equal(fs.readdirSync(projectRoot).some((name) => name.includes(".restore-") || name.includes(".tmp-")), false);
+});
+
+test("failed bundle replacement preserves current bundle and previous backup", (t) => {
+  const { projectRoot, bundleDir, cache, createBundle, versionAt } = createBackupFixture(t);
+  createBundle(bundleDir, "2");
+  createBundle(cache.backupDir, "1");
+  assert.throws(() => cache.replaceWith(path.join(projectRoot, "missing")));
+  assert.equal(versionAt(bundleDir), "2");
+  assert.equal(versionAt(cache.backupDir), "1");
+});
+
+test("failed restore rename preserves both bundles and invalid backup leaves current untouched", (t) => {
+  const { bundleDir, cache, fileSystem, createBundle, versionAt } = createBackupFixture(t);
+  createBundle(bundleDir, "2");
+  createBundle(cache.backupDir, "1");
+  const rename = fileSystem.rename.bind(fileSystem);
+  fileSystem.rename = (from, to) => {
+    if (from === cache.backupDir) throw new Error("rename denied");
+    rename(from, to);
+  };
+  assert.throws(() => cache.restoreBackup(), /rename denied/);
+  assert.equal(versionAt(bundleDir), "2");
+  assert.equal(versionAt(cache.backupDir), "1");
+  fs.rmSync(path.join(cache.backupDir, "package.json"));
+  assert.equal(cache.backupState().available, false);
+  assert.throws(() => cache.restoreBackup(), /无法还原备份/);
+  assert.equal(versionAt(bundleDir), "2");
+});
+
+test("launcher restore preserves either scan setting and skips only its restart", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../../launcher/main.cjs"), "utf8");
+  // 执行实际生命周期函数，替换 Electron 与文件系统边界来验证调用顺序。
+  const lifecycle = source.slice(source.indexOf("async function restartGatewayOnce("), source.indexOf("\nfunction createWindow()"));
+  for (const autoScan of [true, false]) {
+    const events = [];
+    const settings = { officialAutoScanUpgrade: autoScan };
+    const context = vm.createContext({
+      gatewayStartPromise: null, gatewayRestartPromise: null,
+      skipNextOfficialScan: false, restoringBackup: false,
+      gatewayState: { settings, status: {} },
+      officialBundleCache: () => ({ backupState: () => ({ available: true }), restoreBackup: () => events.push("restore") }),
+      stopGateway: async () => { events.push("stop"); return true; },
+      startGateway: async () => { events.push(context.skipNextOfficialScan ? "start-without-scan" : "start"); context.skipNextOfficialScan = false; },
+      buildState: () => ({}), broadcastState() {}, appendLog() {}, errorLogText: String,
+    });
+    vm.runInContext(lifecycle, context);
+    await context.restoreBundleBackup();
+    assert.deepEqual(events, ["stop", "restore", "start-without-scan"]);
+    assert.deepEqual(settings, { officialAutoScanUpgrade: autoScan });
+    await context.restartGateway();
+    assert.deepEqual(events.slice(-2), ["stop", "start"]);
+    events.length = 0;
+    context.stopGateway = async () => false;
+    await context.restoreBundleBackup();
+    assert.deepEqual(events, []);
+    assert.equal(context.skipNextOfficialScan, false);
+  }
+});

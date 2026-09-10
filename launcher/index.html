@@ -150,7 +150,11 @@
 
         <!-- Codex 运行时 -->
         <section class="setting-section">
-          <h2>Codex <span class="section-caption" data-i18n="launcher.codex.caption">官方运行时</span></h2>
+          <div class="section-head">
+            <h2>Codex <span class="section-caption" data-i18n="launcher.codex.caption">官方运行时</span></h2>
+            <!-- 仅在存在可用备份时展示还原入口，操作期间禁用按钮。 -->
+            <button id="restoreBundleBackup" class="secondary-btn" hidden disabled data-i18n="launcher.codex.restoreBackup">还原上一版本</button>
+          </div>
           <div class="setting-list kv">
             <div class="setting-item">
               <div class="setting-label" data-i18n="launcher.codex.version">版本</div>

@@ -50,6 +50,8 @@ let latestReleaseCheckedForForeground = false;
 let isQuitting = false;
 let gatewayStartPromise = null;
 let gatewayRestartPromise = null;
+let skipNextOfficialScan = false;
+let restoringBackup = false;
 const gatewayLogWriter = createBoundedLogWriter();
 
 const gatewayState = {
@@ -576,6 +578,17 @@ async function ensurePortSetting(paths, settings) {
   });
 }
 
+function officialBundleCache() {
+  const { OfficialBundleCache } = require("../gateway/dist/official/OfficialBundleCache.js");
+  const { OfficialBundleFileSystem } = require("../gateway/dist/official/OfficialBundleFileSystem.js");
+  return new OfficialBundleCache({
+    projectRoot: APP_ROOT,
+    configuredBundleDir: runtimePaths().officialBundleDir,
+    fileSystem: new OfficialBundleFileSystem(),
+    logger: { warn: (message) => appendLog(`[launcher] ${message}\n`) },
+  });
+}
+
 function buildState() {
   const i18n = currentGatewayI18n();
   const latestRelease = gatewayState.latestRelease || {};
@@ -620,6 +633,7 @@ function buildState() {
     lastError: gatewayState.lastError,
     startedAt: gatewayState.startedAt,
     officialRuntime: gatewayState.officialRuntime,
+    bundleBackup: { ...officialBundleCache().backupState(), restoring: restoringBackup },
     locale: i18n.locale,
     messages: i18n.messages,
     i18nSource: i18n.source,
@@ -796,13 +810,16 @@ function startStatusPolling() {
 async function startGatewayOnce() {
   if (gatewayState.child) return buildState();
 
+  // 一次性覆盖只用于本轮启动环境，不写入用户设置。
+  const skipOfficialScan = skipNextOfficialScan;
+  skipNextOfficialScan = false;
   const paths = runtimePaths();
   gatewayState.paths = paths;
   ensureRuntimeLayout(paths);
   gatewayState.settings = await ensurePortSetting(paths, loadLauncherSettings(paths));
   applyPreventSleepSetting(gatewayState.settings);
   gatewayState.host = hostForMode(gatewayState.settings.hostMode);
-  const officialAutoScanUpgrade = normalizeOfficialAutoScanUpgrade(gatewayState.settings.officialAutoScanUpgrade);
+  const officialAutoScanUpgrade = !skipOfficialScan && normalizeOfficialAutoScanUpgrade(gatewayState.settings.officialAutoScanUpgrade);
 
   if (!fs.existsSync(paths.gatewayScriptPath)) {
     gatewayState.lastError = `Missing gateway entry: ${paths.gatewayScriptPath}`;
@@ -993,7 +1010,7 @@ function stopGateway() {
   });
 }
 
-async function restartGatewayOnce() {
+async function restartGatewayOnce(beforeStart) {
   // runtime 尚在准备时先等本轮启动落地，再按正常停止流程重启，避免设置变更被旧启动吞掉。
   if (gatewayStartPromise) {
     try {
@@ -1007,6 +1024,7 @@ async function restartGatewayOnce() {
     broadcastState();
     return buildState();
   }
+  if (beforeStart) beforeStart();
   return startGateway();
 }
 
@@ -1019,6 +1037,38 @@ async function restartGateway() {
   } finally {
     gatewayRestartPromise = null;
   }
+}
+
+async function restoreBundleBackup() {
+  // 与所有服务重启共用互斥状态，避免停止期间另一次重启先占用目录。
+  if (gatewayRestartPromise) return gatewayRestartPromise;
+  restoringBackup = true;
+  gatewayRestartPromise = (async () => {
+    try {
+      const cache = officialBundleCache();
+      const backup = cache.backupState();
+      if (!backup.available) throw new Error(`无法还原备份：${backup.reason}`);
+      broadcastState();
+      return await restartGatewayOnce(() => {
+        cache.restoreBackup();
+        skipNextOfficialScan = true;
+        gatewayState.status = null;
+        appendLog("[launcher] 已还原 bundle 备份，本次启动临时跳过更新扫描\n");
+      });
+    } catch (error) {
+      gatewayState.lastError = errorLogText(error);
+      appendLog(`[launcher] ${gatewayState.lastError}\n`, { urgent: true });
+      return buildState();
+    }
+  })();
+  try {
+    await gatewayRestartPromise;
+  } finally {
+    restoringBackup = false;
+    gatewayRestartPromise = null;
+    broadcastState();
+  }
+  return buildState();
 }
 
 function createWindow() {
@@ -1209,8 +1259,9 @@ function revealPath(targetPath) {
 }
 
 ipcMain.handle("launcher:get-state", () => buildState());
-ipcMain.handle("launcher:start", () => startGateway());
+ipcMain.handle("launcher:start", () => gatewayRestartPromise || startGateway());
 ipcMain.handle("launcher:restart", () => restartGateway());
+ipcMain.handle("launcher:restore-bundle-backup", () => restoreBundleBackup());
 ipcMain.handle("launcher:open-url", () => {
   return openOpenCodex();
 });

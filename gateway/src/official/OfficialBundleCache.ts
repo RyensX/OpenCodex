@@ -143,21 +143,68 @@ class OfficialBundleCache {
     });
   }
 
-  replaceWith(sourceDir: string): void {
-    // 先备份旧缓存，再把新缓存 rename 到位；失败时尽量恢复旧缓存。
-    const backupDir = `${this.bundleDir}.bak-${process.pid}-${Date.now()}`;
-    this.fileSystem.removeTree(backupDir);
-    if (this.fileSystem.exists(this.bundleDir)) {
-      this.fileSystem.rename(this.bundleDir, backupDir);
-    }
+  get backupDir(): string {
+    return `${this.bundleDir}-bak`;
+  }
+
+  backupState(): any {
+    // 使用同一套缓存校验，避免还原后因备份不完整而自动重新解压新版。
+    const backup = new OfficialBundleCache({
+      projectRoot: this.projectRoot,
+      configuredBundleDir: this.backupDir,
+      logger: this.logger,
+      fileSystem: this.fileSystem,
+      refreshPolicy: this.refreshPolicy,
+      runtimeEntryResolver: this.runtimeEntryResolver,
+    });
+    const manifest = backup.readManifest();
+    const reason = backup.reuseWithoutSourceScanBlockReason(manifest);
+    return { available: !reason, version: manifest?.version || "", reason };
+  }
+
+  restoreBackup(): void {
+    const backup = this.backupState();
+    if (!backup.available) throw new Error(`无法还原备份：${backup.reason}`);
+    // 先暂存当前目录，备份改名失败时仍能恢复当前版本；成功后才删除新版。
+    const discardedDir = `${this.bundleDir}.restore-${process.pid}-${Date.now()}`;
+    const hadCurrent = this.fileSystem.exists(this.bundleDir);
+    if (hadCurrent) this.fileSystem.rename(this.bundleDir, discardedDir);
     try {
-      this.fileSystem.rename(sourceDir, this.bundleDir);
-      this.fileSystem.removeTree(backupDir);
+      this.fileSystem.rename(this.backupDir, this.bundleDir);
     } catch (error) {
-      if (this.fileSystem.exists(backupDir) && !this.fileSystem.exists(this.bundleDir)) {
-        this.fileSystem.rename(backupDir, this.bundleDir);
-      }
+      if (hadCurrent) this.fileSystem.rename(discardedDir, this.bundleDir);
       throw error;
+    }
+    this.cleanupRetiredDirectory(discardedDir);
+  }
+
+  replaceWith(sourceDir: string): void {
+    // 仅保留上一版；新目录安装失败时，同时保住当前版本和原有备份。
+    const retiredBackup = `${this.backupDir}.tmp-${process.pid}-${Date.now()}`;
+    const hadCurrent = this.fileSystem.exists(this.bundleDir);
+    const hadBackup = this.fileSystem.exists(this.backupDir);
+    if (hadCurrent && hadBackup) this.fileSystem.rename(this.backupDir, retiredBackup);
+    let movedCurrent = false;
+    try {
+      if (hadCurrent) {
+        this.fileSystem.rename(this.bundleDir, this.backupDir);
+        movedCurrent = true;
+      }
+      this.fileSystem.rename(sourceDir, this.bundleDir);
+    } catch (error) {
+      if (movedCurrent) this.fileSystem.rename(this.backupDir, this.bundleDir);
+      if (hadCurrent && hadBackup) this.fileSystem.rename(retiredBackup, this.backupDir);
+      throw error;
+    }
+    this.cleanupRetiredDirectory(retiredBackup);
+  }
+
+  private cleanupRetiredDirectory(directory: string): void {
+    // 切换已成功，清理失败仅记录日志，不把已完成的切换误报成失败。
+    try {
+      this.fileSystem.removeTree(directory);
+    } catch (error) {
+      this.logger.warn(`旧缓存目录清理失败：${directory}`, error);
     }
   }
 

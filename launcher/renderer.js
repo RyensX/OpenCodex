@@ -227,6 +227,10 @@ function render(state) {
   // 底部关于区展示应用元信息，随 package.json 与主进程状态同步。
   linkButton("authorLink", appInfo.author, "common.unknown");
   linkButton("githubLink", appInfo.githubUrl, "common.notFound");
+  const backup = state.bundleBackup || {};
+  // 无可用备份时隐藏入口，还原期间保留禁用状态以防重复操作。
+  $("restoreBundleBackup").disabled = !backup.available || backup.restoring;
+  $("restoreBundleBackup").hidden = !backup.available;
   text("codexVersion", official.version || t("common.unknown"));
   text("codexBuild", official.build || t("common.unknown"));
   text("cacheUpdatedAt", formatDateTime(official.cacheProcessedAt));
@@ -276,6 +280,15 @@ document.addEventListener("click", async (event) => {
   }
   if (target.dataset && target.dataset.copyUrl) {
     await launcher.copy(target.dataset.copyUrl);
+    return;
+  }
+  if (target.id === "restoreBundleBackup") {
+    target.disabled = true;
+    try {
+      render(await launcher.restoreBundleBackup());
+    } finally {
+      await refresh();
+    }
     return;
   }
   if (target.id === "restart") {
