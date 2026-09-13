@@ -1455,6 +1455,53 @@ test("tooltip guard uses one pointer stream and does no timer work without toolt
   assert.equal(scheduler.timers.size, 1);
 });
 
+test("tooltip guard preserves internal scrolling and scrollbar pointer movement but dismisses outside scrolling", () => {
+  const scheduler = createScheduler();
+  const document = new ListenerTarget();
+  const scroller = { nodeType: 1 };
+  const outside = { nodeType: 1 };
+  const tooltip = {
+    nodeType: 1,
+    id: "changed-files-tooltip",
+    contains: (node) => node === scroller,
+  };
+  document.querySelector = () => tooltip;
+  document.querySelectorAll = () => [tooltip];
+  document.activeElement = null;
+  document.elementFromPoint = () => scroller;
+  const window = new ListenerTarget();
+  let dismissCount = 0;
+  Object.assign(window, {
+    Event: class TestEvent {
+      constructor(type) { this.type = type; }
+    },
+    PointerEvent: class TestPointerEvent {},
+    dispatchEvent(event) {
+      assert.equal(event.type, "codex:dismiss-tooltips");
+      dismissCount += 1;
+    },
+    clearTimeout: scheduler.clearTimeout,
+    setTimeout: scheduler.setTimeout,
+  });
+  installAdapterHost(window, class {});
+  vm.runInNewContext(TOOLTIP_SOURCE, { console, document, window });
+
+  // 滚轮和原生滚动条最终都在滚动容器上派发 scroll，根节点与嵌套容器都要保留。
+  document.emit("scroll", { target: tooltip });
+  document.emit("scroll", { target: scroller });
+  document.emit("pointermove", { target: scroller, clientX: 100, clientY: 80 });
+  scheduler.flushTimers();
+  assert.equal(dismissCount, 0);
+
+  // 即使指针仍停在弹窗内，背景滚动也应继续关闭，不能只判断指针位置。
+  document.emit("scroll", { target: outside });
+  assert.equal(dismissCount, 1);
+  document.emit("scroll");
+  assert.equal(dismissCount, 2);
+  window.emit("blur");
+  assert.equal(dismissCount, 3);
+});
+
 test("gateway logout menu observes DOM only during an interaction session", () => {
   const scheduler = createScheduler();
   const document = new ListenerTarget();

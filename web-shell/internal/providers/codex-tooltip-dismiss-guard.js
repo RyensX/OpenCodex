@@ -59,6 +59,14 @@
     return !!(parent && child && (parent === child || parent.contains(child)));
   }
 
+  function dismissOnOutsideScroll(event) {
+    if (!tooltipPresent) return;
+    // 捕获阶段也会收到弹窗内部滚动（包括拖动滚动条）；只有外部滚动才关闭提示。
+    const tooltips = visibleTooltips();
+    if (tooltips.some((tooltip) => containsElement(tooltip, event.target))) return;
+    dispatchOfficialTooltipDismiss();
+  }
+
   function targetReferencesTooltip(target, tooltipId) {
     if (!target || !tooltipId) return false;
     // 指针/焦点目标只可能属于其祖先 trigger；沿局部祖先链检查，避免每帧扫描全页 aria-describedby。
@@ -194,7 +202,7 @@
     adapterHost.events.observe({ key: {}, target: document, type: "mouseout", callback: dismissOnDocumentExit, capture: true, passive: true });
   }
   adapterHost.events.observe({ key: {}, target: document, type: "focusin", callback: observeForTooltipMount, capture: true });
-  adapterHost.events.observe({ key: {}, target: document, type: "scroll", callback: dispatchOfficialTooltipDismiss, capture: true, passive: true });
+  adapterHost.events.observe({ key: {}, target: document, type: "scroll", callback: dismissOnOutsideScroll, capture: true, passive: true });
   adapterHost.events.observe({ key: {}, target: w, type: "blur", callback: dispatchOfficialTooltipDismiss });
   adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: () => {
     if (document.visibilityState !== "visible") dispatchOfficialTooltipDismiss();
