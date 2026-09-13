@@ -1608,13 +1608,18 @@ test("remote file menu observes DOM only during a file-tree context-menu session
 test("shared and persisted snapshots are bounded while preserving active keys", () => {
   const snapshots = vm.runInNewContext(
     `(() => {
-      const SHARED_OBJECT_SNAPSHOT_MAX_ENTRIES = 4;
+      const SHARED_OBJECT_SNAPSHOT_MAX_ENTRIES = 5;
       const PERSISTED_ATOM_SNAPSHOT_MAX_ENTRIES = 4;
       const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig";
+      const PENDING_WORKTREES_KEY = "pending_worktrees";
       const COMPOSER_PERMISSION_MODE_VISIBILITY_KEY = "composer-mode";
       const sharedObjectSnapshot = new Map();
       const persistedAtomSnapshot = new Map();
-      const PINNED_SHARED_OBJECT_SNAPSHOT_KEYS = new Set(["host_config", STATSIG_DEFAULT_FEATURES_CONFIG]);
+      const PINNED_SHARED_OBJECT_SNAPSHOT_KEYS = new Set([
+        "host_config",
+        STATSIG_DEFAULT_FEATURES_CONFIG,
+        PENDING_WORKTREES_KEY,
+      ]);
       const PINNED_PERSISTED_ATOM_SNAPSHOT_KEYS = new Set([
         "prompt-history",
         COMPOSER_PERMISSION_MODE_VISIBILITY_KEY,
@@ -1633,10 +1638,13 @@ test("shared and persisted snapshots are bounded while preserving active keys", 
     })()`
   );
 
-  for (const key of ["host_config", "statsig", "shared-a", "shared-b"]) snapshots.setShared(key);
+  for (const key of ["host_config", "statsig", "pending_worktrees", "shared-a", "shared-b"]) snapshots.setShared(key);
   snapshots.setShared("shared-a");
   snapshots.setShared("shared-c");
-  assert.deepEqual(Array.from(snapshots.sharedKeys()), ["host_config", "statsig", "shared-a", "shared-c"]);
+  assert.deepEqual(
+    Array.from(snapshots.sharedKeys()),
+    ["host_config", "statsig", "pending_worktrees", "shared-a", "shared-c"]
+  );
 
   for (const key of ["prompt-history", "composer-mode", "atom-a", "atom-b"]) snapshots.setPersisted(key);
   snapshots.setPersisted("atom-a");
@@ -1650,6 +1658,7 @@ test("official shared-object updates remain authoritative for guardian approval"
       const SHARED_OBJECT_SNAPSHOT_MAX_ENTRIES = 8;
       const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
       const STATSIG_DEFAULT_FEATURE_OVERRIDES = { "505458": true };
+      const PENDING_WORKTREES_KEY = "pending_worktrees";
       const sharedObjectSnapshot = new Map();
       const PINNED_SHARED_OBJECT_SNAPSHOT_KEYS = new Set([STATSIG_DEFAULT_FEATURES_CONFIG]);
       function trimSnapshotMap() {}
@@ -1692,6 +1701,40 @@ test("official shared-object updates remain authoritative for guardian approval"
   assert.doesNotMatch(subscribeSection, /emitSharedObjectSnapshotValue/);
   assert.doesNotMatch(BRIDGE_SOURCE, /guardian_approval:\s*true/);
   assert.match(BRIDGE_SOURCE, /effectiveChannel === "shared-object-updated"[\s\S]*cacheSharedObjectUpdatedPayload/);
+});
+
+test("pending worktree shared-object state follows the official array-or-undefined contract", () => {
+  const state = vm.runInNewContext(
+    `(() => {
+      const SHARED_OBJECT_SNAPSHOT_MAX_ENTRIES = 8;
+      const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
+      const STATSIG_DEFAULT_FEATURE_OVERRIDES = {};
+      const PENDING_WORKTREES_KEY = "pending_worktrees";
+      const sharedObjectSnapshot = new Map();
+      const PINNED_SHARED_OBJECT_SNAPSHOT_KEYS = new Set([PENDING_WORKTREES_KEY]);
+      function trimSnapshotMap() {}
+      ${sourceSection(BRIDGE_SOURCE, "  function isPlainObject", "\n\n  /** shared-object snapshot")}
+      ${sourceSection(BRIDGE_SOURCE, "  function normalizeSharedObjectSnapshotValue", "\n\n  /** 更新本地 shared-object")}
+      ${sourceSection(BRIDGE_SOURCE, "  function setSharedObjectSnapshotValue", "\n\n  /** 读取 shared-object")}
+      ${sourceSection(BRIDGE_SOURCE, "  function getSharedObjectSnapshotValue", "\n\n  /** 异步发出 shared-object")}
+      return {
+        cache: cacheSharedObjectUpdatedPayload,
+        keys: () => Array.from(sharedObjectSnapshot.keys()),
+        read: (key) => getSharedObjectSnapshotValue(key),
+      };
+    })()`
+  );
+
+  // 官方 preload 对缺失键返回 undefined；收到真实数组后仍保持其引用和值不变。
+  assert.equal(state.read("pending_worktrees"), undefined);
+  assert.deepEqual(Array.from(state.keys()), []);
+  const pending = [{ id: "worktree-1", clientThreadId: "client-thread-1" }];
+  assert.equal(state.cache({ key: "pending_worktrees", value: pending }).value, pending);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.read("pending_worktrees"))), pending);
+  assert.equal(state.cache({ key: "pending_worktrees", value: null }).value, undefined);
+  assert.equal(state.read("pending_worktrees"), undefined);
+  assert.deepEqual(Array.from(state.keys()), []);
+  assert.equal(state.read("unknown-key"), null);
 });
 
 test("connector logo response cache is bounded and refreshes LRU order", () => {

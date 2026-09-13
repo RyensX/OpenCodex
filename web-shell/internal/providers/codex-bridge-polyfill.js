@@ -2988,12 +2988,17 @@
 
   const sharedObjectSnapshot = new Map();
   const persistedAtomSnapshot = new Map();
+  const PENDING_WORKTREES_KEY = "pending_worktrees";
   const COMPOSER_PERMISSION_MODE_VISIBILITY_KEY = "composer-permission-mode-visibility";
   const DEFAULT_COMPOSER_PERMISSION_MODE_VISIBILITY = {
     "guardian-approvals": true,
     "full-access": true,
   };
-  const PINNED_SHARED_OBJECT_SNAPSHOT_KEYS = new Set(["host_config", STATSIG_DEFAULT_FEATURES_CONFIG]);
+  const PINNED_SHARED_OBJECT_SNAPSHOT_KEYS = new Set([
+    "host_config",
+    STATSIG_DEFAULT_FEATURES_CONFIG,
+    PENDING_WORKTREES_KEY,
+  ]);
   const PINNED_PERSISTED_ATOM_SNAPSHOT_KEYS = new Set([
     "prompt-history",
     COMPOSER_PERMISSION_MODE_VISIBILITY_KEY,
@@ -3018,8 +3023,10 @@
     return value !== null && typeof value === "object" && !Array.isArray(value);
   }
 
-  /** shared-object snapshot 写入前补齐 Web 必需 feature flag。 */
+  /** shared-object snapshot 写入前补齐 Web 必需的已知形态。 */
   function normalizeSharedObjectSnapshotValue(key, value) {
+    // 官方 pending_worktrees 消费者只接受数组或 undefined；Web 首屏缺值不能以 null 注入其状态机。
+    if (key === PENDING_WORKTREES_KEY) return Array.isArray(value) ? value : undefined;
     if (key !== STATSIG_DEFAULT_FEATURES_CONFIG) return value;
     return {
       ...(isPlainObject(value) ? value : {}),
@@ -3033,20 +3040,23 @@
     const normalized = normalizeSharedObjectSnapshotValue(key, value);
     // 重写已有键时刷新 LRU 顺序，避免活跃状态被一次性的扩展键挤出。
     sharedObjectSnapshot.delete(key);
+    // 对齐官方 preload：undefined 表示尚无快照，不能作为一个已加载值留在 Map 中。
+    if (key === PENDING_WORKTREES_KEY && normalized === undefined) return undefined;
     sharedObjectSnapshot.set(key, normalized);
     trimSnapshotMap(sharedObjectSnapshot, SHARED_OBJECT_SNAPSHOT_MAX_ENTRIES, PINNED_SHARED_OBJECT_SNAPSHOT_KEYS);
     return normalized;
   }
 
-  /** 记录官方 shared-object 回包，并保留官方值本身的 true/false/缺省语义。 */
+  /** 记录官方 shared-object 回包，并按各已知 key 的消费约定规范化值。 */
   function cacheSharedObjectUpdatedPayload(payload) {
     if (!isPlainObject(payload) || !payload.key) return payload;
     const value = setSharedObjectSnapshotValue(payload.key, payload.value);
     return value === payload.value ? payload : { ...payload, value };
   }
 
-  /** 读取 shared-object snapshot，特定 key 会懒补默认值。 */
+  /** 读取 shared-object snapshot：Statsig 懒补默认值，pending_worktrees 保留官方缺失语义。 */
   function getSharedObjectSnapshotValue(key) {
+    if (key === PENDING_WORKTREES_KEY && !sharedObjectSnapshot.has(key)) return undefined;
     if (key === STATSIG_DEFAULT_FEATURES_CONFIG || sharedObjectSnapshot.has(key)) {
       return setSharedObjectSnapshotValue(key, sharedObjectSnapshot.get(key));
     }

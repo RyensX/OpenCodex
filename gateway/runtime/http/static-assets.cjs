@@ -787,6 +787,35 @@ function createStaticAssetService({
     return { body, encoding };
   }
 
+  function htmlAttributeValue(attributes, name) {
+    const match = String(attributes || "").match(
+      new RegExp(`(?:^|\\s)${escapeRegExp(name)}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>]+))`, "i")
+    );
+    return match ? match[1] ?? match[2] ?? match[3] ?? "" : null;
+  }
+
+  function hasHtmlAttribute(attributes, name) {
+    return new RegExp(`(?:^|\\s)${escapeRegExp(name)}(?=\\s|=|/|$)`, "i").test(String(attributes || ""));
+  }
+
+  function officialHtmlHasEagerScript(rawHtml) {
+    for (const match of rawHtml.matchAll(/<script\b([^>]*)>/gi)) {
+      const attributes = match[1] || "";
+      const type = String(htmlAttributeValue(attributes, "type") || "").trim().toLowerCase();
+      const moduleScript = type === "module";
+      const classicScript = !type || /(?:java|ecma)script|jscript|livescript/.test(type);
+      // JSON、importmap 等数据脚本不会执行普通 JavaScript，不影响运行时注入顺序。
+      if (!moduleScript && !classicScript) continue;
+      // async 脚本可能在文档解析结束前执行，必须让 Bridge 继续阻塞式抢先安装。
+      if (hasHtmlAttribute(attributes, "async")) return true;
+      if (moduleScript) continue;
+      const deferredExternalScript =
+        htmlAttributeValue(attributes, "src") !== null && hasHtmlAttribute(attributes, "defer");
+      if (!deferredExternalScript) return true;
+    }
+    return false;
+  }
+
   function startupAssetPreloads(rawHtml) {
     const urls = new Set();
     for (const match of rawHtml.matchAll(/<script\b[^>]*\btype=["']module["'][^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)) {
@@ -931,35 +960,38 @@ function createStaticAssetService({
     if (startupPreloads) hitCompatibilityPoint(staticPoints.startupPreload);
     if (previewMarkup) hitCompatibilityPoint(staticPoints.sidebarPreview);
     const useRuntimeBundle = canBundleRuntimeBootstrap();
+    const deferRuntimeScripts = !officialHtmlHasEagerScript(html);
+    const runtimeScript = (src) =>
+      `<script${deferRuntimeScripts ? " defer" : ""} src="${src}"></script>`;
     const runtimeScripts = useRuntimeBundle
       ? [
           '<link rel="preload" as="script" href="/codex-web-config.js">',
           `<link rel="preload" as="script" href="${OPENCODEX_RUNTIME_BOOTSTRAP_PATH}">`,
-          '<script src="/codex-web-config.js"></script>',
-          `<script src="${OPENCODEX_RUNTIME_BOOTSTRAP_PATH}"></script>`,
+          runtimeScript("/codex-web-config.js"),
+          runtimeScript(OPENCODEX_RUNTIME_BOOTSTRAP_PATH),
         ]
       : [
-          '<script src="/codex-web-config.js"></script>',
-          `<script src="${OPENCODEX_MODIFICATION_RUNTIME_PATH}"></script>`,
-          `<script src="${OPENCODEX_RUNTIME_COMPATIBILITY_PATH}"></script>`,
-          `<script src="${OPENCODEX_SIDEBAR_PREVIEW_PATH}"></script>`,
-          `<script src="${OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH}"></script>`,
-          `<script src="${OPENCODEX_PLUGIN_SYSTEM_PATH}"></script>`,
-          `<script src="${OPENCODEX_PLUGIN_LOADER_PATH}"></script>`,
-          ...[...BUILTIN_PROVIDER_FILES.keys()].map((url) => `<script src="${url}"></script>`),
-          `<script src="${CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH}"></script>`,
-          `<script src="${CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH}"></script>`,
-          `<script src="${CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH}"></script>`,
-          `<script src="${CODEX_SMART_SCHEDULING_SUMMARY_PATH}"></script>`,
-          `<script src="${OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH}"></script>`,
-          `<script src="${OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH}"></script>`,
+          runtimeScript("/codex-web-config.js"),
+          runtimeScript(OPENCODEX_MODIFICATION_RUNTIME_PATH),
+          runtimeScript(OPENCODEX_RUNTIME_COMPATIBILITY_PATH),
+          runtimeScript(OPENCODEX_SIDEBAR_PREVIEW_PATH),
+          runtimeScript(OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH),
+          runtimeScript(OPENCODEX_PLUGIN_SYSTEM_PATH),
+          runtimeScript(OPENCODEX_PLUGIN_LOADER_PATH),
+          ...[...BUILTIN_PROVIDER_FILES.keys()].map(runtimeScript),
+          runtimeScript(CODEX_SMART_SCHEDULING_INJECTION_HEALTH_PATH),
+          runtimeScript(CODEX_SMART_MODEL_ROUTER_SETTINGS_PATH),
+          runtimeScript(CODEX_SMART_MODEL_ROUTER_COMPOSER_PATH),
+          runtimeScript(CODEX_SMART_SCHEDULING_SUMMARY_PATH),
+          runtimeScript(OPENCODEX_TOKEN_USAGE_CAPABILITY_PATH),
+          runtimeScript(OPENCODEX_WINDOW_CONTROLS_OVERLAY_PATH),
           // codec 先于 bridge 执行，确保新版 AppHost 的首批结构化帧可以立即编码。
-          `<script src="${CODEX_APP_HOST_MESSAGE_CODEC_PATH}"></script>`,
-          `<script src="${CODEX_BRIDGE_POLYFILL_PATH}"></script>`,
-          `<script src="${CODEX_REMOTE_FILE_ACTIONS_PATH}"></script>`,
-          `<script src="${CODEX_WORKSPACE_ROOT_PICKER_PATH}"></script>`,
-          `<script src="${CODEX_TOOLTIP_DISMISS_GUARD_PATH}"></script>`,
-          `<script src="${OPENCODEX_MODIFICATION_ACTIVATE_PATH}"></script>`,
+          runtimeScript(CODEX_APP_HOST_MESSAGE_CODEC_PATH),
+          runtimeScript(CODEX_BRIDGE_POLYFILL_PATH),
+          runtimeScript(CODEX_REMOTE_FILE_ACTIONS_PATH),
+          runtimeScript(CODEX_WORKSPACE_ROOT_PICKER_PATH),
+          runtimeScript(CODEX_TOOLTIP_DISMISS_GUARD_PATH),
+          runtimeScript(OPENCODEX_MODIFICATION_ACTIVATE_PATH),
         ];
     // manifest 在 Cloudflare Access 等前置认证后面也必须带同源凭据，否则 Chrome 可能拿不到受保护的 manifest。
     const base = [
