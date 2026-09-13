@@ -967,6 +967,52 @@ test("runtime optimizer coalesces slow worktree shell environment reads in the h
   assert.equal(fs.readFileSync(mainPath, "utf8"), optimized);
 });
 
+test("runtime optimizer coalesces delegated worktree shell environment reads in newer official desktop bundles", async (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const mainPath = path.join(bundleDir, ".vite", "build", "main.js");
+  writeFile(
+    mainPath,
+    'var services={"worktree-shell-environment-config":({cwd:e,hostId:t})=>this.readWorktreeShellEnvironment(e,t??`local`)};'
+  );
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+
+  assert.deepEqual(optimizer.optimize(bundleDir), {
+    nativePetComposition: "not-present",
+    nativePetPrewarm: "not-present",
+    macPushRegistration: "not-present",
+    patchedFileCount: 1,
+    unsupportedFiles: [],
+    worktreeShellEnvironment: "gateway-coalesced",
+  });
+  const optimized = fs.readFileSync(mainPath, "utf8");
+  assert.match(optimized, /__opencodexWorktreeShellEnvironmentCache/);
+  assert.match(optimized, /shellEnvironment:null/);
+
+  class MockService {
+    constructor() {
+      this.callCount = 0;
+    }
+    async readWorktreeShellEnvironment(cwd, hostId) {
+      this.callCount += 1;
+      return { shellEnvironment: { PATH: "/bin", cwd, hostId } };
+    }
+    getHandler(process) {
+      return new Function(
+        "process",
+        `${optimized};return services["worktree-shell-environment-config"]`
+      ).call(this, process);
+    }
+  }
+
+  const service = new MockService();
+  const hiddenHandler = service.getHandler({ env: { OPENCODEX_GATEWAY_HIDDEN_RUNTIME: "1" } });
+  const first = await hiddenHandler({ cwd: "/workspace", hostId: "local" });
+  const second = await hiddenHandler({ cwd: "/workspace", hostId: "local" });
+  assert.deepEqual(first, { shellEnvironment: { PATH: "/bin", cwd: "/workspace", hostId: "local" } });
+  assert.deepEqual(second, { shellEnvironment: { PATH: "/bin", cwd: "/workspace", hostId: "local" } });
+  assert.equal(service.callCount, 1);
+});
+
 test("runtime optimizer reports an unsupported Git discovery layout without partial assumptions", (t) => {
   const bundleDir = temporaryDirectory(t);
   const workerPath = path.join(bundleDir, ".vite", "build", "worker-new-layout.js");
