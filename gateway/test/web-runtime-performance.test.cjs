@@ -662,6 +662,27 @@ test("offscreen animation guard releases and reinstalls when the sidebar root is
   assert.equal(intersectionObservers.at(-1).options.root, second.sidebar);
 });
 
+test("iOS shell keeps the composer above the Home Indicator and collapses the desktop header slot", () => {
+  // 最新官方 Renderer 使用语义 data 属性，不再提供旧版 thread-scroll/footer/find-composer 标记。
+  assert.match(IOS_FIX_SOURCE, /\[data-app-shell-main-content-layout\]/);
+  assert.match(IOS_FIX_SOURCE, /\[data-codex-composer-root\]/);
+  assert.match(IOS_FIX_SOURCE, /\[data-app-shell-main-content-layout\] \[role=['"]main['"]\]/);
+  // iPhone 底部必须同时保留 Home Indicator 安全区和基础间距，不能只取两者较大值。
+  assert.match(
+    IOS_FIX_SOURCE,
+    /--opencodex-ios-footer-padding-bottom:\s*calc\(env\(safe-area-inset-bottom, 0px\) \+ 8px\)/
+  );
+  assert.match(
+    IOS_FIX_SOURCE,
+    /\[data-codex-composer-root\][\s\S]*padding-bottom: var\(--opencodex-ios-footer-padding-bottom\) !important/
+  );
+  // 移动端 start slot 不得继续占用桌面侧栏宽度，否则左上按钮会落到侧栏中央。
+  assert.match(
+    IOS_FIX_SOURCE,
+    /header\[data-app-shell-header-edge-scroll\] > \[data-test-id="header-shell-slot"\]:first-child[\s\S]*inline-size: auto !important/
+  );
+});
+
 test("shared viewport coordinator coalesces event storms and owns one listener source", () => {
   const scheduler = createScheduler();
   const document = new ListenerTarget();
