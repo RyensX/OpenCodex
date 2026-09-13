@@ -66,15 +66,7 @@
   const APP_HOST_PENDING_MESSAGE_CHARS_LIMIT = 16 * 1024 * 1024;
   const GATEWAY_AUTH_LOGOUT_LABEL = t("web.auth.logoutGateway");
   const GATEWAY_AUTH_LOGOUT_BUSY_LABEL = t("web.auth.logoutGatewayBusy");
-  const OFFICIAL_LOGOUT_LABELS = [
-    "退出登录",
-    "Log out",
-    "Logout",
-    "Sign out",
-    "Sign Out",
-    "Sign out of Codex",
-    "Log out of Codex",
-  ];
+  const OFFICIAL_SETTINGS_LABELS = ["设置", "Settings"];
   const MESSAGE_FOR_VIEW_CHANNEL = "codex_desktop:message-for-view";
   const WINDOW_FOCUS_CHANGED_MESSAGE = "electron-window-focus-changed";
 
@@ -1052,10 +1044,10 @@
     ).trim();
   }
 
-  function officialLogoutLabelFromElement(element) {
+  function officialSettingsLabelFromElement(element) {
     const label = elementTextLabel(element).replace(/\s+/g, " ").trim();
     if (!label || label === GATEWAY_AUTH_LOGOUT_LABEL) return "";
-    return OFFICIAL_LOGOUT_LABELS.find((text) => label === text || label.includes(text)) || "";
+    return OFFICIAL_SETTINGS_LABELS.find((text) => label === text || label.startsWith(`${text}…`) || label.startsWith(`${text}...`) || label.startsWith(`${text} `) || label.startsWith(`${text}⌘`)) || "";
   }
 
   function isMenuLikeContext(element) {
@@ -1072,11 +1064,11 @@
     return false;
   }
 
-  function isOfficialLogoutMenuItem(element) {
+  function isOfficialSettingsMenuItem(element) {
     if (!element || element.nodeType !== 1) return false;
     if (element.dataset?.codexWebGatewayAuthLogout === "true") return false;
     if (!visibleElement(element)) return false;
-    if (!officialLogoutLabelFromElement(element)) return false;
+    if (!officialSettingsLabelFromElement(element)) return false;
     if (!isMenuLikeContext(element)) return false;
     const tagName = String(element.tagName || "").toLowerCase();
     const role = String(element.getAttribute?.("role") || "").toLowerCase();
@@ -1169,10 +1161,14 @@
     logoutGatewayAuthFromMenu(item);
   }
 
-  function createGatewayAuthLogoutMenuItem(logoutItem) {
+  function createGatewayAuthLogoutMenuItem(settingsItem) {
     modificationEffects?.gatewayAuthMenu?.emit();
-    const officialLabel = officialLogoutLabelFromElement(logoutItem) || "退出登录";
-    const item = logoutItem.cloneNode(true);
+    const officialLabel = officialSettingsLabelFromElement(settingsItem) || "设置";
+    const item = settingsItem.cloneNode(true);
+    // 复用设置项的样式，但移除它的跳转目标及快捷键提示。
+    item.removeAttribute("href");
+    item.removeAttribute("aria-keyshortcuts");
+    item.querySelectorAll("kbd").forEach((node) => node.remove());
     item.dataset.codexWebGatewayAuthLogout = "true";
     item.dataset.codexWebGatewayAuthOriginalLabel = GATEWAY_AUTH_LOGOUT_LABEL;
     item.setAttribute("aria-label", GATEWAY_AUTH_LOGOUT_LABEL);
@@ -1198,23 +1194,24 @@
     return item;
   }
 
-  function injectGatewayAuthLogoutMenuItem(logoutItem) {
-    const parent = logoutItem && logoutItem.parentElement;
+  function injectGatewayAuthLogoutMenuItem(settingsItem) {
+    const parent = settingsItem && settingsItem.parentElement;
     if (!parent) return false;
     if (Array.from(parent.children || []).some((child) => child.dataset?.codexWebGatewayAuthLogout === "true")) {
       return false;
     }
-    parent.insertBefore(createGatewayAuthLogoutMenuItem(logoutItem), logoutItem);
+    // 设置在账号和 API 登录菜单中均可用，退出认证紧随其后。
+    parent.insertBefore(createGatewayAuthLogoutMenuItem(settingsItem), settingsItem.nextSibling);
     return true;
   }
 
   function scanGatewayAuthLogoutMenuItems(root = document) {
     const scope = root && root.nodeType === 1 ? root : document;
     const candidates = Array.from(scope.querySelectorAll?.("button,a,[role='menuitem'],[role='menuitemradio']") || []);
-    if (scope !== document && isOfficialLogoutMenuItem(scope)) candidates.unshift(scope);
+    if (scope !== document && isOfficialSettingsMenuItem(scope)) candidates.unshift(scope);
     let injected = 0;
     for (const candidate of candidates) {
-      if (isOfficialLogoutMenuItem(candidate) && injectGatewayAuthLogoutMenuItem(candidate)) injected += 1;
+      if (isOfficialSettingsMenuItem(candidate) && injectGatewayAuthLogoutMenuItem(candidate)) injected += 1;
     }
     return injected;
   }

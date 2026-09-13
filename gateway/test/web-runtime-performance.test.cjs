@@ -1502,6 +1502,49 @@ test("tooltip guard preserves internal scrolling and scrollbar pointer movement 
   assert.equal(dismissCount, 3);
 });
 
+test("gateway logout is inserted after settings with or without official logout", () => {
+  // 覆盖 API 登录没有官方退出项，以及账号登录保留官方退出项的菜单。
+  for (const label of ["设置", "Settings", "Settings ⌘,"]) {
+    for (const hasLogout of [false, true]) {
+      const menu = {
+        children: [],
+        getAttribute: (name) => name === "role" ? "menu" : null,
+        insertBefore(item, next) {
+          const index = next ? this.children.indexOf(next) : this.children.length;
+          this.children.splice(index, 0, item);
+        },
+      };
+      const settings = {
+        nodeType: 1, tagName: "BUTTON", dataset: {}, innerText: label,
+        parentElement: menu, getAttribute: () => null,
+        getBoundingClientRect: () => ({ width: 100, height: 30 }),
+      };
+      const logout = { ...settings, innerText: "Log out" };
+      settings.nextSibling = hasLogout ? logout : null;
+      menu.children = hasLogout ? [settings, logout] : [settings];
+      const document = { body: {}, querySelectorAll: () => menu.children };
+      const api = vm.runInNewContext(`(() => {
+        const w = {};
+        const GATEWAY_AUTH_LOGOUT_LABEL = "退出认证";
+        ${sourceSection(BRIDGE_SOURCE, "  const OFFICIAL_SETTINGS_LABELS", "  const MESSAGE_FOR_VIEW_CHANNEL")}
+        ${sourceSection(BRIDGE_SOURCE, "  function visibleElement", "  function removeDuplicatedIdentityAttributes")}
+        function createGatewayAuthLogoutMenuItem() {
+          return { nodeType: 1, dataset: { codexWebGatewayAuthLogout: "true" } };
+        }
+        ${sourceSection(BRIDGE_SOURCE, "  function injectGatewayAuthLogoutMenuItem", "  function installGatewayAuthMenuInjection")}
+        return { scanGatewayAuthLogoutMenuItems, isOfficialSettingsMenuItem };
+      })()`, { document });
+      assert.equal(api.scanGatewayAuthLogoutMenuItems(), 1);
+      assert.equal(menu.children[0], settings);
+      assert.equal(menu.children[1].dataset.codexWebGatewayAuthLogout, "true");
+      if (hasLogout) assert.equal(menu.children[2], logout);
+      assert.equal(api.scanGatewayAuthLogoutMenuItems(), 0);
+      assert.equal(api.isOfficialSettingsMenuItem({ ...settings, innerText: "Project settings" }), false);
+      assert.equal(api.isOfficialSettingsMenuItem({ ...settings, parentElement: document.body }), false);
+    }
+  }
+});
+
 test("gateway logout menu observes DOM only during an interaction session", () => {
   const scheduler = createScheduler();
   const document = new ListenerTarget();
