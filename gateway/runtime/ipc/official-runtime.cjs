@@ -2180,6 +2180,75 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   throw new Error(`No official Electron IPC handler for ${channel}`);
 }
 
+// 官方 main 的 createAppHost() 会为新创建的 app-host 对象挂一次
+// webContents.once("destroyed", () => host[Symbol.dispose]())，用来在桌面窗口销毁时释放会话。
+// web 模式下隐藏窗口的 webContents 永远不会被销毁，于是每次浏览器连接都会留下一份监听器和
+// 一份 app-host 会话（65 个 destroyed 监听触发 MaxListenersExceededWarning，之后官方 RPC 持续报
+// no such export ID / no such entry on exports table，页面后端请求全部失败且刷新不可恢复）。
+// 这里在把 MessagePort 交给官方 listener 前后做监听器快照差集，并在 relay 关闭时把属于本次连接
+// 的监听器（含官方稍后才补挂的那些）全部摘掉，让 app-host 会话随连接一起被回收。
+const appHostListenerOwners = new WeakMap(); // owner -> { owned: Set<listener>, connecting: number }
+
+function appHostListenerState(owner) {
+  let state = appHostListenerOwners.get(owner);
+  if (!state) {
+    state = { owned: new Set(), connecting: 0 };
+    appHostListenerOwners.set(owner, state);
+  }
+  return state;
+}
+
+function snapshotAppHostDestroyListeners(webContents) {
+  try {
+    if (!webContents || typeof webContents.rawListeners !== "function") return null;
+    return new Set(webContents.rawListeners("destroyed"));
+  } catch {
+    return null;
+  }
+}
+
+function collectAppHostDestroyListeners(webContents, before) {
+  const after = snapshotAppHostDestroyListeners(webContents);
+  if (!after || !before) return [];
+  return [...after].filter((listener) => !before.has(listener));
+}
+
+function removeAppHostListeners(owner, listeners) {
+  let removed = 0;
+  for (const listener of listeners) {
+    try {
+      owner.removeListener("destroyed", listener);
+      removed += 1;
+    } catch {}
+  }
+  return removed;
+}
+
+function releaseAppHostDestroyListeners(session) {
+  if (!session) return;
+  const { owner, before } = session;
+  let held = session.listeners || [];
+  let current = null;
+  try {
+    if (!owner || owner.isDestroyed?.() || typeof owner.rawListeners !== "function") return;
+    current = owner.rawListeners("destroyed");
+  } catch {
+    return;
+  }
+  const state = appHostListenerState(owner);
+  for (const listener of held) state.owned.delete(listener);
+  let listeners = [...held];
+  // 官方可能在 await 之后才补挂监听（异步订阅），稍后释放时再扫一次；
+  // 只有在本 owner 没有并发连接时才敢扫，否则会误摘别的会话的监听。
+  if (state.connecting === 0 && current) {
+    const beforeSet = before || new Set();
+    for (const listener of current) {
+      if (!beforeSet.has(listener) && !state.owned.has(listener)) listeners.push(listener);
+    }
+  }
+  removeAppHostListeners(owner, listeners);
+}
+
 async function connectOfficialAppHostPort(port, context = {}) {
   /**
    * 官方新版 renderer 启动时不再只走 electronBridge.invoke，而是通过 MessageChannel
@@ -2193,11 +2262,21 @@ async function connectOfficialAppHostPort(port, context = {}) {
   }
   // 等价于官方 preload 的 ipcRenderer.postMessage(channel, undefined, [port])。
   const event = createOfficialIpcEvent({ ...context, ports: [port] });
-  for (const listener of [...listeners]) {
-    await listener(event);
+  const state = appHostListenerState(event.sender);
+  state.connecting += 1;
+  const listenersBefore = snapshotAppHostDestroyListeners(event.sender);
+  try {
+    for (const listener of [...listeners]) {
+      await listener(event);
+    }
+  } finally {
+    state.connecting -= 1;
   }
   recordRuntimeCompatibilityHit(gatewayPointRefs.appHostRelay);
-  return true;
+  const added = collectAppHostDestroyListeners(event.sender, listenersBefore);
+  for (const listener of added) state.owned.add(listener);
+  // 交回本次连接新增的 destroyed 监听器，由 relay 在关闭时释放。
+  return { owner: event.sender, before: listenersBefore, listeners: added };
 }
 
 function deliverOfficialAppHostMessage(event, onMessage, close) {
@@ -2226,6 +2305,12 @@ function createOfficialAppHostRelay(options = {}) {
   const { port1, port2 } = new electron.MessageChannelMain();
   let closed = false;
   let nullCloseScheduled = false;
+  let appHostSession = null;
+
+  function releaseAppHostSession(session = appHostSession) {
+    if (session === appHostSession) appHostSession = null;
+    releaseAppHostDestroyListeners(session);
+  }
 
   function close(reason = "closed") {
     if (closed) return;
@@ -2238,6 +2323,10 @@ function createOfficialAppHostRelay(options = {}) {
     } catch {}
     try {
       onClose && onClose(reason);
+    } catch {}
+    // 端口已关闭，本次 app-host 会话不会再有流量，回收官方挂在隐藏 webContents 上的监听器。
+    try {
+      releaseAppHostSession();
     } catch {}
   }
 
@@ -2261,7 +2350,23 @@ function createOfficialAppHostRelay(options = {}) {
   port2.start();
 
   connectOfficialAppHostPort(port1, { clientId, portId, remoteAddress }).then(
-    () => {
+    (session) => {
+      if (closed) {
+        // relay 先于官方 listener 结束（页面秒开秒关）时立即回收，避免留下孤儿会话。
+        releaseAppHostSession(session);
+      } else {
+        appHostSession = session;
+      }
+      if (process.env.OPENCODEX_APPHOST_LEAK_DEBUG === "1") {
+        diagnosticWarn("official-app-host", "leak_probe", {
+          clientId: shortId(clientId),
+          portId: shortId(portId),
+          added: (session && session.listeners ? session.listeners.length : -1),
+          destroyedListeners: session && session.owner && typeof session.owner.listenerCount === "function"
+            ? session.owner.listenerCount("destroyed")
+            : -1,
+        });
+      }
       if (DEBUG_LOGS) {
         // app-host 正常连接只是生命周期事件；失败仍保持常规日志，方便排查终端/侧栏能力不可用。
         diagnosticLog("official-app-host", "connected", {
