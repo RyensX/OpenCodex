@@ -245,6 +245,14 @@ function patchOfficialAssetOffMainThread({ data, downloadMessage, host, locale, 
     }
   });
 }
+/**
+ * 官方 bundle 由 Vite/rolldown 生成 content hash，实测长度为 8~13 位（旧版 8 位、
+ * 当前 12 位），且分隔符可能是 "-" 或 "."（如 DocumentFormat.OpenXml.4g1x2psnat.wasm）。
+ * 之前写死 {8} 位导致 12 位 hash 的 chunk 全部漏判、掉进兜底 no-store。
+ * HTML 永不参与长缓存，避免入口文档被浏览器固化。
+ */
+const CONTENT_HASHED_ASSET_FILE_RE = /[-.][A-Za-z0-9_-]{8,}\.(?!html$)[A-Za-z0-9]{1,8}$/i;
+
 // 固定 web-shell 资源只在这里登记一次，白名单和文件映射共用同一份配置。
 const WEB_SHELL_STATIC_FILES = new Map([
   [FAVICON_PATH, path.join(WEB_SHELL_ASSETS_DIR, "icon.png")],
@@ -1586,9 +1594,7 @@ ${pluginGatewayStateBootstrapScript()}
        */
       if (
         reqPath.startsWith(PATCHED_OFFICIAL_PREFIX) &&
-        /-[A-Za-z0-9_-]{8}\.(?:avif|css|gif|ico|jpe?g|js|png|svg|webp|woff2?)$/i.test(
-          patchedOfficialAssetName(reqPath)
-        )
+        CONTENT_HASHED_ASSET_FILE_RE.test(patchedOfficialAssetName(reqPath))
       ) {
         return "public, max-age=31536000, immutable";
       }
@@ -1615,14 +1621,21 @@ ${pluginGatewayStateBootstrapScript()}
 
   /** 发送静态文件，并按路径套用合适的缓存策略。 */
   function serveFile(req, res, file, status = 200, reqPath = "") {
+    // 长缓存的前提是响应可被浏览器自由复用；auth gate 预写的 Set-Cookie 会让缓存
+    // 判定失效（含中间代理），因此在确认 public 长缓存后显式剥离该响应上的 cookie 刷新。
+    const dropCookieRefreshIfCacheable = (cacheControl) => {
+      if (cacheControl.startsWith("public")) res.removeHeader("set-cookie");
+    };
     if (shouldPatchOfficialAsset(reqPath) && process.env.CODEX_WEB_DISABLE_ASSET_CACHE !== "1") {
       const sendEntry = (entry) => {
         const contentType = mimeType(file);
+        const cacheControl = cacheControlForRequestPath(reqPath, entry.patched);
+        dropCookieRefreshIfCacheable(cacheControl);
         const encoding = representationEncoding(req, contentType, entry.data);
         const sendRepresentation = (representation) => {
           const headers = {
             "content-type": contentType,
-            "cache-control": cacheControlForRequestPath(reqPath, entry.patched),
+            "cache-control": cacheControl,
             etag: representation.etag,
             vary: "Accept-Encoding",
           };
@@ -1669,6 +1682,7 @@ ${pluginGatewayStateBootstrapScript()}
     }
 
     const cacheControl = cacheControlForRequestPath(reqPath);
+    dropCookieRefreshIfCacheable(cacheControl);
     const canRevalidateSource = !shouldPatchOfficialAsset(reqPath) && cacheControl !== "no-store";
     const sourceEtag = canRevalidateSource ? weakFileEtag(file) : "";
     if (status === 200 && sourceEtag && requestHasMatchingEtag(req, sourceEtag)) {
