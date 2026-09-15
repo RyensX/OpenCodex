@@ -3480,6 +3480,78 @@
     w.__codexWebFetchPatched = true;
   }
 
+  // Statsig 遥测（/ces/v1/rgstr、/ces/v1/log_event）实际走 XMLHttpRequest 而非 fetch，
+  // 上面只拦 fetch 会漏掉该通道：网络受限下 XHR 失败会在控制台反复刷 NetworkError。
+  // 这里在 open 时记住目标 URL，命中遥测地址时跳过真实 send，随后模拟一次成功响应，
+  // 让 Statsig 认为上报成功、不再重试，从而彻底消除控制台报错。
+  if (typeof w.XMLHttpRequest === "function" && !w.__codexWebXhrPatched) {
+    const originalXhrOpen = w.XMLHttpRequest.prototype.open;
+    const originalXhrSend = w.XMLHttpRequest.prototype.send;
+    w.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      this.__codexWebXhrUrl = typeof url === "string" ? url : "";
+      return originalXhrOpen.apply(this, [method, url, ...rest]);
+    };
+    w.XMLHttpRequest.prototype.send = function (body) {
+      const xhr = this;
+      let url = "";
+      try {
+        url = new URL(String(xhr.__codexWebXhrUrl || ""), location.href).toString();
+      } catch {
+        url = String(xhr.__codexWebXhrUrl || "");
+      }
+      if (!isTelemetryRegisterUrl(url)) {
+        return originalXhrSend.call(this, body);
+      }
+      // 遥测被本地吞掉：先触发 loadstart/readystatechange，再异步补 status 与 load，
+      // 保证 SDK 按正常成功响应处理；异步是为了等 SDK 在 send 返回后挂好监听器。
+      try {
+        xhr.dispatchEvent(new Event("loadstart"));
+      } catch {}
+      scheduler.setTimeout(() => {
+        try {
+          // XHR 的 status/statusText/response/responseText/readyState 是只读 IDL 属性，
+          // 非严格模式下直接赋值会被静默忽略，SDK 读到的仍是 readyState=0/status=0，
+          // 永远走不到"上报成功"分支。改为在实例上 defineProperty 覆盖只读 getter，
+          // 让 Statsig 按 readyState===4 && status===200 的正常成功路径处理。
+          const defineReadOnly = (name, value) => {
+            try {
+              Object.defineProperty(xhr, name, {
+                configurable: true,
+                enumerable: true,
+                get: () => value,
+              });
+            } catch {}
+          };
+          defineReadOnly("status", 200);
+          defineReadOnly("statusText", "OK");
+          defineReadOnly("response", "{}");
+          defineReadOnly("responseText", "{}");
+          defineReadOnly("readyState", 4);
+          xhr.dispatchEvent(new Event("readystatechange"));
+          xhr.dispatchEvent(new Event("load"));
+          xhr.dispatchEvent(new Event("loadend"));
+        } catch {}
+      }, 0);
+    };
+    w.__codexWebXhrPatched = true;
+  }
+
+  // 同一批遥测若改走 sendBeacon（无响应可模拟），直接本地吞掉并返回成功即可。
+  if (w.navigator && typeof w.navigator.sendBeacon === "function" && !w.__codexWebBeaconPatched) {
+    const originalSendBeacon = w.navigator.sendBeacon.bind(w.navigator);
+    w.navigator.sendBeacon = (url, ...rest) => {
+      let target = "";
+      try {
+        target = new URL(String(url || ""), location.href).toString();
+      } catch {
+        target = String(url || "");
+      }
+      if (isTelemetryRegisterUrl(target)) return true;
+      return originalSendBeacon(url, ...rest);
+    };
+    w.__codexWebBeaconPatched = true;
+  }
+
   // 官方 bundle 仍可能 require("electron"/"path"/"os")，这里提供浏览器安全替身。
   if (typeof w.require !== "function") {
     w.require = (name) => {
