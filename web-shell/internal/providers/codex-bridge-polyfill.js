@@ -3509,11 +3509,24 @@
       } catch {}
       scheduler.setTimeout(() => {
         try {
-          xhr.status = 200;
-          xhr.statusText = "OK";
-          xhr.response = "{}";
-          xhr.responseText = "{}";
-          xhr.readyState = 4;
+          // XHR 的 status/statusText/response/responseText/readyState 是只读 IDL 属性，
+          // 非严格模式下直接赋值会被静默忽略，SDK 读到的仍是 readyState=0/status=0，
+          // 永远走不到"上报成功"分支。改为在实例上 defineProperty 覆盖只读 getter，
+          // 让 Statsig 按 readyState===4 && status===200 的正常成功路径处理。
+          const defineReadOnly = (name, value) => {
+            try {
+              Object.defineProperty(xhr, name, {
+                configurable: true,
+                enumerable: true,
+                get: () => value,
+              });
+            } catch {}
+          };
+          defineReadOnly("status", 200);
+          defineReadOnly("statusText", "OK");
+          defineReadOnly("response", "{}");
+          defineReadOnly("responseText", "{}");
+          defineReadOnly("readyState", 4);
           xhr.dispatchEvent(new Event("readystatechange"));
           xhr.dispatchEvent(new Event("load"));
           xhr.dispatchEvent(new Event("loadend"));
