@@ -88,7 +88,7 @@ function sourceFiles(directory) {
 }
 
 test("compatibility catalog declares groups and adapter chains for every stable point", () => {
-  assert.equal(POINT_DEFINITIONS.length, 103);
+  assert.equal(POINT_DEFINITIONS.length, 104);
   assert.equal(POINT_GROUP_DEFINITIONS.length, 17);
   assert.equal(ADAPTER_DEFINITIONS.length, 23);
   assert.equal(new Set(POINT_DEFINITIONS.map((point) => point.id)).size, POINT_DEFINITIONS.length);
@@ -97,7 +97,7 @@ test("compatibility catalog declares groups and adapter chains for every stable 
   const registry = registerCompatibilityCatalog(createCompatibilityRegistry());
   const snapshot = registry.snapshot();
   assert.equal(snapshot.schemaVersion, 2);
-  assert.equal(snapshot.points.length, 103);
+  assert.equal(snapshot.points.length, 104);
   assert.equal(snapshot.groups.length, 17);
   assert.equal(snapshot.adapterTypes.length, 23);
   assert.equal(snapshot.status, "pending");

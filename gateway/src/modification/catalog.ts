@@ -301,6 +301,8 @@ export const POINT_DEFINITIONS = Object.freeze([
   point("web.runtime.bridge.feature-gates", "注入 Web 环境所需桌面能力开关", "web-shell", G.rendererCore, A.desktopBridge),
   point("web.runtime.network.statsig", "本地响应 Statsig 初始化请求", "web-shell", G.webNetwork, A.networkRequest),
   point("web.runtime.network.telemetry", "阻止隐藏 Web 环境发送无效遥测", "web-shell", G.webNetwork, A.networkRequest),
+  // XHR/Beacon 与 fetch 是两条独立上报通道，单独成点才能分别观察是否真被本地吞掉。
+  point("web.runtime.network.telemetry-guard", "本地吞掉 Statsig XHR 与 Beacon 遥测", "web-shell", G.webNetwork, A.networkRequest),
   point("web.runtime.protocol.connector-logo", "合并 connector logo IPC 请求", "web-shell", G.webNetwork, A.semanticProtocol),
   point("web.runtime.dom.webview-shim", "使用 iframe 模拟 Electron webview", "web-shell", G.rendererUi, A.semanticView),
   point("web.runtime.native.file-picker", "把 Electron 文件选择转换为浏览器文件选择", "web-shell", G.browserPlatform, A.browserNative),

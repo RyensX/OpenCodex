@@ -231,6 +231,7 @@ const BROWSER_PROVIDER_DEFINITIONS: readonly BrowserProviderDefinition[] = Objec
   { key: "remote-file-actions", points: { primary: "web.runtime.dom.remote-file-menu" } },
   { key: "workspace-root-picker", points: { primary: "web.runtime.workspace.root-picker" } },
   { key: "tooltip-dismiss", points: { primary: "web.runtime.dom.tooltip-dismiss" } },
+  { key: "statsig-telemetry-guard", points: { primary: "web.runtime.network.telemetry-guard" } },
 ]);
 
 const MOBILE_SIDEBAR_TOUCH_SCROLL_STYLE_ID = "opencodex-mobile-sidebar-touch-scroll-styles";

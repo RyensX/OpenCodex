@@ -71,6 +71,7 @@ const CODEX_REMOTE_FILE_ACTIONS_PATH = "/codex-remote-file-actions.js";
 const CODEX_WORKSPACE_ROOT_PICKER_CSS_PATH = "/codex-workspace-root-picker.css";
 const CODEX_WORKSPACE_ROOT_PICKER_PATH = "/codex-workspace-root-picker.js";
 const CODEX_TOOLTIP_DISMISS_GUARD_PATH = "/codex-tooltip-dismiss-guard.js";
+const CODEX_STATSIG_TELEMETRY_GUARD_PATH = "/codex-statsig-telemetry-guard.js";
 const FAVICON_PATH = "/favicon.ico";
 const PWA_MANIFEST_PATH = "/manifest.webmanifest";
 const OFFICIAL_LOADING_SHIMMER_POWER_GUARD = [
@@ -119,6 +120,7 @@ const BROWSER_PROVIDER_KEY_BY_FILE = new Map([
   [path.join(INTERNAL_PROVIDER_DIR, "codex-remote-file-actions.js"), "remote-file-actions"],
   [path.join(INTERNAL_PROVIDER_DIR, "codex-workspace-root-picker.js"), "workspace-root-picker"],
   [path.join(INTERNAL_PROVIDER_DIR, "codex-tooltip-dismiss-guard.js"), "tooltip-dismiss"],
+  [path.join(INTERNAL_PROVIDER_DIR, "codex-statsig-telemetry-guard.js"), "statsig-telemetry-guard"],
 ]);
 const OFFICIAL_OPEN_IN_FOLDER_MESSAGE_ID = "artifactTab.preview.openInFolder";
 const OPENCODEX_DOWNLOAD_FILE_MESSAGE_ID = "web.remoteFile.downloadFile";
@@ -289,6 +291,8 @@ const WEB_SHELL_STATIC_FILES = new Map([
     OPENCODEX_OFFSCREEN_ANIMATION_GUARD_PATH,
     path.join(INTERNAL_PROVIDER_DIR, "codex-offscreen-animation-guard.js"),
   ],
+  // Statsig XHR/Beacon 遥测拦截由独立 Provider 承载，上游 bridge polyfill 保持零改动。
+  [CODEX_STATSIG_TELEMETRY_GUARD_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-statsig-telemetry-guard.js")],
   [CODEX_APP_HOST_MESSAGE_CODEC_PATH, path.join(WEB_SHELL_DIR, "codex-app-host-message-codec.js")],
   [CODEX_BRIDGE_POLYFILL_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js")],
   [CODEX_REMOTE_FILE_ACTIONS_PATH, path.join(INTERNAL_PROVIDER_DIR, "codex-remote-file-actions.js")],
@@ -703,6 +707,8 @@ function createStaticAssetService({
         CODEX_REMOTE_FILE_ACTIONS_PATH,
         CODEX_WORKSPACE_ROOT_PICKER_PATH,
         CODEX_TOOLTIP_DISMISS_GUARD_PATH,
+        // 遥测拦截须在 Kernel 激活前装上，保证官方 SDK 初始化时 XHR 原型已被接管。
+        CODEX_STATSIG_TELEMETRY_GUARD_PATH,
         OPENCODEX_MODIFICATION_ACTIVATE_PATH,
       ].map((reqPath) => WEB_SHELL_STATIC_FILES.get(reqPath)),
     };
@@ -991,6 +997,9 @@ function createStaticAssetService({
           runtimeScript(CODEX_REMOTE_FILE_ACTIONS_PATH),
           runtimeScript(CODEX_WORKSPACE_ROOT_PICKER_PATH),
           runtimeScript(CODEX_TOOLTIP_DISMISS_GUARD_PATH),
+          // 聚合启动路径之外的逐文件回退加载同样要带上遥测拦截，否则官方 bundle 含 eager script
+          // 或存在外部插件时该 Provider 根本不加载，修改点会在 locate 阶段被判 unsupported。
+          runtimeScript(CODEX_STATSIG_TELEMETRY_GUARD_PATH),
           runtimeScript(OPENCODEX_MODIFICATION_ACTIVATE_PATH),
         ];
     // manifest 在 Cloudflare Access 等前置认证后面也必须带同源凭据，否则 Chrome 可能拿不到受保护的 manifest。

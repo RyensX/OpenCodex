@@ -61,7 +61,7 @@ test("gateway compatibility service initializes from configured runtime paths", 
   });
   try {
     const snapshot = compatibilityService.snapshot();
-    assert.equal(snapshot.points.length, 103);
+    assert.equal(snapshot.points.length, 104);
     assert.equal(snapshot.groups.length, 17);
     assert.equal(snapshot.adapterTypes.length, 23);
     assert.equal(Object.hasOwn(snapshot, "features"), false);

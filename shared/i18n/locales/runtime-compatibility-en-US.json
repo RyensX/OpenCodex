@@ -206,6 +206,7 @@
   "web.runtimeCompatibility.point.web.runtime.bridge.feature-gates.description": "Inject desktop capability gates required by the Web environment.",
   "web.runtimeCompatibility.point.web.runtime.network.statsig.description": "Respond to Statsig initialization requests locally.",
   "web.runtimeCompatibility.point.web.runtime.network.telemetry.description": "Prevent the hidden Web environment from sending unnecessary telemetry.",
+  "web.runtimeCompatibility.point.web.runtime.network.telemetry-guard.description": "Swallow Statsig telemetry sent over XHR and Beacon locally.",
   "web.runtimeCompatibility.point.web.runtime.protocol.connector-logo.description": "Coalesce connector logo IPC requests.",
   "web.runtimeCompatibility.point.web.runtime.dom.webview-shim.description": "Emulate Electron webview with an iframe.",
   "web.runtimeCompatibility.point.web.runtime.native.file-picker.description": "Convert the Electron file picker to a browser file picker.",
