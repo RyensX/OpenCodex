@@ -5,6 +5,7 @@ const UNUSED_HIDDEN_RUNTIME_FEATURES = ["PushMessaging"];
 const UNUSED_HIDDEN_RUNTIME_BLINK_FEATURES = ["PushMessaging"];
 const HIDDEN_RUNTIME_GCM_HOLD_PATH = "/__opencodex-internal/gcm-checkin-hold";
 const HIDDEN_RUNTIME_GCM_STORE_BACKUP = "GCM Store.opencodex-disabled";
+const HEADLESS_RUNTIME_ARGS_ENV = "OPENCODEX_HEADLESS_ELECTRON";
 
 function appendMergedSwitch(commandLine, name, additions) {
   const existing =
@@ -98,6 +99,19 @@ function hiddenRuntimeGcmHoldUrl(env = process.env) {
   return `http://127.0.0.1:${safePort}${HIDDEN_RUNTIME_GCM_HOLD_PATH}`;
 }
 
+/**
+ * 无头服务器（无 GPU / 无 X 11 显示）所需的额外 Electron 参数。
+ * 由 OPENCODEX_HEADLESS_ELECTRON 环境变量开关，默认不改变桌面端行为：
+ * 不加 --no-sandbox 时 Chromium 在 root 或无用户命名空间的环境里会启动失败，
+ * 不加 --disable-gpu 时 GPU 进程会 FATAL 并让 gateway 收到 SIGTRAP 退出，
+ * --headless 让窗口不依赖真实显示服务。详见 docs/LINUX_GUIDE.md。
+ */
+function headlessRuntimeCommandLineArgs(env = process.env) {
+  const enabled = String(env?.[HEADLESS_RUNTIME_ARGS_ENV] ?? "").trim().toLowerCase();
+  if (!["1", "true", "yes", "on"].includes(enabled)) return [];
+  return ["--no-sandbox", "--headless", "--disable-gpu"];
+}
+
 function hiddenRuntimeGcmCommandLineArgs(env = process.env) {
   const holdUrl = hiddenRuntimeGcmHoldUrl(env);
   /**
@@ -151,6 +165,8 @@ module.exports = {
   hiddenRuntimeGcmStorePaths,
   hiddenRuntimeGcmCommandLineArgs,
   hiddenRuntimeGcmHoldUrl,
+  HEADLESS_RUNTIME_ARGS_ENV,
+  headlessRuntimeCommandLineArgs,
   isolateHiddenRuntimeGcmStore,
   isolateHiddenRuntimeGcmStoresForUserData,
 };

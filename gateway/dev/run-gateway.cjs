@@ -10,6 +10,7 @@ const {
 } = require("../../shared/gateway-lifecycle.cjs");
 const {
   hiddenRuntimeGcmCommandLineArgs,
+  headlessRuntimeCommandLineArgs,
   isolateHiddenRuntimeGcmStoresForUserData,
 } = require("../runtime/electron/hidden-runtime-command-line.cjs");
 
@@ -119,6 +120,8 @@ async function main() {
   const officialRuntimeArgs = [
     `--user-data-dir=${officialUserDataDir}`,
     ...hiddenRuntimeGcmCommandLineArgs(process.env),
+    // 无头服务器适配走环境变量开关，保持仓库默认行为与桌面端一致（见 docs/LINUX_GUIDE.md）。
+    ...headlessRuntimeCommandLineArgs(process.env),
   ];
   spawnGateway(officialRuntime, officialRuntimeArgs);
 

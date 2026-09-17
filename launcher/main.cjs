@@ -25,6 +25,7 @@ const {
 } = require("../shared/gateway-lifecycle.cjs");
 const {
   hiddenRuntimeGcmCommandLineArgs,
+  headlessRuntimeCommandLineArgs,
   isolateHiddenRuntimeGcmStoresForUserData,
 } = require("../gateway/runtime/electron/hidden-runtime-command-line.cjs");
 const packageMetadata = require("../package.json");
@@ -882,6 +883,8 @@ async function startGatewayOnce() {
   const officialRuntimeArgs = [
     `--user-data-dir=${officialUserDataDir}`,
     ...hiddenRuntimeGcmCommandLineArgs({ PORT: String(gatewayState.port) }),
+    // 无头服务器（无 GPU/无 X）通过环境变量开关追加 Electron 参数，桌面端默认不受影响。
+    ...headlessRuntimeCommandLineArgs(process.env),
   ];
   const childEnv = {
     ...process.env,

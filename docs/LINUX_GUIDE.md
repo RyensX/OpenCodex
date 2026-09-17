@@ -89,6 +89,7 @@ pgrep -a Xvfb
 | `CODEX_DESKTOP_EXECUTABLE_PATH` | Electron 可执行文件路径 | `/tmp/codex-desktop-linux/codex-app/electron` |
 | `CODEX_CLI_PATH` | Codex CLI 二进制路径 | `/opt/codex-cli/codex` |
 | `CODEX_HOME` | Codex 配置目录 | `~/.codex` |
+| `OPENCODEX_HEADLESS_ELECTRON` | 设为 `1` 时追加无头服务器所需 Electron 参数 | `1` |
 
 `DISPLAY` 指向 Xvfb。其余变量让 OpenCodex 知道 Electron 和 Codex CLI 的位置，以及配置文件存放路径。
 
@@ -100,22 +101,19 @@ pgrep -a Xvfb
 const officialRuntimeArgs = [`--user-data-dir=${officialUserDataDir}`];
 ```
 
-在无头 Linux 上需改为：
-
-```js
-const officialRuntimeArgs = [
-  `--user-data-dir=${officialUserDataDir}`,
-  '--no-sandbox',
-  '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage',
-];
-```
+无头 Linux 上不需要改动源码：设置环境变量 `OPENCODEX_HEADLESS_ELECTRON=1`，
+launcher 与 dev runner 会在官方隐藏运行时之外追加以下参数。
 
 | 参数 | 说明 |
 |------|------|
 | `--no-sandbox` | 服务器环境下 Chrome 沙箱通常不可用（root 运行或容器环境），不加会导致 Electron 启动失败 |
-| `--disable-setuid-sandbox` | 配合 `--no-sandbox` 禁用 setuid 辅助进程 |
-| `--disable-dev-shm-usage` | 避免 `/dev/shm` 过小（容器默认 64MB）导致崩溃，改用普通内存 |
+| `--headless` | 让窗口不依赖真实显示服务，配合 Xvfb 使用 |
+| `--disable-gpu` | 无 GPU 的服务器上 GPU 进程会 FATAL 并让 gateway 收到 SIGTRAP 退出 |
+
+若 `/dev/shm` 过小（容器默认 64MB），可再额外设置 `--disable-dev-shm-usage`。
+
+判据：设置该变量后 `systemctl show -p Environment` 或进程 cmdline 中应能看到上述三个参数；
+不设置时行为与桌面端完全一致（参数列表为空）。
 
 ## 启动 OpenCodex
 
