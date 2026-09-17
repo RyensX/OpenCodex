@@ -13,6 +13,7 @@ const gateway = Object.freeze({
   hiddenChromiumServices: requiredPoint("gateway.runtime.chromium.hidden-services"),
   gcmProfile: requiredPoint("gateway.runtime.chromium.gcm-profile"),
   electronModuleLoader: requiredPoint("gateway.runtime.node.electron-module-loader"),
+  netFetchStatsig: requiredPoint("gateway.runtime.electron.net-fetch-statsig"),
   notification: requiredPoint("gateway.runtime.electron.notification"),
   tray: requiredPoint("gateway.runtime.electron.tray"),
   ipcMain: requiredPoint("gateway.runtime.electron.ipc-main"),

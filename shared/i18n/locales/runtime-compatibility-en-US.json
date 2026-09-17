@@ -238,6 +238,7 @@
   "web.runtimeCompatibility.point.gateway.runtime.chromium.hidden-services.description": "Disable unnecessary background services in the hidden Runtime.",
   "web.runtimeCompatibility.point.gateway.runtime.chromium.gcm-profile.description": "Isolate the hidden Runtime GCM profile.",
   "web.runtimeCompatibility.point.gateway.runtime.node.electron-module-loader.description": "Wrap official Electron module exports.",
+  "web.runtimeCompatibility.point.gateway.runtime.electron.net-fetch-statsig.description": "Short-circuit the hidden renderer Statsig control plane locally.",
   "web.runtimeCompatibility.point.gateway.runtime.electron.notification.description": "Replace the official Notification implementation.",
   "web.runtimeCompatibility.point.gateway.runtime.electron.tray.description": "Replace the official Tray implementation.",
   "web.runtimeCompatibility.point.gateway.runtime.electron.ipc-main.description": "Capture official ipcMain registration.",

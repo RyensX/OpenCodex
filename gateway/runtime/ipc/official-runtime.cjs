@@ -40,6 +40,7 @@ const {
   officialElectronModuleHookStatus,
 } = require("../electron/official-electron-module-hook.cjs");
 const { hiddenTrayHookStatus, installOfficialTrayHook } = require("../electron/official-tray-hook.cjs");
+const { installOfficialNetFetchStatsigHook } = require("../electron/official-net-fetch-statsig-hook.cjs");
 const { createOfficialLiveObserver } = require("./official-live-observer.cjs");
 const {
   gateway: gatewayPointRefs,
@@ -1471,6 +1472,143 @@ function fetchMessageFromIpcArgs(args) {
   if (payload.type !== "fetch") return null;
   return typeof payload.url === "string" ? payload : null;
 }
+// Statsig 遥测（/ces/v1/rgstr 设备注册、/ces/v1/log_event 事件上报）由 renderer 通过
+// IPC fetch 委托给 Electron main 进程真实发 HTTP。受限网络下 Cloudflare 会返回 403 challenge，
+// 回包被转发回 renderer 后 Statsig 反复报错重试，控制台持续刷 NetworkError。
+// 这里在 IPC 层直接本地短路：不回官方 handler，按官方 fetch-response 协议回一个 200 成功，
+// 让 Statsig 认为上报完成，从源头消除该请求与控制台噪音。
+function isStatsigTelemetryFetchUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    return parsed.hostname === "chatgpt.com" && (pathname === "/ces/v1/rgstr" || pathname === "/ces/v1/log_event");
+  } catch {
+    return false;
+  }
+}
+
+function sendStatsigTelemetryNoopResponse(message) {
+  const requestId = stringRouteId(message && message.requestId);
+  if (!requestId) return false;
+  routeOfficialWebContentsSend(MESSAGE_FOR_VIEW_CHANNEL, [
+    {
+      type: "fetch-response",
+      responseType: "success",
+      requestId,
+      status: 200,
+      headers: { "content-type": "application/json" },
+      bodyJsonString: "{}",
+    },
+  ]);
+  return true;
+}
+
+function maybeHandleStatsigTelemetryFetchNoop(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return false;
+  const message = fetchMessageFromIpcArgs(args);
+  if (!message || !isStatsigTelemetryFetchUrl(message.url)) return false;
+  diagnosticLog("statsig-telemetry", "fetch_blocked_local", {
+    method: message.method || "",
+    url: String(message.url).split("?")[0],
+  });
+  return sendStatsigTelemetryNoopResponse(message);
+}
+
+// Statsig 功能开关初始化（ab.chatgpt.com/v1/initialize）同样经 renderer→main 的 IPC fetch 通道发出。
+// 受限网络（服务器无外网出口）下 main 的 net.fetch 会一直卡在 TCP 连接上，Statsig 初始化永不 resolve，
+// 官方路由被 Suspense 边界永久挂起，页面只剩转圈白屏。polyfill 只补了 window.fetch/XHR/beacon，
+// 覆盖不到这条 relay→IPC 通道，因此必须在 gateway 侧本地短路：回一份合法的空 gate 配置
+// （保留 new-worktree 等关键门，取值与 polyfill 默认值一致），让 Statsig 认为初始化成功。
+// SDK 异常上报（ab.chatgpt.com/v1/sdk_exception）一并吞掉，消除失败重试噪音。
+const STATSIG_DEFAULT_FEATURES_CONFIG = "statsig_default_enable_features";
+const STATSIG_I18N_LAYER_CONFIG = "72216192";
+const STATSIG_I18N_LAYER_VALUES = { enable_i18n: true, locale_source: "IDE" };
+// 与 codex-bridge-polyfill 的默认门保持一致：505458 是官方"新工作树"入口，Web 快照必须保留该能力。
+const STATSIG_DEFAULT_FEATURE_OVERRIDES = {
+  "3903742690": true,
+  "505458": true,
+  artifacts: true,
+};
+
+// 构造与 polyfill.buildStatsigInitializeResponse 同形状的合法初始化响应，供无出口环境下本地兜底。
+function buildStatsigInitializeGatewayResponse() {
+  const feature_gates = {};
+  const dynamic_configs = {
+    [STATSIG_DEFAULT_FEATURES_CONFIG]: {
+      name: STATSIG_DEFAULT_FEATURES_CONFIG,
+      value: { ...STATSIG_DEFAULT_FEATURE_OVERRIDES },
+      rule_id: "gateway_override",
+      secondary_exposures: [],
+    },
+  };
+  for (const [name, value] of Object.entries(STATSIG_DEFAULT_FEATURE_OVERRIDES)) {
+    feature_gates[name] = { name, value, rule_id: "gateway_override", secondary_exposures: [] };
+  }
+  return {
+    has_updates: true,
+    time: Date.now(),
+    hash_used: "djb2",
+    feature_gates,
+    dynamic_configs,
+    layer_configs: {
+      [STATSIG_I18N_LAYER_CONFIG]: {
+        name: STATSIG_I18N_LAYER_CONFIG,
+        value: { ...STATSIG_I18N_LAYER_VALUES },
+        rule_id: "gateway_override",
+        secondary_exposures: [],
+      },
+    },
+    param_stores: {},
+    exposures: {},
+    sdk_flags: {},
+  };
+}
+
+// 只认 ab.chatgpt.com 上的初始化/异常上报两条控制面路径；其余 fetch 一律放行给官方 handler。
+function classifyStatsigControlPlaneFetchUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (parsed.hostname !== "ab.chatgpt.com") return "";
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    if (pathname === "/v1/initialize") return "initialize";
+    if (pathname === "/v1/sdk_exception") return "sdk_exception";
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function sendStatsigControlPlaneNoopResponse(message, kind) {
+  const requestId = stringRouteId(message && message.requestId);
+  if (!requestId) return false;
+  routeOfficialWebContentsSend(MESSAGE_FOR_VIEW_CHANNEL, [
+    {
+      type: "fetch-response",
+      responseType: "success",
+      requestId,
+      status: 200,
+      headers: { "content-type": "application/json; charset=utf-8" },
+      // 初始化必须回合法 gate 配置；SDK 异常上报回空对象即可。
+      bodyJsonString:
+        kind === "initialize" ? JSON.stringify(buildStatsigInitializeGatewayResponse()) : "{}",
+    },
+  ]);
+  return true;
+}
+
+function maybeHandleStatsigControlPlaneFetchNoop(channel, args) {
+  if (channel !== MESSAGE_FROM_VIEW_CHANNEL) return false;
+  const message = fetchMessageFromIpcArgs(args);
+  if (!message) return false;
+  const kind = classifyStatsigControlPlaneFetchUrl(message.url);
+  if (!kind) return false;
+  diagnosticLog("statsig-telemetry", "fetch_blocked_local", {
+    method: message.method || "",
+    url: String(message.url).split("?")[0],
+    kind,
+  });
+  return sendStatsigControlPlaneNoopResponse(message, kind);
+}
 
 function parseJsonLike(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
@@ -2158,6 +2296,8 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   // Computer Use 锁屏授权由官方 Installer 决定；这里额外记录同进程直接 status，方便和官方回包对照。
   logComputerUseAuthRequest(channel, invokeArgs);
   if (maybeHandleComputerUseAuthWriteNoop(channel, invokeArgs)) return true;
+  if (maybeHandleStatsigTelemetryFetchNoop(channel, invokeArgs)) return true;
+  if (maybeHandleStatsigControlPlaneFetchNoop(channel, invokeArgs)) return true;
   logDesktopFeatureAvailability(channel, invokeArgs);
   const handler = officialIpc.handlers.get(channel);
   if (handler) {
@@ -2607,6 +2747,15 @@ function startOfficialRuntime(options = {}) {
       onIntercept: () => recordRuntimeCompatibilityHit(gatewayPointRefs.tray),
     })
   );
+  // 官方隐藏 renderer 的 Statsig 初始化 / 遥测通过 Electron main 的 net.fetch 真实发 HTTP。
+  // 无外网出口的服务器上这条连接黑洞挂起，初始化永不 resolve，浏览器端被 Suspense 卡在加载页。
+  // 这里覆写 electron.net，对 ab.chatgpt.com 初始化/异常上报和 chatgpt.com 遥测本地短路，其余透传。
+  runRuntimeCompatibilityCapability(
+    gatewayPointRefs.netFetchStatsig,
+    () => installOfficialNetFetchStatsigHook(electron, {
+      onIntercept: () => recordRuntimeCompatibilityHit(gatewayPointRefs.netFetchStatsig),
+    })
+  );
   runRuntimeCompatibilityCapability(
     gatewayPointRefs.singleInstance,
     patchOfficialAppSingleton
@@ -2675,5 +2824,7 @@ module.exports = {
     threadListInvalidationEnvelope,
     threadListInvalidationForOfficialMessage,
     threadListInvalidationRequest,
+    classifyStatsigControlPlaneFetchUrl,
+    buildStatsigInitializeGatewayResponse,
   },
 };

@@ -16,6 +16,67 @@ const {
   setWsHub,
 } = require("../runtime/ipc/official-runtime.cjs");
 const { __test: portableRunnerTest } = require("../runner/platform/portable.cjs");
+const {
+  __test: statsigNetTest,
+  installOfficialNetFetchStatsigHook,
+} = require("../runtime/electron/official-net-fetch-statsig-hook.cjs");
+
+test("Statsig net.fetch hook answers control-plane URLs locally and passes others through", () => {
+  const { statsigLocalResponseBodyForUrl, buildStatsigInitializeNetResponse } = statsigNetTest;
+
+  // 初始化必须回合法 gate 配置，且保留官方"新工作树"能力门 505458。
+  const initializeBody = statsigLocalResponseBodyForUrl(
+    "https://ab.chatgpt.com/v1/initialize?k=client-x&st=javascript-client"
+  );
+  assert.ok(initializeBody);
+  const initialize = JSON.parse(initializeBody);
+  assert.equal(initialize.has_updates, true);
+  assert.equal(initialize.feature_gates["505458"].value, true);
+  assert.equal(
+    initialize.dynamic_configs.statsig_default_enable_features.value["505458"],
+    true
+  );
+  assert.equal(initialize.layer_configs["72216192"].value.enable_i18n, true);
+  assert.deepEqual(buildStatsigInitializeNetResponse().sdk_flags, {});
+
+  // SDK 异常上报与 chatgpt.com 遥测吞成空对象；其余 URL 一律透传（空串）。
+  assert.equal(statsigLocalResponseBodyForUrl("https://ab.chatgpt.com/v1/sdk_exception"), "{}");
+  assert.equal(statsigLocalResponseBodyForUrl("https://chatgpt.com/ces/v1/rgstr?k=1"), "{}");
+  assert.equal(statsigLocalResponseBodyForUrl("https://chatgpt.com/ces/v1/log_event"), "{}");
+  assert.equal(statsigLocalResponseBodyForUrl("https://chatgpt.com/backend-api/me"), "");
+  assert.equal(statsigLocalResponseBodyForUrl("https://ab.chatgpt.com/v1/other"), "");
+  assert.equal(statsigLocalResponseBodyForUrl("not a url"), "");
+
+  // 覆写后的 net.fetch 命中 Statsig 地址时返回 200 Response，其它地址透传原生实现。
+  const passthrough = [];
+  const nativeNet = {
+    fetch: async (...args) => {
+      passthrough.push(args);
+      return { ok: true, status: 201 };
+    },
+    request() {},
+  };
+  const electronModule = { net: nativeNet };
+  const intercepted = [];
+  const hook = installOfficialNetFetchStatsigHook(electronModule, {
+    onIntercept: (url) => intercepted.push(url),
+  });
+  assert.equal(hook.installed, true);
+  const hookedNet = hook.net;
+
+  const served = hookedNet.fetch("https://ab.chatgpt.com/v1/initialize?k=x");
+  assert.ok(served instanceof Promise);
+  return served.then(async (res) => {
+    assert.equal(res.status, 200);
+    const payload = JSON.parse(await res.text());
+    assert.equal(payload.feature_gates["505458"].value, true);
+    assert.equal(intercepted.length, 1);
+
+    const other = await hookedNet.fetch("https://chatgpt.com/backend-api/me");
+    assert.equal(other.status, 201);
+    assert.equal(passthrough.length, 1);
+  });
+});
 
 test("forwards structured official app-host messages and preserves close signals", () => {
   const forwarded = [];
