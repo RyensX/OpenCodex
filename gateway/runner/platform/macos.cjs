@@ -18,6 +18,7 @@ const {
 } = require("../shared/fs-utils.cjs");
 const { logLine } = require("../shared/logging.cjs");
 const { writeGatewayAsar } = require("../shared/runner-asar.cjs");
+const { refreshMacIntegrity } = require("./macos-integrity.cjs");
 const { runner: runnerPoints } = require("../../runtime/modification/point-refs.cjs");
 
 function escapePlistString(value) {
@@ -83,6 +84,8 @@ function officialFrameworksFingerprint(layout) {
     }
   } catch {}
   return {
+    // 使旧版产生的外部绝对链接缓存失效。
+    copyVersion: 3,
     source: realpathSafe(layout.frameworksDir),
     appRoot: realpathSafe(layout.appRoot),
     executable: fileFingerprint(layout.executablePath),
@@ -112,7 +115,7 @@ function ensureFrameworksCopy({ layout, runnerFrameworksDir, markerPath, logger 
    * 内部路径回溯加载 framework，macOS sandbox 会拒绝跨 bundle symlink。这里复制到运行态 cache。
    */
   fs.rmSync(runnerFrameworksDir, { recursive: true, force: true });
-  fs.cpSync(layout.frameworksDir, runnerFrameworksDir, { recursive: true, force: true });
+  fs.cpSync(layout.frameworksDir, runnerFrameworksDir, { recursive: true, force: true, verbatimSymlinks: true });
   writeJson(markerPath, {
     fingerprint: nextFingerprint,
     copiedAt: new Date().toISOString(),
@@ -123,8 +126,8 @@ function ensureFrameworksCopy({ layout, runnerFrameworksDir, markerPath, logger 
 
 function signRunnerExecutable(executablePath) {
   /**
-   * 官方主二进制复制到 runner 后原签名会失效；只重签这个入口壳。
-   * Frameworks 保留官方签名副本，避免 deep 签名破坏 Chromium framework 的封装结构。
+   * 官方主二进制复制到 runner 后原签名会失效；最后签这个入口壳。
+   * 摘要未变化的 Frameworks 继续保留官方签名，不使用递归 deep 签名。
    */
   execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", executablePath], {
     stdio: ["ignore", "ignore", "pipe"],
@@ -155,17 +158,46 @@ async function createMacRunner({ layout, runtimeDir, logger, runCompatibility = 
     runnerPoints.gatewayAsar,
     () => writeGatewayAsar({ runnerResourcesDir, workDir })
   );
+  let changedFrameworks = [];
   runCompatibility(
     runnerPoints.macosBackgroundBundle,
     () => {
       fs.writeFileSync(path.join(contentsDir, "Info.plist"), runnerInfoPlist(runnerAsarPath), "utf8");
       fs.writeFileSync(path.join(contentsDir, "PkgInfo"), "APPL????", "utf8");
+      changedFrameworks = refreshMacIntegrity(runnerFrameworksDir, runnerAsarPath);
     }
   );
-  runCompatibility(
-    runnerPoints.macosEntrySignature,
-    () => signRunnerExecutable(runnerExecutablePath)
-  );
+  try {
+    runCompatibility(
+      runnerPoints.macosEntrySignature,
+      () => {
+        // 本地 runner 使用临时签名；辅助程序必须同步签名，否则原版 Team ID 拒绝加载副本。
+        // 保留原有权限，按由内到外的顺序签名，最后签入口以封存新资源。
+        for (const binary of changedFrameworks) {
+          const helpersDir = path.join(path.dirname(binary), "Helpers");
+          if (fs.existsSync(helpersDir)) {
+            for (const name of fs.readdirSync(helpersDir)) {
+              const helper = fs.realpathSync(path.join(helpersDir, name));
+              if (!helper.startsWith(fs.realpathSync(runnerFrameworksDir) + path.sep)) {
+                throw new Error(`Runner helper escapes its cache directory: ${name}`);
+              }
+              execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", "--options", "0", "--preserve-metadata=identifier,entitlements", helper], {
+                stdio: ["ignore", "ignore", "pipe"],
+              });
+            }
+          }
+          execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", "--preserve-metadata=identifier,entitlements,flags", binary], {
+            stdio: ["ignore", "ignore", "pipe"],
+          });
+        }
+        signRunnerExecutable(runnerExecutablePath);
+      }
+    );
+  } catch (error) {
+    // 摘要写入后签名若失败，下次必须从官方副本重建，不能误用半成品缓存。
+    fs.rmSync(frameworksMarkerPath, { force: true });
+    throw error;
+  }
 
   logLine(logger, `prepared official Electron runner: app=${runnerAppPath}`);
   logLine(logger, `official Electron source: app=${layout.appRoot} asar=${layout.asarPath}`);
