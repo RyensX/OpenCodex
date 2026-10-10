@@ -451,8 +451,12 @@ test("sidebar bootstrap accepts only the synchronous renderer-safe shape", () =>
   assert.equal(__test.normalizeInitialSidebarBootstrap(null), null);
 });
 
-test("uses the Desktop named pipe on Windows", () => {
-  assert.deepEqual(__test.officialDesktopIpcSocketPaths("win32"), ["\\\\.\\pipe\\codex-ipc"]);
+test("uses an instance-isolated Desktop named pipe on Windows", () => {
+  const [pipePath] = __test.officialDesktopIpcSocketPaths("win32");
+  assert.match(pipePath, /^\\\\\.\\pipe\\codex-ipc-[0-9a-f]{12}$/);
+  assert.notEqual(pipePath, "\\\\.\\pipe\\codex-ipc");
+  assert.equal(__test.remapOfficialWindowsIpcPipe("\\\\.\\pipe\\codex-ipc"), pipePath);
+  assert.equal(__test.remapOfficialWindowsIpcPipe(pipePath), pipePath);
   assert.match(__test.officialDesktopIpcSocketPaths("darwin")[0], /ipc[\\/]ipc\.sock$/);
 });
 

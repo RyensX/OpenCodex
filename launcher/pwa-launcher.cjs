@@ -41,7 +41,8 @@ function shortcutMatches(args, url) {
 }
 
 function discoveryRoots(platform, home, env, desktopPath) {
-  if (platform === "darwin") return [path.join(home, "Applications"), "/Applications"];
+  // 根据目标平台构造入口路径，避免跨平台验证时混用宿主机分隔符。
+  if (platform === "darwin") return [path.posix.join(home, "Applications"), "/Applications"];
   if (platform === "win32") {
     const win = path.win32;
     return [
@@ -52,11 +53,12 @@ function discoveryRoots(platform, home, env, desktopPath) {
     ].filter(Boolean);
   }
   if (platform === "linux") {
+    const posix = path.posix;
     return [
-      path.join(env.XDG_DATA_HOME || path.join(home, ".local", "share"), "applications"),
+      posix.join(env.XDG_DATA_HOME || posix.join(home, ".local", "share"), "applications"),
       ...(env.XDG_DATA_DIRS || "/usr/local/share:/usr/share").split(":")
-        .filter((dir) => path.isAbsolute(dir)).map((dir) => path.join(dir, "applications")),
-      desktopPath || path.join(home, "Desktop"),
+        .filter((dir) => posix.isAbsolute(dir)).map((dir) => posix.join(dir, "applications")),
+      desktopPath || posix.join(home, "Desktop"),
     ];
   }
   return [];

@@ -194,11 +194,20 @@ html, body {
   flex-wrap: wrap;
 }
 
+/* 访问地址标签与地址行同行展示：右侧按钮组与地址天然垂直居中（此前标签独立成行导致地址偏下、按钮偏上）。 */
+.hero-content {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
 .hero-label {
   font-size: 13px;
   color: var(--text-secondary);
   font-weight: 500;
-  margin-bottom: 8px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .url-list {
@@ -320,6 +329,11 @@ button.primary:hover {
   gap: 32px;
 }
 
+/* [OCX-FORK] hidden 语义修复：flex 声明会压过 hidden 属性的 UA display:none，显式恢复（如服务器中继面板）。 */
+.setting-item[hidden] {
+  display: none;
+}
+
 .setting-item:first-child {
   border-top: 1px solid var(--border-color);
 }
@@ -389,6 +403,91 @@ input[type="text"] {
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* [OCX-FORK] BEGIN 服务器中继配置面板样式（upstream 无此块，整块新增；合并时保留）。 */
+/* 服务器中继配置面板：选中「启动地址 = 服务器」时展开，整块占满设置项宽度。 */
+.relay-panel {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.relay-panel .setting-info {
+  margin-bottom: 12px;
+}
+
+.relay-form {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  width: 100%;
+}
+
+.relay-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.relay-row.two .relay-field {
+  flex: 1 1 180px;
+}
+
+.relay-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 100%;
+}
+
+.relay-field > span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.relay-field input {
+  width: 100%;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 13px;
+}
+
+/* 只读输入框（设备随机码）：与相邻输入框同风格，但视觉上标明不可编辑。 */
+.relay-readonly {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: default;
+  user-select: all;
+}
+
+.relay-readonly:focus {
+  border-color: var(--btn-border);
+  outline: none;
+}
+
+.relay-row.relay-actions {
+  align-items: center;
+  gap: 10px;
+}
+
+.relay-toggle-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex: 1 1 auto;
+}
+
+.relay-row.relay-actions #saveRelay {
+  margin-left: auto;
+}
+
+.relay-error {
+  font-size: 12px;
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid rgba(220, 38, 38, 0.25);
+  border-radius: 8px;
+  padding: 8px 12px;
+  line-height: 1.6;
+}
+/* [OCX-FORK] END 服务器中继配置面板样式 */
 
 input:focus {
   outline: none;

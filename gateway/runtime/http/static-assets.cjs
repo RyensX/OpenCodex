@@ -33,7 +33,8 @@ const PATCHED_ASSET_CACHE_MAX_BYTES = Math.max(
     ? configuredPatchedAssetCacheMaxBytes
     : 96 * 1024 * 1024
 );
-const PATCHED_ASSET_PATCH_REVISION = "11";
+// 每次兼容补丁逻辑变化都递增版本，避免运行设备继续命中旧的持久化 renderer 缓存。
+const PATCHED_ASSET_PATCH_REVISION = "24";
 const ASYNC_PATCH_MIN_BYTES = 512 * 1024;
 const OFFICIAL_ASSET_PATCH_WORKER_IDLE_MS = 30_000;
 const OFFICIAL_ASSET_PATCH_WORKER_PATH = path.join(__dirname, "official-asset-patch-worker.cjs");
@@ -337,6 +338,11 @@ function createStaticAssetService({
   const patchedOfficialPrefixes = Array.from(
     new Set([
       PATCHED_OFFICIAL_PREFIX,
+      "/official-patched-v22/",
+      "/official-patched-v21/",
+      "/official-patched-v20/",
+      "/official-patched-v19/",
+      "/official-patched-v18/",
       "/official-patched-v7/",
       "/official-patched-v6/",
       "/official-patched-v5/",
@@ -380,6 +386,9 @@ function createStaticAssetService({
     [staticPoints.historyTurnSignals, patchAppServerManagerSignalsChunk],
     [staticPoints.applicationMenu, patchApplicationMenuCapabilityCheck],
     [staticPoints.appServerRequestScheduling, patchAppServerRequestScheduling],
+    [staticPoints.statsigBootstrap, patchStatsigBootstrap],
+    [staticPoints.liveSidebarState, patchLiveSidebarState],
+    [staticPoints.accountProfile, patchAccountProfile],
     [staticPoints.pluginImageLazyLoad, patchPluginSummaryImageInlining],
     [staticPoints.openInFolderLocale, patchOpenInFolderLocaleMessage],
     ...dynamicHtmlPoints.map((point) => [point, () => undefined]),
@@ -409,6 +418,9 @@ function createStaticAssetService({
   const patchHistorySignalsCompatible = capabilityFor(staticPoints.historyTurnSignals);
   const patchApplicationMenuCompatible = capabilityFor(staticPoints.applicationMenu);
   const patchRequestSchedulingCompatible = capabilityFor(staticPoints.appServerRequestScheduling);
+  const patchStatsigBootstrapCompatible = capabilityFor(staticPoints.statsigBootstrap);
+  const patchLiveSidebarStateCompatible = capabilityFor(staticPoints.liveSidebarState);
+  const patchAccountProfileCompatible = capabilityFor(staticPoints.accountProfile);
   const patchPluginImageCompatible = capabilityFor(staticPoints.pluginImageLazyLoad);
   const patchOpenInFolderLocaleCompatible = capabilityFor(staticPoints.openInFolderLocale);
 
@@ -818,6 +830,9 @@ function createStaticAssetService({
 
   function startupAssetPreloads(rawHtml) {
     const urls = new Set();
+    // 新版入口动态导入 app-initial；显式预载，避免中继先下载 shared 大包再串行下载主包。
+    const initialModule = officialAssetFileNames().find((name) => /^app-initial-.*\.js$/.test(name));
+    if (initialModule) urls.add(`/official/assets/${initialModule}`);
     for (const match of rawHtml.matchAll(/<script\b[^>]*\btype=["']module["'][^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)) {
       urls.add(match[1]);
     }
@@ -955,23 +970,28 @@ function createStaticAssetService({
     html = patchHtmlAssetPathsCompatible(html);
     html = patchHtmlFontPreloadsCompatible(html);
     const startupPreloads = startupAssetPreloads(html);
+    // 中文菜单依赖语言包；与主模块并行下载，不能等 window.load 后再排入同一条中继队列。
+    const localePreloadHref = lateLocaleModuleHref(i18n.locale);
     const lateModuleHrefs = lateStartupModuleHrefs(i18n.locale);
     const previewMarkup = sidebarPreviewMarkup(options.sidebarPreview, i18n.locale);
     if (startupPreloads) hitCompatibilityPoint(staticPoints.startupPreload);
     if (previewMarkup) hitCompatibilityPoint(staticPoints.sidebarPreview);
     const useRuntimeBundle = canBundleRuntimeBootstrap();
-    const deferRuntimeScripts = !officialHtmlHasEagerScript(html);
+    // 官方入口本身是 module script；兼容层必须先同步完成桥接，避免入口先执行后永久停在 startup loader。
+    const deferRuntimeScripts = false;
     const runtimeScript = (src) =>
       `<script${deferRuntimeScripts ? " defer" : ""} src="${src}"></script>`;
+    // 官方 LocaleResolver 首次读取后会缓存语言；配置脚本须先同步执行，避免中继延迟让模块先选中英文。
+    const runtimeConfigScript = '<script src="/codex-web-config.js"></script>';
     const runtimeScripts = useRuntimeBundle
       ? [
           '<link rel="preload" as="script" href="/codex-web-config.js">',
           `<link rel="preload" as="script" href="${OPENCODEX_RUNTIME_BOOTSTRAP_PATH}">`,
-          runtimeScript("/codex-web-config.js"),
+          runtimeConfigScript,
           runtimeScript(OPENCODEX_RUNTIME_BOOTSTRAP_PATH),
         ]
       : [
-          runtimeScript("/codex-web-config.js"),
+          runtimeConfigScript,
           runtimeScript(OPENCODEX_MODIFICATION_RUNTIME_PATH),
           runtimeScript(OPENCODEX_RUNTIME_COMPATIBILITY_PATH),
           runtimeScript(OPENCODEX_SIDEBAR_PREVIEW_PATH),
@@ -996,6 +1016,7 @@ function createStaticAssetService({
     // manifest 在 Cloudflare Access 等前置认证后面也必须带同源凭据，否则 Chrome 可能拿不到受保护的 manifest。
     const base = [
       '<base href="/official/">',
+      localePreloadHref ? `<link rel="modulepreload" crossorigin href="${escapeHtml(localePreloadHref)}">` : "",
       startupPreloads,
       `<link rel="manifest" href="${PWA_MANIFEST_PATH}" crossorigin="use-credentials">`,
       '<meta name="theme-color" content="#ffffff">',
@@ -1333,6 +1354,92 @@ ${pluginGatewayStateBootstrapScript()}
     );
   }
 
+  function patchNewThreadResumeRace(source) {
+    /**
+     * 新线程只有 thread/start 占位信息时还没有可恢复的 rollout，官方恢复流程不能提前调用
+     * thread/resume；提前恢复会收到 no rollout found，并阻断首条 turn/start。官方用
+     * threadStartKind=default 也会被官方补到历史会话摘要，不能单独作为占位判断；历史摘要在
+     * thread/read 前同样可能没有 historyMode，因此还要确认 sessionId、rolloutPath 和标题都为空。
+     * 只有这类尚未 materialize 的本地占位线程才跳过 resume，已有历史仍完整执行 hydration。
+     * 页面内可能并发触发多次恢复，因此用一次性集合在状态写入生效前也阻止重复 resume。
+     */
+    const marker = "threadResumeRaceGuard";
+    if (source.includes(marker)) return source;
+    const preamble =
+      /(let\{conversationId:([A-Za-z_$][\w$]*),[\s\S]*?\}=([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.getConversation\(\2\),([A-Za-z_$][\w$]*)=\5\.getHostId\(\),([A-Za-z_$][\w$]*)=\5\.getWindowActivity\(\),([A-Za-z_$][\w$]*)=\7\?\.visibilityState;)/;
+    const match = preamble.exec(source);
+    if (!match) return source;
+    const conversationId = match[2];
+    const manager = match[5];
+    const conversation = match[4];
+    const guard =
+      `/*${marker}*/globalThis.__opencodexThreadResumeGuards??=new Set;if(${conversation}?.resumeState===\`needs_resume\`&&${conversation}?.threadStartKind&&${conversation}?.historyMode==null&&${conversation}?.sessionId==null&&!${conversation}?.rolloutPath&&${conversation}?.turns?.length===0&&!${conversation}?.title&&!globalThis.__opencodexThreadResumeGuards.has(${conversationId})){globalThis.__opencodexThreadResumeGuards.add(${conversationId});${manager}.updateConversationState(${conversationId},e=>{e.resumeState=\`resumed\`});${manager}.ensureRecentConversationId(${conversationId});return{status:\`ready\`}}`;
+    return `${source.slice(0, match.index + match[0].length)}${guard}${source.slice(match.index + match[0].length)}`;
+  }
+
+  function patchHiddenRendererThreadOwnership(source) {
+    /**
+     * 远端 Web 的请求由隐藏 renderer 代发；隐藏窗口本身不可见且没有焦点时，
+     * 官方会把它判定为不能获取 thread stream owner，随后把刚创建的线程降为 follower，
+     * 导致首条 turn/start 收到“请回到创建窗口继续”的错误。远端网关已经是该窗口的唯一执行端，
+     * 因此只放宽这一项 owner 能力判断，仍保留官方的 queued-message 禁用条件。
+     */
+    const marker = "opencodexHiddenRendererThreadOwnership";
+    if (source.includes(marker)) return source;
+    const ownershipCheck =
+      /(canAcquireThreadStream:!ppn\(\)&&nzn\(\{isHotkeyWindow:ezn\(\),isWindowActive:e===`visible`&&document\.hasFocus\(\)\}\))/;
+    if (!ownershipCheck.test(source)) return source;
+    return source.replace(
+      ownershipCheck,
+      "/*opencodexHiddenRendererThreadOwnership*/canAcquireThreadStream:!ppn()&&nzn({isHotkeyWindow:false,isWindowActive:true})"
+    );
+  }
+
+  function patchNewThreadSnapshotOwnership(source) {
+    /**
+     * 新线程尚未 materialize 时，其他 renderer 的 snapshot 可能先于首条 turn/start 到达。
+     * 官方会把当前 owner 降为 follower，随后首条消息被路由到不存在的外部 owner；新线程应继续由创建它的 renderer 保持 owner。
+     */
+    const marker = "opencodexNewThreadSnapshotOwnership";
+    if (source.includes(marker)) return source;
+    // 只从目标方法的参数绑定会话 ID，避免跨方法贪婪匹配后把 snapshot 当成会话对象。
+    const snapshotGuard =
+      /(handleThreadStreamStateChanged\(([\w$]+),([\w$]+),([\w$]+)\)\{if\(!this\.followedConversationIds\.has\(\2\)[\s\S]*?if\()([\w$]+)(\?\.role===`owner`&&)([\w$]+)(\.type!==`snapshot`\)return;)/;
+    if (!snapshotGuard.test(source)) return source;
+    return source.replace(
+      snapshotGuard,
+      (_match, prefix, conversationId, _stateVar, _ownerVar, ownerExpression, ownerCondition, snapshotVar) =>
+        `${prefix}${ownerExpression}${ownerCondition}/*opencodexNewThreadSnapshotOwnership*/(${snapshotVar}.type!==\`snapshot\`||this.params.threadStore.getConversation(${conversationId})?.threadStartKind))return;`
+    );
+  }
+
+  function patchWriterConflictHistoryCompatible(source) {
+    /**
+     * 远端设备打开已有会话时，原设备可能仍持有 writer；官方 resume 会拒绝第二个 writer，
+     * 但同一会话的 thread/turns/list 与 thread/items/list 仍可用于只读历史。读取成功后把远端
+     * renderer 标记为 follower，避免空白页并保持原设备继续承担写入职责。
+     * 压缩后的函数和变量名随官方构建变化，必须从历史回退调用中绑定，不能固定某一版名称。
+     */
+    const marker = "opencodexWriterConflictHistoryCompatible";
+    if (source.includes(marker)) return source;
+    // 1. 以官方 writer 冲突历史回退的完整结构定位，保留新版的恢复条件和失败日志。
+    const fallback =
+      /if\((?<condition>(?:![\w$]+&&)?[\w$]+\((?<error>[\w$]+)\))&&(?<snapshot>[\w$]+)\?\.thread\.historyMode===`paginated`\)try\{await (?<hydrate>[\w$]+)\((?<manager>[\w$]+),\{conversationId:(?<conversation>[\w$]+),isCurrentResumeAttempt:(?<isCurrent>[\w$]+),mapThreadTurns:(?<policy>[\w$]+)\.mapThreadTurns,requestOptions:(?<requestOptions>[\w$]+),thread:\k<snapshot>\.thread,turnMergePolicy:\k<policy>\.turnMergePolicy,workspaceRoots:(?<roots>[\w$]+)\}\)\}(?<failure>catch\([\w$]+\)\{\k<manager>\.logger\.warning\(`Failed to hydrate writer-conflicted thread history`,\{safe:\{conversationId:\k<conversation>\},sensitive:\{error:[\w$]+\}\}\)\})/;
+    if (!fallback.test(source)) return source;
+
+    // 2. 沿官方协调服务发现持有者并读取历史；有效 follower 后续可发送消息，而不是仅隐藏冲突提示。
+    return source.replace(
+      fallback,
+      (...args) => {
+        const { condition, snapshot, hydrate, manager, conversation, isCurrent, policy, requestOptions, roots, failure } = args[args.length - 1];
+        // 已收到设备端活跃快照时保留当前 follower 与 revision，不能用分页历史覆盖运行状态。
+        const liveFollower = `if(${isCurrent}()&&${manager}.getStreamRole(${conversation})?.ownerClientId&&${manager}.getStreamRole(${conversation})?.role===\`follower\`&&${manager}.getConversation(${conversation})?.threadRuntimeStatus?.type===\`active\`){${manager}.updateConversationState(${conversation},e=>{e.resumeState=\`resumed\`});return{status:\`ready\`}}`;
+        // 使用官方 owner 身份承接发送并订阅其状态，不让 follower 伪造 owner 快照；发现失败保留原异常。
+        return `if(${condition})try{${liveFollower}const __opencodexOwnerClientId=await window.__opencodexFindThreadOwner?.(${manager},${conversation});await ${hydrate}(${manager},{conversationId:${conversation},isCurrentResumeAttempt:${isCurrent},mapThreadTurns:${policy}.mapThreadTurns,requestOptions:${requestOptions},thread:${snapshot}?.thread??{id:${conversation},historyMode:\`paginated\`,cwd:${manager}.getConversation(${conversation})?.cwd??${roots}?.[0]??\`/\`,source:null,turns:[]},turnMergePolicy:${policy}.turnMergePolicy,workspaceRoots:${roots}});if(${isCurrent}()&&__opencodexOwnerClientId){${manager}.updateConversationState(${conversation},e=>{e.historyMode=e.historyMode??\`paginated\`;e.resumeState=\`resumed\`});${manager}.setConversationStreamRole(${conversation},{role:\`follower\`,ownerClientId:__opencodexOwnerClientId});${manager}.setConversationFollowing(${conversation},true);${manager}.ensureRecentConversationId(${conversation});return{status:\`ready\`}}}${failure}/*${marker}*/`;
+      }
+    );
+  }
+
   function downloadFileMessage() {
     const messages = currentHostI18n().messages || {};
     return messages[OPENCODEX_DOWNLOAD_FILE_MESSAGE_ID] || "Download file";
@@ -1511,12 +1618,100 @@ ${pluginGatewayStateBootstrapScript()}
     return patched;
   }
 
+  /** 只改写官方 Statsig 的两个网络入口，普通 AppHost 请求继续沿用官方 RPC。 */
+  function patchStatsigBootstrap(source) {
+    // 登录后先保留本地兼容配置，再经官方 AppHost 异步读取真实导航评估，避免依赖已被删除的磁盘缓存。
+    let patched = source.replace(
+      /(([A-Za-z_$][\w$]*)\.safePost\(`\/wham\/statsig\/bootstrap`,\{requestBody:([A-Za-z_$][\w$]*),retry:!1,signal:([A-Za-z_$][\w$]*)\}\))/g,
+      (_match, call, client, request, signal) =>
+        `(window.__opencodexStatsigBootstrap?window.__opencodexStatsigBootstrap(${request},${signal},(request,signal)=>${client}.safePost(\`/wham/statsig/bootstrap\`,{requestBody:request,retry:!1,signal})): ${call})`
+    );
+    // 官方同步初始化后把 SDK 实例交回桥接层；延迟到达的导航评估通过 SDK 正常事件更新 React。
+    patched = patched.replace(
+      /([\w$]+\.dataAdapter\.setData\([\w$]+\.statsigPayload\),[\w$]+\(([\w$]+)\.initializeSync\(\),`electron`\)),\2\}/g,
+      "$1,window.__opencodexSyncStatsigNavigation?.($2),$2}"
+    );
+    // SDK 的 networkOverrideFunc 同样走 AppHost；初始化仍交给现有 fetch 拦截器，避免十秒超时。
+    patched = patched.replace(
+      /(networkOverrideFunc:\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)=>)([A-Za-z_$][\w$]*\(\2,\3,[A-Za-z_$][\w$]*\.loggingEnabled!==`disabled`\))/g,
+      "$1(window.__codexWebFetchPatched&&$2.split('?')[0]===`https://ab.chatgpt.com/v1/initialize`?window.fetch($2,$3):$4)"
+    );
+    return patched;
+  }
+
+  /** 把独立 observer 的状态事件交给官方 AppHost 共用的 renderer 分发器。 */
+  function patchLiveSidebarState(source) {
+    // 新版目录走 AppHost；把实际服务交给桥接层，设备端删除事件才能移除目录条目。
+    let patched = source.replace(
+      /([\w$]+\.localThreadCatalog)(?=,[\w$]+,[\w$]+;)/,
+      (_match, service) => `(window.__opencodexInstallThreadCatalog?.(${service},${service.split('.')[0]}.clientCoordination)??${service})`
+    );
+    // 只在恢复历史明确失败时清理不存在的索引，保留原异常让当前打开操作正常失败。
+    patched = patched.replace(
+      /(throw!([\w$]+)\(\)\|\|\(![\w$]+&&[\w$]+\(([\w$]+)\)\?\.includes\(`session \$\{([\w$]+)\} is archived\.`\)&&([\w$]+)\.suppressArchivedConversation\(\4\))/,
+      'if($2())await window.__opencodexRemoveMissingThread?.($5,$4,$3);$1'
+    );
+    // runtime active 覆盖尚未刷新的历史 completed turn；等待子 agent 时不能被历史回包提前结束。
+    patched = patched.replace(
+      /(let\{resumeState:([\w$]+),threadRuntimeStatus:([\w$]+)\}=([\w$]+),([\w$]+)=[\w$]+\(\4\);return )(\2===`needs_resume`\?\3\?\.type===`active`:\5\.length===0\?\2===`resuming`:[\w$]+\(\{turns:\5\}\)\?\.status===`inProgress`)(\})/,
+      '$1$3?.type===`active`||($6)$7'
+    );
+    // 桌面把临时消息移入服务端队列后会广播空队列；follower 必须重新读取真源，不能只清空临时状态。
+    patched = patched.replace(
+      /(this\.disposed\|\|([\w$]+)\?\.role!==`follower`\|\|\2\.ownerClientId!==([\w$]+)\)return;)(let ([\w$]+)=this\.pending\.get\(([\w$]+)\.conversationId\);)/,
+      '$1this.loadSubscribedMessages($6.conversationId);$4'
+    );
+    // observer 已订阅侧栏目录；未打开的会话也需接收完整快照，增量仍受官方 owner/revision 校验。
+    patched = patched.replace(
+      /handleThreadStreamStateChanged\(([\w$]+),([\w$]+),([\w$]+)\)\{if\(!this\.followedConversationIds\.has\(\1\)\)return;/,
+      'handleThreadStreamStateChanged($1,$2,$3){if(!this.followedConversationIds.has($1)&&$2.type!==`snapshot`&&this.getStreamRole($1)?.role!==`follower`)return;'
+    );
+    const emit = patched.match(/threadStreamStateChanged\([\w$]+\)\{([\w$]+)\(`thread-stream-state-changed`,[\w$]+\)\}/)?.[1];
+    if (!emit) return patched;
+    // 通过事件函数定位其 Map，避免按压缩变量名或任意 new Map 猜测补丁位置。
+    const escapedEmit = emit.replace(/\$/g, "\\$");
+    const dispatcher = patched.match(new RegExp(`function ${escapedEmit}\\([\\w$]+,[\\w$]+\\)\\{let [\\w$]+=([\\w$]+)\\.get\\(`));
+    if (!dispatcher) return patched;
+    // 等到官方注册 stream listener 再重放，否则模块初始化早于 manager 创建，会丢掉首个 snapshot。
+    const registry = dispatcher[1];
+    const escapedRegistry = registry.replace(/\$/g, "\\$");
+    patched = patched.replace(
+      new RegExp(`function ([\\w$]+)\\(([\\w$]+),([\\w$]+)\\)\\{let ([\\w$]+)=${escapedRegistry}\\.get\\(\\2\\);([\\s\\S]{0,200}?)return \\4\\.add\\(([\\w$]+)\\),`),
+      '$&queueMicrotask(()=>window.__opencodexCoordinationListenerReady?.($2)),'
+    );
+    // 保持原变量声明语法，待模块完成初始化后再重放首屏状态，避免 Map 尚未赋值。
+    return patched.replace(`${registry}=new Map`, `${registry}=(queueMicrotask(()=>window.__opencodexInstallCoordinationDispatcher?.(${emit},channel=>(${registry}.get(channel)?.size||0)>0)),new Map)`);
+  }
+
+  /** 同一账号的资料查询读取本机展示身份，缺失时仍走官方 /me 接口。 */
+  function patchAccountProfile(source) {
+    // 官方 query-seed 包装器会覆盖 initialData；在实际 queryFn 中按官方 queryKey 校验账号。
+    let patched = source.replace(
+      /(queryKey:[\w$]+\(\{accountId:[\w$]+,userId:[\w$]+\}\),queryFn:async\(\{signal:)([\w$]+)(\}\)=>)([\w$]+\.parse\(await [\w$]+\.safeGet\(`\/me`,\{signal:\2\}\)\))/g,
+      "$1$2,queryKey:opencodexProfileKey$3window.__opencodexAccountProfile?.(opencodexProfileKey[2],opencodexProfileKey[1])??$4"
+    );
+    // 基础身份已有数据时无需等待可选公开资料和账号设置，后续资料仍可按原请求更新。
+    const profileQuery = patched.match(/([\w$]+)=ji\([\w$]+,\(\{accountId:[\w$]+,userId:[\w$]+\}\)=>\(\{[^;]{0,500}opencodexProfileKey/);
+    if (!profileQuery) return patched;
+    const escapedQuery = profileQuery[1].replace(/\$/g, "\\$");
+    const binding = patched.match(new RegExp(`let\\{data:([\\w$]+),isPending:([\\w$]+)\\}=[\\w$]+\\(${escapedQuery},[\\w$]+\\)`));
+    if (!binding) return patched;
+    const escapedPending = binding[2].replace(/\$/g, "\\$");
+    return patched.replace(new RegExp(`=(${escapedPending}\\|\\|[\\w$]+&&\\([\\w$]+\\|\\|[\\w$]+\\))`), `=${binding[1]}==null&&($1)`);
+  }
+
   function officialAssetHasPatchCandidate(reqPath, data, req) {
     const loopback = isLoopbackHostHeader(req && req.headers && req.headers.host);
     return (
       /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath) ||
       data.includes(APPLICATION_MENU_TOKEN) ||
       data.includes(APP_SERVER_REQUEST_CLIENT_DISPATCH_ERROR) ||
+      data.includes("/wham/statsig/bootstrap") ||
+      data.includes("threadStreamStateChanged(") ||
+      data.includes(".localThreadCatalog") ||
+      data.includes("maybe_resume_started") ||
+      data.includes("canAcquireThreadStream:!ppn()") ||
+      data.includes(".safeGet(`/me`,") ||
       (!loopback &&
         (data.includes(OPEN_IN_FOLDER_LOCALE_TOKEN) ||
           (data.includes("composerIconPath") && data.includes("read-file-binary"))))
@@ -1534,8 +1729,21 @@ ${pluginGatewayStateBootstrapScript()}
     let patched = isHistorySignalsChunk
       ? patchHistorySignalsCompatible(source)
       : source;
+    // 新建线程的占位状态不能提前走 thread/resume，否则首条消息会被官方错误处理阻断。
+    patched = patchNewThreadResumeRace(patched);
+    // 隐藏 renderer 负责远端 Web 的唯一执行链，必须能够稳定取得新线程 owner。
+    patched = patchHiddenRendererThreadOwnership(patched);
+    // 新线程的首个 snapshot 不能抢走本地创建 renderer 的 owner。
+    patched = patchNewThreadSnapshotOwnership(patched);
+    // 已有设备持有 writer 时，远端只读历史并进入 follower，避免 resume 错误阻断会话展示。
+    patched = patchWriterConflictHistoryCompatible(patched);
     patched = patchApplicationMenuCompatible(patched);
     patched = patchRequestSchedulingCompatible(patched);
+    // 将新版 AppHost 初始化接回已有 Web Provider，避免启动阶段请求无法被本地处理。
+    patched = patchStatsigBootstrapCompatible(patched);
+    // 新版 AppHost 不再消费旧侧栏 IPC；将状态同步和资料首屏交回官方 renderer 的原有状态机。
+    patched = patchLiveSidebarStateCompatible(patched);
+    patched = patchAccountProfileCompatible(patched);
     if (!loopback) {
       patched = patchPluginImageCompatible(patched);
       patched = patchOpenInFolderLocaleCompatible(patched, options.downloadMessage || downloadFileMessage());
@@ -1573,10 +1781,10 @@ ${pluginGatewayStateBootstrapScript()}
   }
 
   /** 静态资源缓存策略：hash asset 长缓存，入口 HTML/no-store 保持可更新。 */
-  function cacheControlForRequestPath(reqPath, responsePatched = false) {
+  function cacheControlForRequestPath(reqPath, responsePatched = false, responseData = null) {
     if (process.env.CODEX_WEB_DISABLE_ASSET_CACHE === "1") return "no-store";
     if (patchedOfficialAssetName(reqPath)) {
-      if (responsePatched) {
+      if (responsePatched && (!responseData || responseData.includes(OPEN_IN_FOLDER_LOCALE_TOKEN))) {
         // 动态 patch 仍要求每次校验，但允许浏览器保存响应并通过 ETag 复用，避免旧版本长期驻留。
         return "private, no-cache, must-revalidate";
       }
@@ -1586,11 +1794,14 @@ ${pluginGatewayStateBootstrapScript()}
        */
       if (
         reqPath.startsWith(PATCHED_OFFICIAL_PREFIX) &&
-        /-[A-Za-z0-9_-]{8}\.(?:avif|css|gif|ico|jpe?g|js|png|svg|webp|woff2?)$/i.test(
+        // 新版 Rolldown 产物使用 12 位十六进制哈希；旧版 Vite 的 8 位哈希继续兼容。
+        /-(?:[A-Za-z0-9_-]{8}|[a-f0-9]{12})\.(?:avif|css|gif|ico|jpe?g|js|png|svg|webp|woff2?)$/i.test(
           patchedOfficialAssetName(reqPath)
         )
       ) {
-        return "public, max-age=31536000, immutable";
+        // 菜单、调度和 Statsig 的转换只由版本化代码决定；无需每次刷新再传输整份主包。
+        // 含主机语言文案的资源在上方继续逐次校验，静态补丁仅保存在当前浏览器的私有缓存。
+        return responsePatched ? "private, max-age=31536000, immutable" : "public, max-age=31536000, immutable";
       }
       // 旧前缀没有可靠版本位，只用于兼容浏览器残留的懒加载请求。
       return "no-store";
@@ -1622,7 +1833,7 @@ ${pluginGatewayStateBootstrapScript()}
         const sendRepresentation = (representation) => {
           const headers = {
             "content-type": contentType,
-            "cache-control": cacheControlForRequestPath(reqPath, entry.patched),
+            "cache-control": cacheControlForRequestPath(reqPath, entry.patched, entry.data),
             etag: representation.etag,
             vary: "Accept-Encoding",
           };
@@ -1695,7 +1906,7 @@ ${pluginGatewayStateBootstrapScript()}
       req,
       {
         "content-type": mimeType(file),
-        "cache-control": cacheControlForRequestPath(reqPath, data !== sourceData),
+        "cache-control": cacheControlForRequestPath(reqPath, data !== sourceData, data),
         ...(sourceEtag ? { etag: sourceEtag, vary: "Accept-Encoding" } : {}),
       },
       data
@@ -1723,10 +1934,15 @@ ${pluginGatewayStateBootstrapScript()}
         "Official renderer bundle is not available yet."
       );
     }
-    // renderer HTML 引用动态配置和带版本的静态资源；入口本身不缓存，升级后刷新即可切换新 bundle。
+    // renderer HTML 含当前会话快照，使用私有短缓存降低远端重复打开的带宽；版本化静态资源仍负责升级后的缓存失效。
     const response = gzipIfUseful(
       req,
-      { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers },
+      {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "private, max-age=30, stale-while-revalidate=300",
+        vary: "Accept-Encoding, Authorization, Cookie",
+        ...headers,
+      },
       Buffer.from(html, "utf-8")
     );
     return send(
@@ -1776,21 +1992,43 @@ ${pluginGatewayStateBootstrapScript()}
       runtimeBootstrapRepresentation({ headers: { "accept-encoding": "br,gzip" } }, bootstrapEntry);
       runtimeBootstrapRepresentation({ headers: { "accept-encoding": "gzip" } }, bootstrapEntry);
     }
-    const mainFileName = officialAssetFileNames()
-      .filter((fileName) => /^app-initial-[A-Za-z0-9_-]+\.js$/.test(fileName))
-      .sort()[0];
-    if (!mainFileName) return;
-    const reqPath = `${PATCHED_OFFICIAL_PREFIX}assets/${mainFileName}`;
-    const file = locateOfficialAsset(`assets/${mainFileName}`);
-    if (!file) return;
-    // 本机调试与远程浏览器的主包 patch 可能不同；同时准备 HTTPS/Brotli 与 HTTP/gzip 两条传输路径。
-    await Promise.all(
-      ["127.0.0.1", "opencodex.remote"].map(async (host) => {
-        const req = { headers: { "accept-encoding": "br,gzip", host } };
-        const entry = await cachedPatchedAsset(reqPath, file, req);
-        await Promise.all([cachedRepresentation(entry, "br"), cachedRepresentation(entry, "gzip")]);
-      })
-    );
+    // 仅准备当前启动所需的入口、共享资源和宿主语言包，避免首次中继访问串行等待补丁与压缩。
+    const locale = currentHostI18n().locale;
+    // 使用当前官方缓存的文件索引选择启动 chunk，保留原有版本切换规则。
+    const fileNames = officialAssetFileNames();
+    const startupFileNames = new Set();
+    for (const fileName of fileNames) {
+      if (/^app-(?:initial|shared)-[A-Za-z0-9_-]+\.(?:js|css)$/.test(fileName)
+          || (locale && fileName.startsWith(`${locale}-`) && fileName.endsWith(".js"))) {
+        startupFileNames.add(fileName);
+      }
+    }
+    // 官方入口和 preload 依构建变化，以当前 HTML 引用为准，不预热其他页面的懒加载 chunk。
+    const index = locateOfficialIndex();
+    if (index) {
+      // 读取当前版本的入口引用，补齐实际使用的模块入口及依赖样式。
+      const html = readText(index.file);
+      for (const match of html.matchAll(/<(?:script|link)\b[^>]*\b(?:src|href)=["'](?:\.\/|\/official\/)?assets\/([A-Za-z0-9_.-]+\.(?:js|css))["']/gi)) {
+        startupFileNames.add(match[1]);
+      }
+    }
+    // 逐个资源预热，复用既有内存预算及淘汰规则，避免大包同时构建增加启动峰值内存。
+    for (const fileName of startupFileNames) {
+      const reqPath = `${PATCHED_OFFICIAL_PREFIX}assets/${fileName}`;
+      // 资源定位仍校验官方目录边界；缓存切换时缺失的文件直接跳过。
+      const file = locateOfficialAsset(`assets/${fileName}`);
+      if (!file) continue;
+      // 本机调试与远程浏览器的主包 patch 可能不同；同时准备 HTTPS/Brotli 与 HTTP/gzip 两条传输路径。
+      await Promise.all(
+        ["127.0.0.1", "opencodex.remote"].map(async (host) => {
+          const req = { headers: { "accept-encoding": "br,gzip", host } };
+          // 构建当前主机类型的补丁表示，使后续真实请求复用同一个缓存键。
+          const entry = await cachedPatchedAsset(reqPath, file, req);
+          // 提前准备两种浏览器传输编码，沿用缓存容量及压缩质量。
+          await Promise.all([cachedRepresentation(entry, "br"), cachedRepresentation(entry, "gzip")]);
+        })
+      );
+    }
   }
 
   function servePluginLoader(res) {

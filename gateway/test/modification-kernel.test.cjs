@@ -18,23 +18,23 @@ const {
 test("typed modification catalog assigns every point to a group and adapter chain", () => {
   assert.equal(POINT_GROUP_DEFINITIONS.length, 17);
   assert.equal(ADAPTER_DEFINITIONS.length, 23);
-  assert.equal(POINT_DEFINITIONS.length, 103);
-  assert.equal(POINT_TARGETS.length, 103);
-  assert.equal(MIGRATION_MATRIX.length, 103);
+  assert.equal(POINT_DEFINITIONS.length, 106);
+  assert.equal(POINT_TARGETS.length, 106);
+  assert.equal(MIGRATION_MATRIX.length, 106);
   assert.equal(MIGRATION_MATRIX.every((entry) => entry.migrationStatus === "migrated"), true);
   assert.deepEqual(
     ["browser", "gateway", "static", "runner"].map(
       (host) => MIGRATION_MATRIX.filter((entry) => entry.host === host).length
     ),
-    [37, 36, 25, 5]
+    [37, 36, 28, 5]
   );
-  assert.equal(new Set(POINT_TARGETS).size, 103);
-  assert.equal(new Set(POINT_DEFINITIONS.map((point) => point.id)).size, 103);
+  assert.equal(new Set(POINT_TARGETS).size, 106);
+  assert.equal(new Set(POINT_DEFINITIONS.map((point) => point.id)).size, 106);
   assert.deepEqual(
     ["web.runtime.", "gateway.runtime.", "static.cache."].map(
       (prefix) => POINT_DEFINITIONS.filter((point) => point.id.startsWith(prefix)).length
     ),
-    [37, 36, 30]
+    [37, 36, 33]
   );
   assert.equal(POINT_DEFINITIONS.every((point) => point.group && point.contributions.length > 0), true);
   assert.equal(POINT_DEFINITIONS.every((point) => point.contributions.every((item) => {
@@ -57,7 +57,7 @@ test("typed modification catalog assigns every point to a group and adapter chai
     ])),
     {
       "renderer-core": 13,
-      "startup-history": 9,
+      "startup-history": 11,
       "workspace-creation": 4,
       "remote-files": 7,
       "smart-routing": 9,
@@ -65,7 +65,7 @@ test("typed modification catalog assigns every point to a group and adapter chai
       "background-efficiency": 8,
       "token-usage": 2,
       "mobile-interaction": 5,
-      "renderer-ui": 6,
+      "renderer-ui": 7,
       "browser-platform": 3,
       "web-network": 3,
       "gateway-runtime": 9,

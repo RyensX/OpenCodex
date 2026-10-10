@@ -37,7 +37,7 @@ function waitForClose(socket) {
   return new Promise((resolve) => socket.once("close", resolve));
 }
 
-test("recreates an app-host relay when the browser WebSocket reconnects", async (t) => {
+test("rebinds the existing app-host relay when the browser WebSocket reconnects", async (t) => {
   const server = http.createServer();
   const relays = [];
   const sockets = [];
@@ -87,11 +87,10 @@ test("recreates an app-host relay when the browser WebSocket reconnects", async 
   await waitForMessage(first, (message) => message.type === "app-host-port-connected");
   assert.equal(relays.length, 1);
 
-  // 服务端会在旧 WS 关闭时释放 relay；新 WS 的第一帧必须能恢复同一个浏览器 MessagePort。
+  // 服务端保留原 relay；新 WS 的第一帧必须恢复同一个浏览器 MessagePort 会话。
   first.close();
   await waitForClose(first);
-  await relays[0].closedPromise;
-  assert.equal(relays[0].closed, true);
+  assert.equal(relays[0].closed, false);
 
   const second = new WebSocket(url);
   sockets.push(second);
@@ -111,15 +110,15 @@ test("recreates an app-host relay when the browser WebSocket reconnects", async 
     })
   );
   const deadline = Date.now() + 2_000;
-  while (relays[1].messages.length < 2 && Date.now() < deadline) {
+  while (relays[0].messages.length < 2 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 
-  assert.equal(relays.length, 2);
-  assert.equal(relays[1].messages[0], "thread/list");
-  assert.equal(relays[1].messages[1].id, 9n);
-  assert.deepEqual(Array.from(relays[1].messages[1].payload), [1, 2, 3]);
-  assert.equal(relays[1].messages[1].sentAt.getTime(), 4567);
+  assert.equal(relays.length, 1);
+  assert.equal(relays[0].messages[0], "thread/list");
+  assert.equal(relays[0].messages[1].id, 9n);
+  assert.deepEqual(Array.from(relays[0].messages[1].payload), [1, 2, 3]);
+  assert.equal(relays[0].messages[1].sentAt.getTime(), 4567);
 });
 
 test("caps app-host relays per browser socket", async (t) => {

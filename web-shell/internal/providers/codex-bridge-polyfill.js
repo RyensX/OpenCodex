@@ -23,7 +23,7 @@
       Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match
     );
   }
-  const OPENCODEX_LANGUAGES = [OPENCODEX_LOCALE, "zh-CN", "zh", "en-US", "en"];
+  const OPENCODEX_LANGUAGES = [OPENCODEX_LOCALE];
   const AUTH_FORCE_LOGIN_STORAGE_KEY = "codex_web_force_login";
   const WS_READY_WAIT_TIMEOUT_MS = 2500;
   const CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS = 120;
@@ -1441,6 +1441,18 @@
 
   /** hidden Electron 代理窗口的 focus 状态不代表浏览器，入站时统一替换为页面真实状态。 */
   function browserRendererMessagePayload(channel, payload) {
+    if (channel === "persisted-atom-sync" && pendingComposerDraftWrites.length > 0) {
+      let value = payload?.state?.[COMPOSER_PROMPT_DRAFTS_KEY];
+      for (const write of pendingComposerDraftWrites) {
+        // 重连的全量快照同样保留尚未确认的草稿增量，不能重新填入已发送内容。
+        value = mergeComposerDraftRecord(value, write.recordUpdate);
+      }
+      return { ...payload, state: { ...payload?.state, [COMPOSER_PROMPT_DRAFTS_KEY]: value } };
+    }
+    if (channel === "persisted-atom-updated" && payload?.key === COMPOSER_PROMPT_DRAFTS_KEY) {
+      // 先确认已落盘的草稿写入，再用尚未确认的新输入或清空操作覆盖迟到快照。
+      return reconcileComposerDraftUpdate(payload);
+    }
     if (channel !== WINDOW_FOCUS_CHANGED_MESSAGE) return payload;
     return {
       ...(payload && typeof payload === "object" ? payload : {}),
@@ -1934,24 +1946,249 @@
     }
     const requestId = String(payload.requestId || "");
     if (!requestId) return false;
+    // 实时导航评估必须透传官方服务；再次返回本地默认值会让远端永远停留在旧导航。
+    if (navigationBootstrap && !navigationBootstrap.controller.signal.aborted) return false;
     modificationEffects?.statsig?.emit();
     let request = {};
     try {
       request = payload.body ? JSON.parse(payload.body) : {};
     } catch {}
+    // 旧 IPC 和新版 AppHost 入口共享同一响应，保持语言开关及用户匹配字段一致。
+    emitFetchSuccess(requestId, buildPostLoginStatsigBootstrap(request));
+    return true;
+  }
+
+  /** 为新版 AppHost 的登录后初始化返回现有 Web 默认配置，避免绕过 fetch 拦截后跨网超时。 */
+  function buildPostLoginStatsigBootstrap(request) {
     const stableId = typeof request.stable_id === "string" ? request.stable_id : "";
+    // 登录后的配置发布必须携带宿主身份，官方执行服务按用户与账号匹配，缺失时首条消息会被拒绝。
+    const profile = cfg.desktopAccountProfile;
+    const hasChatGptIdentity = typeof profile?.userId === "string" && typeof profile?.accountId === "string";
     const user = {
+      ...(hasChatGptIdentity ? { userID: profile.userId, custom: { auth_method: "chatgpt" } } : {}),
       ...(typeof request.locale === "string" ? { locale: request.locale } : {}),
       ...(typeof request.app_version === "string" ? { appVersion: request.app_version } : {}),
-      ...(stableId
-        ? { customIDs: { stableID: stableId, source_surface_stable_id: stableId } }
+      ...(stableId || hasChatGptIdentity
+        ? { customIDs: {
+            ...(stableId ? { stableID: stableId, source_surface_stable_id: stableId } : {}),
+            ...(hasChatGptIdentity ? { account_id: profile.accountId } : {}),
+          } }
         : {}),
     };
-    emitFetchSuccess(requestId, {
+    return {
       // 官方会先 JSON.parse(statsigPayload) 校验 user，再交给 Statsig data adapter；必须保持字符串协议。
       statsigPayload: JSON.stringify({ ...buildStatsigInitializeResponse(), user }),
+    };
+  }
+
+  let navigationBootstrap = null;
+  // 官方新版 safePost 改走 AppHost RPC；先返回兼容响应，真实导航读取不能阻塞首屏。
+  w.__opencodexStatsigBootstrap = async (request, signal, fetchOfficial) => {
+    signal?.throwIfAborted();
+    modificationEffects?.statsig?.emit();
+    navigationBootstrap?.controller.abort();
+    navigationBootstrap = null;
+    if (typeof fetchOfficial === "function" && cfg.desktopAccountProfile) {
+      const controller = new AbortController();
+      const timer = scheduler.setTimeout(() => controller.abort(), 30000);
+      // 同账号的远端页面必须复用设备分流 ID；SDK 自身仍保留浏览器的存储身份。
+      const evaluationRequest = { ...request, stable_id: cfg.desktopStatsigStableId || request.stable_id };
+      const state = { controller, request, evaluationRequest, profile: cfg.desktopAccountProfile, result: null };
+      navigationBootstrap = state;
+      // 继续使用官方认证及 HTTP 服务，不把令牌传给页面，也不读取其他账号的评估。
+      const pending = Promise.resolve().then(() => fetchOfficial(evaluationRequest, controller.signal));
+      const settled = pending.catch(() => null);
+      state.result = settled.finally(() => scheduler.clearTimeout(timer));
+    }
+    // 保留官方 bootstrap 的 user 校验协议，不写入浏览器语言或帐号偏好。
+    return buildPostLoginStatsigBootstrap(request);
+  };
+
+  /** 将登录后的真实导航开关应用到当前 SDK，其他兼容配置与执行权限保持不变。 */
+  w.__opencodexSyncStatsigNavigation = async (client) => {
+    const state = navigationBootstrap;
+    if (!state) return;
+    try {
+      const response = await state.result;
+      if (navigationBootstrap !== state || state.controller.signal.aborted || !response?.statsigPayload) return;
+      const payload = JSON.parse(response.statsigPayload);
+      const evaluatedUser = payload.user;
+      const context = client.getContext();
+      const user = context.user;
+      const profile = cfg.desktopAccountProfile;
+      // 同时核对请求、评估和当前 SDK 身份，账号切换或迟到响应不得覆盖新页面。
+      if (!profile || profile.userId !== state.profile.userId || profile.accountId !== state.profile.accountId ||
+          user.userID !== profile.userId || user.customIDs?.account_id !== profile.accountId ||
+          user.custom?.auth_method !== "chatgpt" || evaluatedUser?.custom?.auth_method !== "chatgpt" ||
+          evaluatedUser?.userID !== user.userID || evaluatedUser.customIDs?.account_id !== profile.accountId ||
+          evaluatedUser.customIDs?.stableID !== state.evaluationRequest.stable_id ||
+          user.customIDs?.stableID !== state.request.stable_id ||
+          evaluatedUser.appVersion !== state.request.app_version || evaluatedUser.locale !== state.request.locale ||
+          user.appVersion !== state.request.app_version || user.locale !== state.request.locale) return;
+      // 仅同步已确认控制新旧导航的开关，不把整份官方评估带入 Web 执行设置。
+      const gate = payload.feature_gates?.["3085093835"];
+      if (typeof gate?.value !== "boolean" || !context.values) return;
+      // 同页后续 SDK 刷新仍复用这个已验证布尔值，避免本地初始化响应把导航改回旧版。
+      cfg.desktopFeatureGates = { ...cfg.desktopFeatureGates, "3085093835": gate.value };
+      const values = { ...context.values, user,
+        feature_gates: { ...context.values.feature_gates,
+          "3085093835": { value: gate.value, rule_id: "desktop_bootstrap" } } };
+      client.dataAdapter.setData(JSON.stringify(values));
+      // 使用官方 SDK 的 values_updated 通知驱动导航重渲染，不直接改写 DOM 或强制 gate 为 true。
+      client.updateUserSync(user, { disableBackgroundCacheRefresh: true });
+    } catch {
+      // 官方网络不可用或版本形态变化时保留现有配置，不中断页面与会话。
+    } finally {
+      // 评估消费后释放完整响应；首屏后只保留已校验的导航布尔值。
+      if (navigationBootstrap === state) navigationBootstrap = null;
+    }
+  };
+
+  // 首屏资料必须属于当前官方登录身份，不能把上一账号的展示信息复用给切换后的账号。
+  w.__opencodexAccountProfile = (accountId, userId) => {
+    const profile = cfg.desktopAccountProfile;
+    if (!profile || profile.accountId !== accountId || profile.userId !== userId) return undefined;
+    return { id: profile.id, name: profile.name, email: profile.email };
+  };
+
+  // 新版 renderer 经 AppHost 订阅协同事件；observer 的独立 IPC 推送要接入相同事件分发器。
+  let threadCatalog = null;
+  let threadCoordination = null;
+  const pendingThreadCatalogChanges = new Map();
+
+  /** 将设备端列表变化同步到官方 AppHost 目录，不能只失效 React Query。 */
+  function syncThreadCatalog(payload) {
+    const method = payload?.method;
+    const params = payload?.params;
+    const isRemoval = ["thread-archived", "thread-deleted", "thread/archived", "thread/deleted"].includes(method);
+    const isRestore = method === "thread-unarchived" || method === "thread/unarchived";
+    const isInvalidation = method === "query-cache-invalidate" && params?.queryKey?.[0] === "recent-conversations-meta";
+    if (!isRemoval && !isRestore && !isInvalidation) return;
+    const hostId = params?.hostId || payload.hostId || "local";
+    const threadId = params?.conversationId || params?.threadId;
+    if (!threadCatalog) {
+      // 初始化只保留每个条目的最新变化；正文不进入目录同步队列。
+      pendingThreadCatalogChanges.set(`${hostId}:${threadId || ""}`, payload);
+      if (pendingThreadCatalogChanges.size > 512) pendingThreadCatalogChanges.delete(pendingThreadCatalogChanges.keys().next().value);
+      return;
+    }
+    // 删除/归档事件直接移除官方索引条目；通用通知沿官方源失效与同步接口刷新。
+    const pending = (async () => {
+      if ((isRemoval || isRestore) && typeof threadId === "string") {
+        // 显式删除/恢复按条目提交，避免增量分页遗漏旧条目。
+        await threadCatalog.notifyThread({ hostId, threadId }, isRemoval ? "remove" : "upsert");
+      } else {
+        // 通用失效先更新官方源，再请求当前页面立即刷新。
+        await threadCatalog.invalidateSource(hostId);
+        await threadCatalog.requestSync([hostId], "immediate");
+      }
+    })();
+    pending.catch((error) => console.warn("[codex-web] thread catalog sync failed", error));
+  }
+
+  /** 官方目录服务就绪后消费初始化事件，并原样返回服务供 renderer 使用。 */
+  w.__opencodexInstallThreadCatalog = (service, coordination) => {
+    threadCatalog = service;
+    // 官方 AppHost 的协调服务与目录属于同一个宿主，发送仍使用当前登录会话。
+    threadCoordination = coordination;
+    if (service) {
+      for (const payload of pendingThreadCatalogChanges.values()) {
+        // 将早于 AppHost 就绪的设备事件补交给实际目录。
+        syncThreadCatalog(payload);
+      }
+      pendingThreadCatalogChanges.clear();
+    }
+    return service;
+  };
+
+  /** writer 冲突时发现真实持有者，后续发送与停止沿官方 follower 协议交给该客户端。 */
+  w.__opencodexFindThreadOwner = async (manager, threadId) => {
+    if (!threadCoordination || typeof threadId !== "string" || !threadId) return null;
+    // 只进行持有者发现，不请求接管或重复 thread/resume。
+    return threadCoordination.findThreadOwner({ hostId: manager.getHostId(), conversationId: threadId });
+  };
+
+  /** 只清理官方明确报告 rollout 已不存在的历史条目，网络错误与未落盘新会话保留。 */
+  w.__opencodexRemoveMissingThread = async (manager, threadId, error) => {
+    const message = error?.message;
+    if (!threadCatalog || typeof message !== "string" || message.trim() !== `no rollout found for thread id ${threadId}`) return;
+    const conversation = manager.getConversation(threadId);
+    if (!conversation || conversation.threadRuntimeStatus?.type === "active" ||
+        (conversation.threadStartKind && !conversation.rolloutPath && !conversation.sessionId &&
+         !conversation.title && conversation.turns?.length === 0)) return;
+    try {
+      // 仅移除展示索引，不调用 thread/delete，不改动任何会话文件。
+      await threadCatalog.removeMissingEntry({ hostId: manager.getHostId(), threadId });
+      // 同时驱动当前页的官方删除事件，避免内存摘要把已移除条目重新画回侧栏。
+      manager.handleThreadDeletion([threadId]);
+    } catch (failure) {
+      console.warn("[codex-web] missing thread catalog cleanup failed", failure);
+    }
+  };
+
+  let coordinationDispatcher = null;
+  let coordinationListenerReady = () => false;
+  const pendingCoordinationSnapshots = new Map();
+  // 排队广播是完整队列，初始化期间每个线程只保留最新一份，包含空队列的清空通知。
+  const pendingQueuedFollowUps = new Map();
+  w.__opencodexInstallCoordinationDispatcher = (dispatcher, hasListener) => {
+    if (typeof dispatcher !== "function" || typeof hasListener !== "function") return;
+    coordinationDispatcher = dispatcher;
+    coordinationListenerReady = hasListener;
+    // dispatcher 若晚于 listener 安装，补发就绪检查，避免初始化缓存永远等不到下一次注册。
+    w.__opencodexCoordinationListenerReady?.("thread-stream-state-changed");
+    w.__opencodexCoordinationListenerReady?.("thread-queued-followups-changed");
+  };
+  w.__opencodexCoordinationListenerReady = (channel) => {
+    if (channel === "thread-queued-followups-changed" && coordinationListenerReady(channel)) {
+      for (const payload of pendingQueuedFollowUps.values()) coordinationDispatcher(channel, payload);
+      pendingQueuedFollowUps.clear();
+      return;
+    }
+    if (channel !== "thread-stream-state-changed" || !coordinationListenerReady(channel)) return;
+    // 首个完整快照与紧随的增量按接收顺序交给 manager，不能只重放快照而丢掉其 revision 链。
+    for (const packets of pendingCoordinationSnapshots.values()) {
+      for (const payload of packets) coordinationDispatcher(channel, payload);
+    }
+    pendingCoordinationSnapshots.clear();
+  };
+  subscribe("thread-stream-state-changed", (payload) => {
+    if (coordinationDispatcher && coordinationListenerReady("thread-stream-state-changed")) {
+      coordinationDispatcher("thread-stream-state-changed", payload);
+      return;
+    }
+    const params = payload?.params;
+    if (!params?.conversationId) return;
+    const key = `${params.hostId || "local"}:${params.conversationId}`;
+    // 每条初始化缓存必须从完整 snapshot 开始；新 snapshot 覆盖旧基线。
+    if (params.change?.type === "snapshot") pendingCoordinationSnapshots.set(key, [payload]);
+    else if (params.change?.type === "patches") {
+      const packets = pendingCoordinationSnapshots.get(key);
+      if (packets && packets.length < 128) packets.push(payload);
+      // 超限整条丢弃，避免用截断的增量链生成错误状态。
+      else pendingCoordinationSnapshots.delete(key);
+    }
+    if (pendingCoordinationSnapshots.size > 512) pendingCoordinationSnapshots.delete(pendingCoordinationSnapshots.keys().next().value);
+  });
+  subscribe("thread-queued-followups-changed", (payload) => {
+    // 与 AppHost 原生事件使用同一个队列协调器，不能另写 Web 本地队列覆盖桌面真源。
+    if (coordinationDispatcher && coordinationListenerReady("thread-queued-followups-changed")) {
+      coordinationDispatcher("thread-queued-followups-changed", payload);
+      return;
+    }
+    const params = payload?.params;
+    if (!params?.conversationId || !Array.isArray(params.messages)) return;
+    const key = `${params.hostId || "local"}:${params.conversationId}`;
+    pendingQueuedFollowUps.set(key, payload);
+    if (pendingQueuedFollowUps.size > 512) pendingQueuedFollowUps.delete(pendingQueuedFollowUps.keys().next().value);
+  });
+  for (const channel of ["client-status-changed", "ipc-connection-reset"]) {
+    subscribe(channel, (payload) => {
+      pendingCoordinationSnapshots.clear();
+      // 连接失效后不能把旧 owner 的排队内容重放到新会话持有者。
+      pendingQueuedFollowUps.clear();
+      coordinationDispatcher?.(channel, payload);
     });
-    return true;
   }
 
   /** Electron 版会把 Statsig 上报转给 main 进程；Web 壳直接确认成功，避免空闲期反复跨进程请求与超时重试。 */
@@ -2985,6 +3222,10 @@
 
   const sharedObjectSnapshot = new Map();
   const persistedAtomSnapshot = new Map();
+  const COMPOSER_PROMPT_DRAFTS_KEY = "composer-prompt-drafts-v2";
+  const pendingComposerDraftWrites = [];
+  let composerDraftWriteTail = Promise.resolve();
+  let composerDraftBridgeDisposed = false;
   const PENDING_WORKTREES_KEY = "pending_worktrees";
   const COMPOSER_PERMISSION_MODE_VISIBILITY_KEY = "composer-permission-mode-visibility";
   const DEFAULT_COMPOSER_PERMISSION_MODE_VISIBILITY = {
@@ -3153,6 +3394,81 @@
     emitWindowMessage("persisted-atom-updated", payload);
   }
 
+  /** 合并官方文本草稿的增量记录，null 条目表示删除该会话，其他会话保持原样。 */
+  function mergeComposerDraftRecord(value, recordUpdate) {
+    const merged = new Map(Object.entries(isPlainObject(value) ? value : {}));
+    for (const [key, entry] of Object.entries(recordUpdate.entries)) {
+      if (entry?.updateOnly && !merged.has(key)) continue;
+      if (!entry?.updateOnly) merged.delete(key);
+      if (entry != null) merged.set(key, entry.value);
+    }
+    if (Number.isInteger(recordUpdate.maxEntries) && recordUpdate.maxEntries >= 0) {
+      const excess = merged.size - recordUpdate.maxEntries;
+      for (const key of Array.from(merged.keys()).slice(0, Math.max(0, excess))) merged.delete(key);
+    }
+    return Object.fromEntries(merged);
+  }
+
+  /** 仅串行化文本草稿；发送消息仍使用原通道，失败不会阻止后续清空或恢复写入。 */
+  function forwardComposerDraftUpdate(payload) {
+    const previous = persistedAtomSnapshot.get(payload.key) ??
+      persistedAtomSnapshot.get(payload.recordUpdate.legacyStorageKey);
+    // 页内快照跟随官方增量，不把 recordUpdate 缺省的 value 回显为 null。
+    const value = mergeComposerDraftRecord(previous, payload.recordUpdate);
+    setPersistedAtomSnapshotValue(payload.key, value, false);
+    const queued = pendingComposerDraftWrites.at(-1);
+    if (queued && !queued.sent) {
+      // 公网慢于打字频率时合并未发送增量；同一会话保留最后操作，其他会话增量不丢失。
+      queued.recordUpdate = { ...queued.recordUpdate, ...payload.recordUpdate,
+        entries: { ...queued.recordUpdate.entries, ...payload.recordUpdate.entries } };
+      queued.payload = { ...payload, recordUpdate: queued.recordUpdate };
+      return queued.result;
+    }
+    const write = { payload, recordUpdate: payload.recordUpdate, sent: false, result: null };
+    pendingComposerDraftWrites.push(write);
+    const result = composerDraftWriteTail.then(async () => {
+      if (composerDraftBridgeDisposed) return false;
+      write.sent = true;
+      try {
+        // 等前一次 HTTP 分发完成后再发送，保证旧保存先于提交后的删除到达宿主。
+        return await invoke("codex_desktop:message-from-view", write.payload);
+      } catch (error) {
+        const index = pendingComposerDraftWrites.indexOf(write);
+        if (index >= 0) pendingComposerDraftWrites.splice(index, 1);
+        throw error;
+      }
+    });
+    write.result = result;
+    // 错误仍交给调用方；队列自身消化拒绝，使下一次写入可以继续。
+    composerDraftWriteTail = result.catch(() => undefined);
+    return result;
+  }
+
+  /** 迟到的保存回包不能恢复已清空的编辑器，也不能覆盖用户正在输入的下一条消息。 */
+  function reconcileComposerDraftUpdate(payload) {
+    let value = payload.deleted ? {} : payload.value;
+    const record = isPlainObject(value) ? value : {};
+    let acknowledged = -1;
+    const expectedEntries = new Map();
+    for (let index = 0; index < pendingComposerDraftWrites.length; index += 1) {
+      const write = pendingComposerDraftWrites[index];
+      if (!write.sent) break;
+      for (const [key, entry] of Object.entries(write.recordUpdate.entries)) expectedEntries.set(key, entry);
+      // 确认整个已发送前缀的最终条目，不能仅凭另一会话的相同值跳过尚未落盘的删除。
+      const entries = Array.from(expectedEntries.entries());
+      if (entries.length > 0 && entries.every(([key, entry]) =>
+        entry == null ? !Object.prototype.hasOwnProperty.call(record, key) :
+          JSON.stringify(record[key]) === JSON.stringify(entry.value))) acknowledged = index;
+    }
+    if (acknowledged >= 0) pendingComposerDraftWrites.splice(0, acknowledged + 1);
+    for (const write of pendingComposerDraftWrites) {
+      // 只覆盖待确认条目，宿主快照中的其他会话草稿继续同步。
+      value = mergeComposerDraftRecord(value, write.recordUpdate);
+    }
+    setPersistedAtomSnapshotValue(payload.key, value, !!payload.deleted && pendingComposerDraftWrites.length === 0);
+    return pendingComposerDraftWrites.length === 0 ? payload : { ...payload, value, deleted: false };
+  }
+
   initializePersistedAtomSnapshot();
 
   // 官方 preload 在 renderer 执行前同步记录该时间；Web 侧同样固定为页面 timeOrigin，不能落入异步 IPC。
@@ -3231,6 +3547,10 @@
         }
         if (payload && typeof payload === "object" && payload.type === "persisted-atom-update" && payload.key) {
           modificationEffects?.persistedAtom?.emit();
+          if (payload.key === COMPOSER_PROMPT_DRAFTS_KEY && isPlainObject(payload.recordUpdate?.entries)) {
+            // 官方草稿已经在 renderer 本地更新；只维护快照和有序落盘，不二次回显旧值。
+            return forwardComposerDraftUpdate(payload);
+          }
           // 更新先写本页快照并广播，后续再交给官方 main 按 Desktop 原逻辑落盘。
           const value = setPersistedAtomSnapshotValue(payload.key, payload.value, !!payload.deleted);
           emitPersistedAtomUpdated(payload.key, value, !!payload.deleted);
@@ -3408,6 +3728,11 @@
         secondary_exposures: [],
       };
     }
+    // 仅同步宿主验证过身份、版本和语言的真实开关，不能固定开启某一用户的新版功能。
+    for (const [name, value] of Object.entries(cfg.desktopFeatureGates || {})) {
+      if (typeof value !== "boolean") continue;
+      feature_gates[name] = { name, value, rule_id: "desktop_cache", secondary_exposures: [] };
+    }
     return {
       has_updates: true,
       time: Date.now(),
@@ -3536,6 +3861,10 @@
   subscribe("codex_desktop:system-theme-variant-updated", (value) => {
     if (value === "dark" || value === "light") {
       document.documentElement.dataset.theme = value;
+      // 认证入口首屏读取此值以匹配桌面端最近一次主题选择。
+      try {
+        localStorage.setItem("opencodex_theme", value);
+      } catch {}
     }
   });
   subscribe("shared-object-updated", (message) => {
@@ -3744,6 +4073,10 @@
             "server",
             "gateway-ws"
           );
+          if (effectiveChannel === "ipc-broadcast" || effectiveChannel === "mcp-notification") {
+            // 新版侧栏目录独立于旧缓存键，先同步 AppHost 再投递原有 renderer 消息。
+            syncThreadCatalog(rendererMessagePayload);
+          }
           if (shouldDispatchGatewayMessage(msg.channel, effectiveChannel)) {
             dispatch(effectiveChannel, rendererMessagePayload);
           }
@@ -3828,6 +4161,12 @@
   }
 
   modificationScope?.own?.(() => {
+    // 页面替换后释放待确认草稿，旧请求不应继续写入新页面实例。
+    composerDraftBridgeDisposed = true;
+    pendingComposerDraftWrites.length = 0;
+    // 页面替换时终止尚未完成的导航请求，避免旧实例接收迟到评估。
+    navigationBootstrap?.controller.abort();
+    navigationBootstrap = null;
     settleWsReadyWaiters(false);
     rejectPendingGatewayIpc(new Error("Renderer page was replaced"));
     activeBrowserFilePickerCancel?.();
@@ -3847,6 +4186,14 @@
   });
 
   // 已连接 socket 保持后台业务语义；只有断线重试暂停，回到前台后再按原退避策略恢复。
+  adapterHost.events.observe({ key: {}, target: w, type: "pagehide", callback: (event) => {
+    // BFCache 暂存仍会恢复原 MessagePort；真正关闭或刷新时才主动释放官方 RPC。
+    if (event.persisted) return;
+    for (const state of [...appHostPortRelays.values()]) {
+      // 正常离开在 WS 关闭前发送 terminal null，临时网络断线仍沿用现有宽限重连。
+      closeAppHostRelay(state, "page_closed", true);
+    }
+  } });
   adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: handleReconnectVisibilityChange });
   connect();
 })();

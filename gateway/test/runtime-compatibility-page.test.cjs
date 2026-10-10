@@ -120,7 +120,7 @@ test("diagnostics page follows locale and persists auto-refresh control", async 
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(page.document.documentElement.lang, "en-US");
-  assert.equal(page.title.textContent, "OpenCodex Virtual Skeleton Diagnostics");
+  assert.equal(page.title.textContent, "Runtime Compatibility Diagnostics");
   assert.equal(page.element("autoRefreshToggle").checked, false);
   assert.equal(page.timers.size, 0);
   assert.equal(page.fetchCount(), 1, "initial page load still performs one explicit read");

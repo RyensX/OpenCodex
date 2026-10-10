@@ -81,6 +81,7 @@ class OfficialRuntimeOptimizer {
     let patchedFileCount = 0;
     let prewarmReadyFileCount = 0;
     let nativePetRestoreMarkerCount = 0;
+    let threadCatalogReconciliation = "not-present";
     const unsupportedFiles = [];
 
     for (const entry of this.fileSystem.readDir(buildDir, { withFileTypes: true })) {
@@ -92,10 +93,27 @@ class OfficialRuntimeOptimizer {
       const hasMacPush = source.includes(MAC_PUSH_LOG_MARKER);
       const hasGitDiscovery = source.includes(GIT_ORIGINS_LOG_MARKER);
       const hasWorktreeShellEnvironment = source.includes(WORKTREE_SHELL_ENVIRONMENT_MARKER);
-      if (!hasNativePet && !hasMacPush && !hasGitDiscovery && !hasWorktreeShellEnvironment) continue;
+      const hasThreadCatalog = source.includes("this.fullReconciliationDue=this.isFullReconciliationDue(this.store.readSyncState())") ||
+        source.includes("this.fullReconciliationDue=(process.env.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`||");
+      if (!hasNativePet && !hasMacPush && !hasGitDiscovery && !hasWorktreeShellEnvironment && !hasThreadCatalog) continue;
 
       let optimized = source;
       const unsupportedParts = [];
+
+      if (hasThreadCatalog) {
+        // 离线期间删除的旧条目不会出现在增量页；隐藏网关启动时沿官方完整对账清理索引。
+        // 只改变启动扫描选择，不删除会话文件，也不改变官方桌面的周期策略。
+        const reconciled = optimized.replace(
+          /(requestStartupSync\(\)\{return this\.setSyncEnabled\(!0\),this\.fullReconciliationDue=)(this\.isFullReconciliationDue\(this\.store\.readSyncState\(\)\))/,
+          "$1(process.env.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`||$2)",
+        );
+        // 重复处理已打补丁的私有缓存时保留成功语义，不把幂等结果报告为布局失配。
+        const alreadyReconciled = optimized.includes("this.fullReconciliationDue=(process.env.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`||");
+        const supported = reconciled !== optimized || alreadyReconciled;
+        threadCatalogReconciliation = supported ? "gateway-full-startup" : "unsupported-layout";
+        if (!supported) unsupportedParts.push("thread-catalog-reconciliation");
+        optimized = reconciled;
+      }
 
       if (hasNativePet) {
         markerFileCount += 1;
@@ -285,6 +303,7 @@ class OfficialRuntimeOptimizer {
             ? "gateway-disabled"
             : "unsupported-layout",
       patchedFileCount,
+      threadCatalogReconciliation,
       unsupportedFiles,
     };
     if (gitDiscoveryMarkerFileCount > 0) {

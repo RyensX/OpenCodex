@@ -62,7 +62,7 @@ test("gateway plugin config validates types, writes atomically and detects revis
   assert.equal(plugin.values.showRouteInSummary, true);
   assert.deepEqual(plugin.tiers.map((tier) => tier.id), ["economy", "balanced", "complex", "frontier"]);
   assert.equal(plugin.tiers.every((tier) => tier.builtin && tier.enabled), true);
-  assert.deepEqual(plugin.tiers.map((tier) => tier.effort), ["auto", "max", "max", "ultra"]);
+  assert.deepEqual(plugin.tiers.map((tier) => tier.effort), ["auto", "max", "medium", "high"]);
   assert.equal(plugin.values.fallbackEffort, "auto");
 
   const updated = store.update(plugin.id, {

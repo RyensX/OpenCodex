@@ -66,6 +66,7 @@ const { diagnosticError, diagnosticLog, diagnosticWarn, sanitizeDiagnosticValue,
 const { markGatewaySilentQuit } = require("./lifecycle/quit-confirmation-suppressor.cjs");
 const { createGatewayPluginService } = require("./plugins/service.cjs");
 const { createCompatibilityService } = require("./compatibility/service.cjs");
+const { startReverseTunnel } = require("./relay/reverse-tunnel-client.cjs");
 const {
   GATEWAY_RESTART_EXIT_CODE,
   isGatewayRestartSupported,
@@ -944,6 +945,16 @@ async function createGateway() {
   );
   requestRestart = shutdownController.requestRestart;
   await listen(server);
+
+  // 反连中继：在本机 gateway 可访问后启动。失败只告警，绝不影响本机 LAN 使用。
+  // 激活条件：env OCX_RELAY_ENABLED=1 且 OCX_RELAY_URL 非空。未激活时本函数直接 no-op。
+  try {
+    startReverseTunnel({ diagnosticLog, diagnosticWarn });
+  } catch (relayError) {
+    diagnosticWarn("gateway", "relay_start_failed", {
+      error: relayError instanceof Error ? relayError.message : String(relayError),
+    });
+  }
 
   diagnosticLog("gateway", "listening", { url: `http://${HOST}:${PORT}` });
   diagnosticLog("gateway", "health_endpoint", { url: `http://${HOST}:${PORT}/api/health` });

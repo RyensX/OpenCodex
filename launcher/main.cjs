@@ -1,4 +1,15 @@
 const { app, BrowserWindow, Menu, Tray, clipboard, dialog, ipcMain, nativeImage, powerSaveBlocker, shell } = require("electron");
+// [OCX-FORK] 服务器中继与开发期诊断的全部实现都集中在 fork/ 子目录（upstream 无此目录），
+// main.cjs 只保留薄调用点（见各 [OCX-FORK] 标记）；改动清单与合并指引见 FORK-NOTES.md。
+const relayFork = require("./fork/relay-core.cjs");
+const relayCore = relayFork.createRelayCore({
+  // 箭头包装延迟到运行时解析，规避 require 阶段 saveLauncherSettings 尚未初始化的问题。
+  saveLauncherSettings: (...args) => saveLauncherSettings(...args),
+});
+const { RELAY_DEFAULT_FIELDS, normalizeRelayFields, relayPrimaryUrl, relayServerEntryUrl } = relayFork;
+const { enableDevRemoteDebugging, attachWindowDiagnostics } = require("./fork/dev-debug.cjs");
+// dev 直跑（未打包）时开放 CDP 调试端口，供自动化脚本验证 UI 链路；打包版不受影响。
+enableDevRemoteDebugging(app);
 const crypto = require("crypto");
 const fs = require("fs");
 const net = require("net");
@@ -246,8 +257,13 @@ function offlineCompatibilitySummary(filePath) {
 }
 
 function normalizeHostMode(value) {
-  return value === "lan" ? "lan" : "local";
+  if (value === "lan") return "lan";
+  if (value === "server") return "server";
+  return "local";
 }
+
+// [OCX-FORK] normalizeRelayString/Host/Port/Path 已迁至 launcher/fork/relay-core.cjs（含
+// RELAY_DEFAULT_FIELDS 与 normalizeRelayFields 统一 schema 入口），此处不再重复定义。
 
 function normalizePort(value) {
   const port = Number(value);
@@ -292,12 +308,15 @@ function defaultSettings() {
     pluginDirs: "",
     preventSleep: true,
     officialAutoScanUpgrade: true,
+    ...RELAY_DEFAULT_FIELDS, // [OCX-FORK] relay schema 统一在 fork/relay-core.cjs 维护
   };
 }
 
 function loadLauncherSettings(paths) {
   try {
     const parsed = JSON.parse(fs.readFileSync(paths.settingsPath, "utf8"));
+    // v3 曾用 relayUrl 存完整地址，迁移后不再落盘，避免脏字段残留。
+    delete parsed.relayUrl;
     return {
       ...defaultSettings(),
       ...parsed,
@@ -309,6 +328,8 @@ function loadLauncherSettings(paths) {
         parsed.officialAutoScanUpgrade,
         defaultSettings().officialAutoScanUpgrade
       ),
+      // [OCX-FORK] relay 字段统一 normalize（实现见 fork/relay-core.cjs；兼容旧 relayUrl 地址）。
+      ...normalizeRelayFields(parsed),
     };
   } catch {
     return defaultSettings();
@@ -327,7 +348,11 @@ function saveLauncherSettings(paths, settings) {
       settings && settings.officialAutoScanUpgrade,
       defaultSettings().officialAutoScanUpgrade
     ),
-  };
+      // [OCX-FORK] relay 字段统一 normalize（实现见 fork/relay-core.cjs）。
+      ...normalizeRelayFields(settings),
+    };
+  // 剔除历史遗留字段，保证落盘配置只含当前 schema。
+  delete nextSettings.relayUrl;
   fs.writeFileSync(paths.settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf8");
   return nextSettings;
 }
@@ -533,10 +558,15 @@ function updateGatewayUrls() {
   gatewayState.listenUrl = gatewayState.host ? `http://${gatewayState.host}:${gatewayState.port}` : "";
   gatewayState.localUrl = gatewayState.port ? `http://127.0.0.1:${gatewayState.port}` : "";
   gatewayState.lanUrls = gatewayState.host === "0.0.0.0" ? lanUrlsForPort(gatewayState.port) : [];
+
+  // [OCX-FORK] 服务器模式：顶部访问地址指向 VPS 统一入口里本机设备的页面；有自定义访问
+  // 后缀时优先用后缀，设备 MAC 与访问路径分别保存。relayPrimaryUrl 返回 null 时回退原有逻辑。
+  // 实现见 launcher/fork/relay-core.cjs。
   gatewayState.primaryUrl =
-    gatewayState.host === "0.0.0.0" && gatewayState.lanUrls.length > 0
+    relayPrimaryUrl(gatewayState.settings) ||
+    (gatewayState.host === "0.0.0.0" && gatewayState.lanUrls.length > 0
       ? gatewayState.lanUrls[0]
-      : gatewayState.localUrl || gatewayState.listenUrl;
+      : gatewayState.localUrl || gatewayState.listenUrl);
 }
 
 function findFreePort(startPort, host) {
@@ -578,6 +608,9 @@ async function ensurePortSetting(paths, settings) {
     port: await findRandomFreePort(host),
   });
 }
+
+// [OCX-FORK] ensureRelayIdentity 已迁至
+// launcher/fork/relay-core.cjs（createRelayCore 闭包内，saveLauncherSettings 走依赖注入）。
 
 function officialBundleCache() {
   const { OfficialBundleCache } = require("../gateway/dist/official/OfficialBundleCache.js");
@@ -690,6 +723,13 @@ function canOpenOpenCodex() {
 let openOpenCodexPromise = null;
 
 async function openOpenCodex() {
+  // [OCX-FORK] 服务器模式：直接用系统浏览器打开 VPS 统一入口的本机设备页（不走本地 PWA 检测）。
+  const serverEntryUrl = relayServerEntryUrl(gatewayState.settings, gatewayState.primaryUrl);
+  if (serverEntryUrl) {
+    appendLog(`[launcher] open server entry: ${serverEntryUrl}\n`);
+    await shell.openExternal(serverEntryUrl);
+    return buildState();
+  }
   const openUrl = openOpenCodexUrl();
   if (!canOpenOpenCodex()) return buildState();
   // 按钮和托盘共用一次检测，连续点击不会重复拉起应用窗口。
@@ -831,6 +871,10 @@ async function startGatewayOnce() {
   gatewayState.paths = paths;
   ensureRuntimeLayout(paths);
   gatewayState.settings = await ensurePortSetting(paths, loadLauncherSettings(paths));
+  if (gatewayState.settings.hostMode === "server") {
+    // 拼接公开地址前先确定 MAC 和独立随机后缀，避免首轮启动仍指向本地地址。
+    gatewayState.settings = relayCore.ensureRelayIdentity(paths, gatewayState.settings);
+  }
   applyPreventSleepSetting(gatewayState.settings);
   gatewayState.host = hostForMode(gatewayState.settings.hostMode);
   const officialAutoScanUpgrade = !skipOfficialScan && normalizeOfficialAutoScanUpgrade(gatewayState.settings.officialAutoScanUpgrade);
@@ -914,6 +958,13 @@ async function startGatewayOnce() {
   } else {
     // Launcher 设置为空表示不配置外部插件目录，同时避免继承启动 Launcher 时的同名环境变量。
     delete childEnv[PLUGIN_DIRS_ENV];
+  }
+  // [OCX-FORK] 服务器模式：把 UI 里的 relay 配置转译为 OCX_RELAY_* 环境变量，gateway 启动后
+  // 反连 VPS；未填服务器地址时回退本机监听。实现见 launcher/fork/relay-core.cjs（relayChildEnv）。
+  const relayEnv = relayCore.relayChildEnv(gatewayState.settings, paths);
+  if (relayEnv) {
+    gatewayState.settings = relayEnv.settings;
+    Object.assign(childEnv, relayEnv.env);
   }
   const child = spawn(officialRuntime.executablePath, officialRuntimeArgs, {
     cwd: APP_ROOT,
@@ -1107,6 +1158,9 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, "index.html"));
   mainWindow.setMenuBarVisibility(false);
+  // [OCX-FORK] dev 诊断：renderer console 转发（带时间戳）+ 捕获阶段事件探针注入。
+  // 仅 dev 生效的实现细节见 launcher/fork/dev-debug.cjs。
+  attachWindowDiagnostics(mainWindow, appendLog);
   mainWindow.on("focus", () => {
     checkLatestReleaseForForeground();
     startStatusPolling();
@@ -1371,6 +1425,21 @@ ipcMain.handle("launcher:update-official-auto-scan-upgrade", async (_event, offi
   });
   return restartGateway();
 });
+// [OCX-FORK] 中继配置保存：服务器模式强制已设访问密码 + 「先落盘再重启」防保存即清空。
+// 完整实现见 launcher/fork/relay-core.cjs（createRelayIpcHandler）。
+ipcMain.handle(
+  "launcher:update-relay",
+  relayCore.createRelayIpcHandler({
+    appendLog,
+    runtimePaths,
+    ensureRuntimeLayout,
+    gatewayState,
+    loadLauncherSettings,
+    saveLauncherSettings,
+    readAuthEnabled,
+    restartGateway,
+  })
+);
 ipcMain.handle("launcher:choose-plugin-dir", async () => {
   const dialogOptions = {
     properties: ["openDirectory"],

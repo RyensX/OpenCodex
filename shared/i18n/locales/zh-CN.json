@@ -136,5 +136,21 @@
   "web.workspaceRoot.error.notDirectory": "该路径不是文件夹。",
   "web.workspaceRoot.error.noAccess": "没有权限访问该路径。",
   "web.workspaceRoot.error.unavailable": "无法使用该文件夹路径。",
-  "web.workspaceRoot.error.addFailed": "添加文件夹失败：{error}"
+  "web.workspaceRoot.error.addFailed": "添加文件夹失败：{error}",
+  "launcher.settings.host.server": "服务器",
+  "launcher.settings.relay.title": "服务器中继配置",
+  "launcher.settings.relay.description": "由本机主动反连中继服务器暴露服务，无需公网端口；设备密钥在服务器看板「添加设备」生成",
+  "launcher.settings.relay.host": "服务器 IP",
+  "launcher.settings.relay.hostPlaceholder": "填写 VPS 公网 IP",
+  "launcher.settings.relay.port": "端口",
+  "launcher.settings.relay.customPath": "访问后缀（可选）",
+  "launcher.settings.relay.customPathPlaceholder": "如 my-office，留空使用随机码",
+  "launcher.settings.relay.needPassword": "服务器模式必须先设置访问密码（上方「访问密码」），否则公网入口无保护。",
+  "launcher.settings.relay.deviceId": "设备 MAC",
+  "launcher.settings.relay.deviceName": "本机名称",
+  "launcher.settings.relay.deviceNamePlaceholder": "留空用计算机名",
+  "launcher.settings.relay.secret": "设备密钥",
+  "launcher.settings.relay.secretPlaceholder": "在服务器看板「添加设备」生成后粘贴",
+  "launcher.settings.relay.useHttps": "使用 HTTPS",
+  "launcher.settings.relay.useHttpsLabel": "使用 HTTPS"
 }

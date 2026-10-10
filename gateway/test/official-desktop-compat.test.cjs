@@ -61,7 +61,7 @@ test("gateway compatibility service initializes from configured runtime paths", 
   });
   try {
     const snapshot = compatibilityService.snapshot();
-    assert.equal(snapshot.points.length, 103);
+    assert.equal(snapshot.points.length, 106);
     assert.equal(snapshot.groups.length, 17);
     assert.equal(snapshot.adapterTypes.length, 23);
     assert.equal(Object.hasOwn(snapshot, "features"), false);
@@ -616,6 +616,9 @@ test("runtime optimizer skips unavailable macOS push registration only in the hi
 });
 
 test("runtime optimizer bounds hidden gateway sidebar Git discovery without changing explicit timeouts", async (t) => {
+  // 生产超时定时器使用 unref；测试保留一个句柄，确保慢盘 Promise 超时能实际被观察。
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
   const bundleDir = temporaryDirectory(t);
   const workerPath = path.join(bundleDir, ".vite", "build", "worker.js");
   writeFile(
@@ -676,7 +679,8 @@ test("runtime optimizer bounds hidden gateway sidebar Git discovery without chan
   const hiddenFixture = createFixture(
     { env: { OPENCODEX_GATEWAY_HIDDEN_RUNTIME: "1" } },
     () => null,
-    require
+    // 本夹具使用 POSIX 仓库路径，跨 Windows 运行时也须使用相同路径语义。
+    (name) => name === "path" ? path.posix : require(name)
   );
   const localHost = {
     id: "local",

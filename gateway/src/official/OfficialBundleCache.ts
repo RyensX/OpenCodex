@@ -127,6 +127,11 @@ class OfficialBundleCache {
         : path.dirname(sourceAsarPath);
     // 即使不扫描升级，官方 resources 目录仍要给 hidden runtime 查找 CLI、插件等配套资源。
     if (!this.fileSystem.isDirectory(sourceResourcesPath)) return "缓存记录的官方 resources 目录不存在";
+    // 关闭自动升级不等于允许复用已被 MSIX 更新清理的资源；残留 app.asar 需要重新扫描完整安装。
+    if (
+      /[\\/]WindowsApps[\\/]/i.test(sourceResourcesPath) &&
+      !this.fileSystem.isFile(path.join(sourceResourcesPath, "codex.exe"))
+    ) return "缓存记录的 Store 安装已不完整，缺少配套 Codex CLI";
 
     const sourceCodexBinaryPath =
       typeof manifest.sourceCodexBinaryPath === "string" ? manifest.sourceCodexBinaryPath : "";

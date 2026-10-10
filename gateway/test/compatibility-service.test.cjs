@@ -303,7 +303,8 @@ test("compatibility report store writes latest and bounded per-runtime history a
   assert.equal(normalizedLegacyReport.adapterTypes[0].id, "adapter.legacy-report");
   assert.equal(fs.readdirSync(historyDir).length, 2);
   assert.equal(fs.readdirSync(path.dirname(filePath)).some((name) => name.includes(".tmp-")), false);
-  assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+  // Windows 不提供 POSIX 权限位语义；文件内容、原子替换及历史数量仍在所有平台验证。
+  if (process.platform !== "win32") assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
 });
 
 test("service persists sanitized Kernel failures and resets state for a new runtime", (t) => {
@@ -367,7 +368,7 @@ test("public compatibility API exposes only the read-only sanitized snapshot", (
     service,
   ), true);
   assert.equal(getResponse.status, 200);
-  assert.equal(JSON.parse(getResponse.body).compatibility.points.length, 103);
+  assert.equal(JSON.parse(getResponse.body).compatibility.points.length, 106);
 
   const reportResponse = responseRecorder();
   assert.equal(handlePublicRuntimeCompatibilityApi(
@@ -399,7 +400,7 @@ test("authenticated API accepts only validated Browser Kernel reports", async ()
     service,
   ), true);
   assert.equal(getResponse.status, 200);
-  assert.equal(JSON.parse(getResponse.body).compatibility.points.length, 103);
+  assert.equal(JSON.parse(getResponse.body).compatibility.points.length, 106);
 
   const point = browserKernelPoint("web.runtime.bridge.desktop-api", { active: true });
   const reportResponse = responseRecorder();
@@ -470,7 +471,7 @@ test("authenticated Browser reports merge external Plugin SDK points into diagno
 
   assert.equal(response.status, 200);
   const snapshot = service.snapshot();
-  assert.equal(snapshot.points.length, 104);
+  assert.equal(snapshot.points.length, 107);
   assert.deepEqual(
     snapshot.points.find((point) => point.id === fixture.point.id).plugin,
     fixture.catalog.plugin,

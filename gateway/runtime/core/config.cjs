@@ -57,7 +57,8 @@ const LOCAL_DOWNLOAD_ARCHIVE_MAX_BYTES = positiveIntegerFromEnv(
   1024 * 1024 * 1024
 );
 // 路径版本是响应期 patch 的缓存破坏位：官方文件 hash 不变，但 gateway 注入逻辑可能变化。
-const PATCHED_OFFICIAL_PREFIX = "/official-patched-v8/";
+// writer 冲突历史回退变化后使用新资源命名空间，避免远端继续使用旧的不可变 JS 缓存。
+const PATCHED_OFFICIAL_PREFIX = "/official-patched-v23/";
 // 这两个 channel 是官方桌面 renderer/main 的主消息桥，gateway 通过 hook 复用它们。
 const MESSAGE_FROM_VIEW_CHANNEL = "codex_desktop:message-from-view";
 const MESSAGE_FOR_VIEW_CHANNEL = "codex_desktop:message-for-view";

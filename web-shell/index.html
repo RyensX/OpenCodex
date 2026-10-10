@@ -7,6 +7,22 @@
     <!-- PWA 元数据只提供可安装壳，不引入 Service Worker 或离线缓存。 -->
     <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
     <meta name="theme-color" content="#ffffff" />
+    <!-- 登录入口先恢复保存的主题；没有保存值时跟随系统偏好，避免暗色模式首屏闪白。 -->
+    <script>
+      (() => {
+        let theme = "";
+        try {
+          theme = localStorage.getItem("opencodex_theme") || "";
+        } catch {}
+        if (theme !== "dark" && theme !== "light") {
+          theme = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+        }
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.classList.toggle("electron-dark", theme === "dark");
+        document.documentElement.classList.toggle("electron-light", theme !== "dark");
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
     <meta name="application-name" content="OpenCodex" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="OpenCodex" />
@@ -91,6 +107,13 @@
         color: #6b7280;
         font-size: var(--text-sm, 13px);
         line-height: 18px;
+      }
+      .device-name {
+        margin: 8px 0 0;
+        color: var(--color-token-text-primary, #1a1c1f);
+        font-weight: var(--font-weight-semibold, 600);
+        /* 设备名称可能包含很长的主机名，窄屏下也必须完整显示且不撑宽密码面板。 */
+        overflow-wrap: anywhere;
       }
       form {
         margin-top: 18px;
@@ -466,6 +489,79 @@
       .entry-version span {
         display: block;
       }
+      .boot-progress {
+        display: grid;
+        gap: 7px;
+        margin-top: 14px;
+      }
+      .boot-progress[hidden] {
+        display: none;
+      }
+      .boot-progress-track {
+        height: 6px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(26, 28, 31, 0.1);
+      }
+      .boot-progress-value {
+        width: 0%;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--color-token-button-background, #1a1c1f);
+        transition: width 160ms ease;
+      }
+      .boot-progress-label {
+        color: #6b7280;
+        font-size: var(--text-xs, 11px);
+        line-height: 16px;
+        text-align: right;
+      }
+      html[data-theme="dark"],
+      html[data-theme="dark"] body {
+        background: #171717;
+        color: #ececec;
+      }
+      html[data-theme="dark"] .entry {
+        background: #171717;
+      }
+      html[data-theme="dark"] .panel {
+        border-color: rgba(255, 255, 255, 0.14);
+        background: #242424;
+        color: #ececec;
+        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+      }
+      html[data-theme="dark"] .status,
+      html[data-theme="dark"] .hint,
+      html[data-theme="dark"] .boot-progress-label {
+        color: #a7a7a7;
+      }
+      /* 密码入口尚未加载官方主题 Token，设备名与标签必须显式覆盖浅色回退值。 */
+      html[data-theme="dark"] .entry .device-name {
+        color: #ececec;
+      }
+      html[data-theme="dark"] #login-form label {
+        color: #a7a7a7;
+      }
+      html[data-theme="dark"] #error {
+        color: #fca5a5;
+      }
+      html[data-theme="dark"] .boot-progress-track {
+        background: rgba(255, 255, 255, 0.16);
+      }
+      /* 暗色模式下显式设置登录密码框颜色，避免浅色 Token 回退成白底。 */
+      html[data-theme="dark"] #password {
+        border-color: rgba(255, 255, 255, 0.2);
+        background: #303030;
+        color: #ececec;
+        color-scheme: dark;
+      }
+      html[data-theme="dark"] #password:focus {
+        border-color: var(--color-token-focus-border, #0a84ff);
+      }
+      html[data-theme="dark"] #password::placeholder {
+        color: #a7a7a7;
+        opacity: 1;
+      }
       @media (prefers-reduced-motion: reduce) {
         .settings-backdrop,
         .settings-sidebar {
@@ -518,6 +614,8 @@
       <main class="entry" aria-live="polite">
         <section class="panel">
           <h1>OpenCodex</h1>
+          <!-- 中继按当前设备填入名称，本机访问时保持隐藏。 -->
+          <p id="device-name" class="device-name hidden"></p>
           <p id="status" class="status" data-i18n="web.status.checkingAuth">正在检查访问权限...</p>
           <form id="login-form" class="hidden" autocomplete="on">
             <label for="password" data-i18n="web.auth.passwordLabel">访问密码</label>
@@ -526,6 +624,10 @@
             <div id="error" class="error"></div>
           </form>
           <p id="hint" class="hint hidden" data-i18n="web.auth.starting">正在启动 OpenCodex...</p>
+          <div id="boot-progress" class="boot-progress" hidden aria-live="polite">
+            <div class="boot-progress-track"><div id="boot-progress-value" class="boot-progress-value"></div></div>
+            <span id="boot-progress-label" class="boot-progress-label">0%</span>
+          </div>
         </section>
       </main>
       <div class="entry-version">
@@ -606,6 +708,9 @@
         const root = document.getElementById("root");
         const status = document.getElementById("status");
         const hint = document.getElementById("hint");
+        const bootProgress = document.getElementById("boot-progress");
+        const bootProgressValue = document.getElementById("boot-progress-value");
+        const bootProgressLabel = document.getElementById("boot-progress-label");
         const form = document.getElementById("login-form");
         const passwordInput = document.getElementById("password");
         const submit = document.getElementById("submit");
@@ -902,10 +1007,18 @@
           passwordInput.focus();
         }
 
-        function showBoot(message) {
+        function setBootProgress(progress) {
+          const value = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+          bootProgress.hidden = false;
+          bootProgressValue.style.width = `${value}%`;
+          bootProgressLabel.textContent = `${value}%`;
+        }
+
+        function showBoot(message, progress = 8) {
           status.textContent = message;
           form.classList.add("hidden");
           hint.classList.remove("hidden");
+          setBootProgress(progress);
         }
 
         async function authStatus(options = {}) {
@@ -1034,9 +1147,10 @@
         }
 
         async function bootRenderer() {
-          showBoot(t("web.auth.starting"));
+          showBoot(t("web.auth.starting"), 8);
           const res = await fetch("/official-index.patched.html", {
-            cache: "no-store",
+            // 入口 HTML 使用私有短缓存；Authorization/Cookie 由服务端 Vary 隔离不同设备和账号。
+            cache: "default",
             credentials: "same-origin",
             headers: authHeaders({ accept: "text/html" }),
           });
@@ -1046,11 +1160,38 @@
             return;
           }
           if (!res.ok) throw new Error(t("web.auth.loadFailedHttp", { status: res.status }));
-          const html = await res.text();
+          let html = "";
+          if (res.body && typeof res.body.getReader === "function") {
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            const total = Number(res.headers.get("content-length")) || 0;
+            let loaded = 0;
+            const chunks = [];
+            while (true) {
+              const part = await reader.read();
+              if (part.done) break;
+              chunks.push(part.value);
+              loaded += part.value.byteLength;
+              // 没有 Content-Length 时保持在 85%，避免把网络读取误报为已完成。
+              setBootProgress(total > 0 ? 12 + (loaded / total) * 73 : Math.min(85, 18 + loaded / 8192));
+            }
+            const bytes = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0));
+            let offset = 0;
+            for (const chunk of chunks) {
+              bytes.set(chunk, offset);
+              offset += chunk.length;
+            }
+            html = decoder.decode(bytes);
+          } else {
+            html = await res.text();
+            setBootProgress(85);
+          }
+          setBootProgress(92);
           try {
             sessionStorage.setItem("opencodex_legacy_document_replace_hit", "1");
           } catch {}
           document.open();
+          setBootProgress(100);
           document.write(html);
           document.close();
         }

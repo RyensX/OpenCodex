@@ -411,8 +411,8 @@ class CodexInstallLayoutResolver {
  * 3. 指向 Windows/Linux Electron 安装根或 resources 目录。
  * 4. 指向自定义目录时，做有限深度扫描，不全盘递归。
  *
- * manifest 里记录的 sourceAsarPath 是快速路径：文件存在就直接使用。
- * 如果记录文件不存在，再走 CodexAsarCandidateProvider 生成的跨平台搜索候选。
+ * manifest 里记录的 sourceAsarPath 是快速路径：安装源仍完整时直接使用。
+ * Windows Store 更新后的残留 app.asar 不代表完整安装，需重新搜索可用候选。
  */
 class CodexAsarScanner {
   constructor({
@@ -441,7 +441,8 @@ class CodexAsarScanner {
   }
 
   find({ cachedAsarPath = "" }: { cachedAsarPath?: string | null } = {}): any {
-    const cachedLayout = this.layoutFromCachedAsarPath(cachedAsarPath);
+    // 优先复用完整安装源；旧 Store 包残留文件不能阻止重新发现当前版本。
+    const cachedLayout = this.layoutFromAsarPath(cachedAsarPath);
     if (cachedLayout) return cachedLayout;
 
     const candidates = this.candidateProvider.toList();
@@ -454,26 +455,39 @@ class CodexAsarScanner {
     );
   }
 
-  private layoutFromCachedAsarPath(cachedAsarPath: string | null | undefined): any | null {
-    if (!cachedAsarPath) return null;
-    const candidate = this.fileSystem.normalizePath(cachedAsarPath);
+  private layoutFromAsarPath(asarPath: string | null | undefined): any | null {
+    if (!asarPath) return null;
+    // 所有候选使用同一安装源校验，避免缓存失效后又从历史日志选回残留包。
+    const candidate = this.fileSystem.normalizePath(asarPath);
     if (!this.fileSystem.isFile(candidate)) return null;
     if (path.basename(candidate) !== ASAR_FILE_NAME) return null;
+
+    // MSIX 更新可能只留下 app.asar；配套 CLI 缺失时官方启动策略查询无法创建 app-server。
+    if (
+      /[\\/]WindowsApps[\\/]/i.test(candidate) &&
+      !this.fileSystem.isFile(path.join(path.dirname(candidate), "codex.exe"))
+    ) return null;
+
+    // 确认资源源有效后再推导布局与 CLI，不用其它安装的用户目录 CLI 掩盖残留包。
     return this.layoutResolver.fromAsar(candidate);
   }
 
   private layoutFromCandidate(candidate: string): any | null {
     if (this.fileSystem.isFile(candidate) && path.basename(candidate) === ASAR_FILE_NAME) {
-      return this.layoutResolver.fromAsar(candidate);
+      // 直接指定的 app.asar 也必须来自完整安装源。
+      return this.layoutFromAsarPath(candidate);
     }
     if (!this.fileSystem.isDirectory(candidate)) return null;
 
     for (const asarPath of this.layoutResolver.knownAsarPaths(candidate)) {
-      if (this.fileSystem.isFile(asarPath)) return this.layoutResolver.fromAsar(asarPath);
+      // 已知布局统一校验，遇到残留 Store 包继续尝试后续安装候选。
+      const layout = this.layoutFromAsarPath(asarPath);
+      if (layout) return layout;
     }
 
     const scanned = this.findAsarBelow(candidate, 4);
-    return scanned ? this.layoutResolver.fromAsar(scanned) : null;
+    // 有限深度扫描不能绕过安装完整性约束。
+    return scanned ? this.layoutFromAsarPath(scanned) : null;
   }
 
   private findAsarBelow(rootDir: string, maxDepth: number): string | null {
@@ -489,7 +503,11 @@ class CodexAsarScanner {
       }
       for (const entry of entries) {
         const fullPath = path.join(item.dir, entry.name);
-        if (entry.isFile() && entry.name === ASAR_FILE_NAME) return fullPath;
+        if (entry.isFile() && entry.name === ASAR_FILE_NAME) {
+          // 自定义父目录可能同时包含新旧 Store 包；残留包不能提前终止有限深度搜索。
+          if (this.layoutFromAsarPath(fullPath)) return fullPath;
+          continue;
+        }
         if (!entry.isDirectory() || item.depth === maxDepth) continue;
         if (this.skippedDirectoryNames.has(entry.name)) continue;
         queue.push({ dir: fullPath, depth: item.depth + 1 });

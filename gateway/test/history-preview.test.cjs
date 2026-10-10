@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  HISTORY_PREVIEW_CACHE_TTL_MS,
   HISTORY_PREVIEW_LIMIT,
   createHistoryPreviewService,
   normalizePreviewThread,
@@ -130,7 +131,7 @@ test("returns an expired snapshot immediately while refreshing it in the backgro
   });
   assert.deepEqual((await service.snapshot()).threads.map((thread) => thread.id), ["old"]);
 
-  nowMs += 2_000;
+  nowMs += HISTORY_PREVIEW_CACHE_TTL_MS + 1;
   const stale = await service.snapshot({ maxWaitMs: 700 });
   assert.deepEqual(stale.threads.map((thread) => thread.id), ["old"]);
   await Promise.resolve();

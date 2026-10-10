@@ -175,6 +175,8 @@ function createAppHostBridgeBehaviorHarness(bridge, { wsReady = true } = {}) {
     },
   };
   const functionNames = [
+    "settleWsReadyWaiters",
+    "markGatewayWsReady",
     "appHostPortId",
     "appHostMessageCodec",
     "encodeAppHostMessageData",
@@ -196,7 +198,8 @@ function createAppHostBridgeBehaviorHarness(bridge, { wsReady = true } = {}) {
     `
       const w = windowContext;
       const ws = socketContext;
-      const wsReady = wsReadyContext;
+      let wsReady = wsReadyContext;
+      const wsReadyWaiters = new Set();
       const clientId = "app-host-test-client";
       const providerGeneration = {};
       const modificationEffects = null;
@@ -216,7 +219,8 @@ function createAppHostBridgeBehaviorHarness(bridge, { wsReady = true } = {}) {
       function payloadShape(value) { return value === null ? "null" : typeof value; }
       function websocketStateName() { return "open"; }
       ${declarations}
-      ({ appHostPortRelays, installAppHostMessagePortBridge, handleAppHostGatewayMessage, w })
+      ({ appHostPortRelays, installAppHostMessagePortBridge, handleAppHostGatewayMessage, markGatewayWsReady,
+         setWsReady(ready) { wsReady = ready; }, w })
     `,
     {
       diagnostics,
@@ -227,7 +231,7 @@ function createAppHostBridgeBehaviorHarness(bridge, { wsReady = true } = {}) {
       wsReadyContext: wsReady,
     }
   );
-  return { ...result, diagnostics, fakePort, portListeners, publishedData, windowListeners, wsMessages };
+  return { ...result, diagnostics, fakePort, fakeSocket, portListeners, publishedData, windowListeners, wsMessages };
 }
 
 function makeTempDir(t) {
@@ -326,8 +330,9 @@ test("runtime compatibility diagnostics are public, grouped, explained, and repo
 test("runtime compatibility page follows the public authentication locale", (t) => {
   const webviewDir = makeOfficialWebviewDir(t);
   for (const [locale, expectedTitle] of [
-    ["zh-CN", "OpenCodex虚拟骨架调试"],
-    ["en-US", "OpenCodex Virtual Skeleton Diagnostics"],
+    // 与现有公开语言字典一致，验证真实页面标题而非已淘汰的旧文案。
+    ["zh-CN", "运行时兼容调试"],
+    ["en-US", "Runtime Compatibility Diagnostics"],
   ]) {
     const service = createService(webviewDir, null, locale);
     const reqPath = "/settings/developer/runtime-compatibility";
@@ -379,7 +384,7 @@ test("compatibility capabilities preserve renderer HTML output byte for byte", (
   compatibilityService.dispose();
 });
 
-test("renderer defers injected runtime only when official scripts preserve its execution order", (t) => {
+test("renderer loads host locale before official scripts and keeps the bridge synchronous", (t) => {
   const cases = [
     ["module", '<script data-official-case="module" type="module" src="./assets/module.js"></script>', true],
     ["deferred-classic", '<script data-official-case="deferred-classic" defer src="./assets/legacy.js"></script>', true],
@@ -396,8 +401,9 @@ test("renderer defers injected runtime only when official scripts preserve its e
       `<html><head>${officialScript}</head><body><div id="root"></div></body></html>`
     );
     const html = createService(webviewDir).createRendererResponse();
-    const deferAttribute = deferred ? " defer" : "";
-    const configScript = `<script${deferAttribute} src="/codex-web-config.js"></script>`;
+    const deferAttribute = "";
+    // 配置脚本负责设置官方模块首次读取的语言，因此无论官方脚本类型都必须阻塞解析执行。
+    const configScript = '<script src="/codex-web-config.js"></script>';
     const bootstrapScript = `<script${deferAttribute} src="${OPENCODEX_RUNTIME_BOOTSTRAP_PATH}"></script>`;
 
     assert.equal(html.includes(configScript), true, name);
@@ -483,6 +489,15 @@ test("web shell keeps restart controls visible, recoverable and bound to a new g
   assert.match(html, /env\(safe-area-inset-bottom, 0px\)/);
 });
 
+test("web shell shows boot progress while loading the remote renderer", () => {
+  const html = fs.readFileSync(WEB_SHELL_INDEX, "utf-8");
+
+  assert.match(html, /id="boot-progress" class="boot-progress"/);
+  assert.match(html, /cache: "default"/);
+  assert.match(html, /res\.body && typeof res\.body\.getReader === "function"/);
+  assert.match(html, /setBootProgress\(total > 0/);
+});
+
 test("bridge keeps synchronous official preload methods out of the adaptive IPC fallback", () => {
   const source = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
 
@@ -530,6 +545,97 @@ test("patched official renderer hides the app-host application menu capability",
   assert.match(source, /services\.applicationMenu\.getSnapshot\(\)/);
   assert.match(source, /capabilitySnapshot=services\.applicationMenu!=null/);
   assert.doesNotMatch(source, /isWindows\(\)&&services\.applicationMenu!=null/);
+});
+
+test("Statsig AppHost startup reuses local Web initialization with an official fallback", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const service = createService(webviewDir);
+  const source = 'function start(e,t){return Tf.safePost(`/wham/statsig/bootstrap`,{requestBody:e,retry:!1,signal:t})}' +
+    'const options={networkOverrideFunc:(e,n)=>lOs(e,n,t.loggingEnabled!==`disabled`)};';
+  // 同时覆盖新版 safePost 及 SDK 的自定义网络入口，Provider 关闭时继续调用官方实现。
+  const patched = service.patchOfficialAssetData(
+    `${PATCHED_OFFICIAL_PREFIX}assets/app-initial-statsig-test.js`, Buffer.from(source),
+    { headers: { host: "example.com" } }
+  ).toString("utf8");
+  assert.match(patched, /window\.__opencodexStatsigBootstrap\(e,t\):Tf\.safePost/);
+  assert.match(patched, /window\.fetch\(e,n\):lOs\(e,n,t\.loggingEnabled/);
+  // 不属于初始化的普通请求不进入本地配置响应。
+  assert.equal(service.patchOfficialAssetData(
+    `${PATCHED_OFFICIAL_PREFIX}assets/app-initial-statsig-test.js`, Buffer.from('Tf.safePost(`/wham/other`,{})'),
+    { headers: { host: "example.com" } }
+  ).toString("utf8"), 'Tf.safePost(`/wham/other`,{})');
+});
+
+test("new thread placeholders skip premature official resume", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const service = createService(webviewDir);
+  const source =
+    "async function resume(i){let{conversationId:f,model:p}=i,x=e.getConversation(f),S=e.getHostId(),C=e.getWindowActivity(),w=C?.visibilityState;e.logger.info(`maybe_resume_started`);return e.sendRequest(`thread/resume`,{threadId:f})}";
+  const patched = service.patchOfficialAssetData(
+    `${PATCHED_OFFICIAL_PREFIX}assets/app-shared-resume-race-test.js`,
+    Buffer.from(source),
+    { headers: { host: "example.com" } }
+  ).toString("utf8");
+
+  // 新建占位线程只更新本地恢复状态，已有线程仍保留官方 resume 调用。
+  assert.match(patched, /threadResumeRaceGuard/);
+  assert.match(
+    patched,
+    /x\?\.resumeState===`needs_resume`&&x\?\.threadStartKind&&x\?\.historyMode==null&&x\?\.sessionId==null&&!x\?\.rolloutPath&&x\?\.turns\?\.length===0&&!x\?\.title/
+  );
+  assert.match(patched, /__opencodexThreadResumeGuards/);
+  assert.match(patched, /return\{status:`ready`\}/);
+  assert.match(patched, /sendRequest\(`thread\/resume`/);
+});
+
+test("writer-conflicted history hydrates as a follower without blocking the page", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const service = createService(webviewDir);
+  const source =
+    "async function resume(i){let{conversationId:f}=i,x=e.getConversation(f),g=[`/`],ye=g,be=null,ee=!1,btn=t=>t?.message?.includes(`already has an active writer`),ctn=async()=>{};e.logger.info(`maybe_resume_started`);try{await e.sendRequest(`thread/resume`,{threadId:f})}catch(t){if(!ee&&btn(t)&&be?.thread.historyMode===`paginated`)try{await ctn(e,{conversationId:f,isCurrentResumeAttempt:c,mapThreadTurns:o.mapThreadTurns,requestOptions:ie,thread:be.thread,turnMergePolicy:o.turnMergePolicy,workspaceRoots:ye})}catch(t){e.logger.warning(`Failed to hydrate writer-conflicted thread history`,{safe:{conversationId:f},sensitive:{error:t}})}throw t}}";
+  const patched = service.patchOfficialAssetData(
+    `${PATCHED_OFFICIAL_PREFIX}assets/app-shared-writer-conflict-test.js`,
+    Buffer.from(source),
+    { headers: { host: "example.com" } }
+  ).toString("utf8");
+
+  assert.match(patched, /opencodexWriterConflictHistoryCompatible/);
+  assert.match(patched, /be\?\.thread\?\?\{id:f,historyMode:`paginated`/);
+  assert.match(patched, /setConversationStreamRole\(f,\{role:`follower`,ownerClientId:null\}\)/);
+  assert.match(patched, /opencodexWriterConflictHistorySnapshot/);
+  assert.match(patched, /return\{status:`ready`\}/);
+});
+
+test("hidden renderer keeps thread ownership for relay requests", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const service = createService(webviewDir);
+  const source =
+    "function tzn(){let e=document.visibilityState;return{canAcquireThreadStream:!ppn()&&nzn({isHotkeyWindow:ezn(),isWindowActive:e===`visible`&&document.hasFocus()}),routePath:window.location.pathname,visibilityState:e}}";
+  const patched = service.patchOfficialAssetData(
+    `${PATCHED_OFFICIAL_PREFIX}assets/app-shared-owner-test.js`,
+    Buffer.from(source),
+    { headers: { host: "example.com" } }
+  ).toString("utf8");
+
+  // 隐藏 renderer 仍尊重官方的 queued-message 开关，但不因窗口不可见而丢失 owner。
+  assert.match(patched, /opencodexHiddenRendererThreadOwnership/);
+  assert.match(patched, /canAcquireThreadStream:!ppn\(\)&&nzn\(\{isHotkeyWindow:false,isWindowActive:true\}\)/);
+  assert.doesNotMatch(patched, /isWindowActive:e===`visible`&&document\.hasFocus\(\)/);
+});
+
+test("new thread snapshots cannot demote the creating renderer", (t) => {
+  const webviewDir = makeOfficialWebviewDir(t);
+  const service = createService(webviewDir);
+  const source =
+    "function threadStreamStateChanged(e,t,n){} function handleThreadStreamStateChanged(e,t,n){if(!this.followedConversationIds.has(e))return;let r=this.getStreamRole(e);if(r?.role===`owner`&&t.type!==`snapshot`)return;if(t.type===`snapshot`){this.setConversationStreamRole(e,{role:`follower`,ownerClientId:n})}}";
+  const patched = service.patchOfficialAssetData(
+    `${PATCHED_OFFICIAL_PREFIX}assets/app-shared-snapshot-test.js`,
+    Buffer.from(source),
+    { headers: { host: "example.com" } }
+  ).toString("utf8");
+
+  assert.match(patched, /opencodexNewThreadSnapshotOwnership/);
+  assert.match(patched, /threadStore\.getConversation\(e\)\?\.threadStartKind/);
 });
 
 test("large official renderer patches complete off the gateway event loop", async (t) => {
@@ -732,6 +838,47 @@ test("bridge reconnects active app-host ports after websocket hello", () => {
   // WS 瞬时断线只能让升级前已允许重试的安全读取回退 HTTP，写操作不得重复提交。
   assert.match(bridge, /clientDiagnostic\("ipc-ws-fallback"/);
   assert.match(bridge, /retryDelays\.length === 1 \|\| !isTransientGatewayFetchError\(error\)/);
+});
+
+test("bridge restores connect before queued uplink and keeps the MessagePort after reconnect", () => {
+  const bridge = fs.readFileSync(BRIDGE_POLYFILL, "utf-8");
+  // 执行生产 helper，验证首连积压和后台恢复均先绑定端口，再发送业务消息。
+  const harness = createAppHostBridgeBehaviorHarness(bridge, { wsReady: false });
+  harness.installAppHostMessagePortBridge();
+  harness.windowListeners.get("message")({
+    source: harness.w,
+    data: { type: "connect-app-host", port: harness.fakePort },
+    ports: [harness.fakePort],
+  });
+  const send = harness.portListeners.get("message");
+  send({ data: "first-message" });
+  assert.equal(harness.wsMessages.length, 0);
+  harness.fakeSocket.readyState = 1;
+  harness.markGatewayWsReady();
+  assert.deepEqual(harness.wsMessages.map((m) => m.type), ["app-host-connect", "app-host-port-message"]);
+  const state = [...harness.appHostPortRelays.values()][0];
+  harness.handleAppHostGatewayMessage({ type: "app-host-port-connected", portId: state.portId });
+
+  // 按 socket close 后的状态恢复；hello 前即使 socket 已 open，业务帧仍需等待握手。
+  harness.setWsReady(false);
+  state.connected = false;
+  harness.fakeSocket.readyState = 0;
+  send({ data: "queued-message" });
+  send({ data: "steer-message" });
+  harness.fakeSocket.readyState = 1;
+  assert.equal(harness.wsMessages.length, 2);
+  harness.markGatewayWsReady();
+  const restored = harness.wsMessages.slice(2);
+  assert.deepEqual(restored.map((m) => m.type), ["app-host-connect", "app-host-port-message", "app-host-port-message"]);
+  assert.deepEqual(restored.slice(1).map((m) => m.data), ["queued-message", "steer-message"]);
+  assert.ok(restored.every((m) => m.portId === state.portId));
+  assert.equal(state.pending.length, 0);
+  assert.equal(state.pendingChars, 0);
+  assert.equal(harness.fakePort.closed, false);
+  // hello 重复确认不能重复投递已经冲刷的业务帧。
+  harness.handleAppHostGatewayMessage({ type: "app-host-port-connected", portId: state.portId });
+  harness.markGatewayWsReady();
+  assert.equal(harness.wsMessages.length, 5);
 });
 
 test("injects the app-host codec before the bridge provider", (t) => {
@@ -1068,11 +1215,15 @@ test("pre-renders escaped recent threads and preloads official startup modules",
     html,
     new RegExp(`meta name="opencodex-late-modulepreload" content="${PATCHED_OFFICIAL_PREFIX}assets/zh-CN-Locale01\\.js"`)
   );
+  // 语言包需在配置脚本阻塞解析之前开始下载，旧延迟预载通过现有去重逻辑复用该链接。
+  const localePreload = `link rel="modulepreload" crossorigin href="${PATCHED_OFFICIAL_PREFIX}assets/zh-CN-Locale01.js"`;
+  assert.ok(html.indexOf(localePreload) >= 0);
+  assert.ok(html.indexOf(localePreload) < html.indexOf('<script src="/codex-web-config.js">'));
   assert.match(html, new RegExp(`${PATCHED_OFFICIAL_PREFIX}assets/thread-app-shell-chrome-Wrapper01\\.js`));
   assert.doesNotMatch(html, /thread-app-shell-chrome-Implementation01\.js/);
   assert.match(html, new RegExp(`${PATCHED_OFFICIAL_PREFIX}assets/home-ambient-suggestions-content-Home01\\.js`));
   assert.match(html, new RegExp(`${PATCHED_OFFICIAL_PREFIX}assets/codex-home-announcements-Wrapper01\\.js`));
-  assert.doesNotMatch(
+  assert.match(
     html,
     new RegExp(`link rel="modulepreload"[^>]+${PATCHED_OFFICIAL_PREFIX}assets/zh-CN-Locale01\\.js`)
   );
@@ -1589,8 +1740,8 @@ test("external plugins require an SDK-compatible ESM v2 entry and never execute 
     assert.match(aggregateSource, /modern-plugin\/entry\.mjs/);
     assert.doesNotMatch(aggregateSource, /must not execute/);
     const html = service.createRendererResponse();
-    const codecIndex = html.indexOf('<script defer src="/codex-app-host-message-codec.js"></script>');
-    const bridgeIndex = html.indexOf('<script defer src="/codex-bridge-polyfill.js"></script>');
+    const codecIndex = html.indexOf('<script src="/codex-app-host-message-codec.js"></script>');
+    const bridgeIndex = html.indexOf('<script src="/codex-bridge-polyfill.js"></script>');
     assert.ok(codecIndex >= 0 && bridgeIndex > codecIndex);
   } finally {
     if (previousRoots === undefined) delete process.env.OPENCODEX_PLUGIN_DIRS;
@@ -1635,6 +1786,10 @@ test("only caches content-hashed patched assets as immutable", (t) => {
   const assetsDir = path.join(webviewDir, "assets");
   fs.mkdirSync(assetsDir, { recursive: true });
   fs.writeFileSync(path.join(assetsDir, "app-Dk3EPlSk.js"), "export const ready = true;");
+  // 当前官方版本改用 12 位哈希，刷新时仍应复用大脚本而不是重复从中继下载。
+  fs.writeFileSync(path.join(assetsDir, "app-shared-6472dfc83b38.js"), "export const ready = true;");
+  fs.writeFileSync(path.join(assetsDir, "app-initial-0123456789ab.js"),
+    'const labels={file:{id:"windowsMenuBar.file"}};function enabled(){return isWindows()&&services.applicationMenu!=null}');
   fs.writeFileSync(path.join(assetsDir, "OpenAISans-Medium-B7nJY_kG.woff2"), "font");
   fs.writeFileSync(
     path.join(assetsDir, "locale-Ab1_cdEF.js"),
@@ -1664,11 +1819,35 @@ test("only caches content-hashed patched assets as immutable", (t) => {
   const legacy = serveOfficialAssetResponse(service, "/official-patched/assets/app-Dk3EPlSk.js");
 
   assert.equal(current.headers["cache-control"], "public, max-age=31536000, immutable");
+  const currentRolldown = serveOfficialAssetResponse(
+    service, `${PATCHED_OFFICIAL_PREFIX}assets/app-shared-6472dfc83b38.js`
+  );
+  assert.equal(currentRolldown.headers["cache-control"], "public, max-age=31536000, immutable");
+  // 主包的静态补丁随命名空间升级失效；主机语言文案补丁仍保持逐次 ETag 校验。
+  const staticPatched = serveOfficialAssetResponse(
+    service, `${PATCHED_OFFICIAL_PREFIX}assets/app-initial-0123456789ab.js`
+  );
+  assert.equal(staticPatched.headers["cache-control"], "private, max-age=31536000, immutable");
   assert.equal(font.headers["cache-control"], "public, max-age=31536000, immutable");
   assert.equal(dynamic.headers["cache-control"], "private, no-cache, must-revalidate");
   assert.match(dynamic.body.toString("utf-8"), /下载文件/);
   assert.equal(fixedName.headers["cache-control"], "no-store");
   assert.equal(legacy.headers["cache-control"], "no-store");
+});
+
+test("renderer entry uses a short private cache to reduce repeat relay downloads", (t) => {
+  const service = createService(makeOfficialWebviewDir(t));
+  const response = makeResponseRecorder();
+  service.serveRendererIndex({ headers: { "accept-encoding": "identity" } }, response);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["cache-control"], "private, max-age=30, stale-while-revalidate=300");
+  assert.equal(response.headers.vary, "Accept-Encoding, Authorization, Cookie");
+
+  const compressed = makeResponseRecorder();
+  service.serveRendererIndex({ headers: { "accept-encoding": "gzip" } }, compressed);
+  assert.equal(compressed.headers["content-encoding"], "gzip");
+  assert.equal(compressed.headers.vary, "Accept-Encoding, Authorization, Cookie");
 });
 
 test("patched asset cache coalesces asynchronous compression and reuses it for ETag validation", async (t) => {

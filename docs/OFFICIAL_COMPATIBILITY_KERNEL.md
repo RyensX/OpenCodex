@@ -7,7 +7,7 @@
 
 ## 1. 不可变约束
 
-虚拟骨架只改变代码边界、执行编排和诊断方式。103 个修改点原有的触发条件、参数、`this`、返回值、异常、Promise、事件顺序、缓存、节流、回退和 UI 表现不得变化。
+虚拟骨架只改变代码边界、执行编排和诊断方式。106 个修改点原有的触发条件、参数、`this`、返回值、异常、Promise、事件顺序、缓存、节流、回退和 UI 表现不得变化。
 
 - 修改点声明工程不包含 DOM 或 Node 类型，不能访问真实 DOM、Bridge、Electron、文件系统、静态资源正文或原始传输。
 - 真实环境只由 internal Provider 接触。浏览器 Provider 位于 `web-shell/internal/providers` 和 `web-shell/src/modification-browser-host.ts`。
@@ -38,7 +38,7 @@ ModificationPointRef
 - `gateway/src/modification/sdk.ts`：不可伪造引用和声明对象。
 - `gateway/src/modification/contracts.ts`：七类底层适配器的严格 TypeScript 参数契约。
 - `gateway/src/modification/kernel.ts`：依赖展开、批量编译、修改点原子事务、故障隔离和快照。
-- `gateway/src/modification/catalog.ts`：103 点、17 个分类组、23 个适配器及带宿主约束的语义目标唯一目录。
+- `gateway/src/modification/catalog.ts`：106 点、17 个分类组、23 个适配器及带宿主约束的语义目标唯一目录。
 - `gateway/src/modification/production.ts`：Gateway、静态资源和 Runner 的生产批次协调器。
 - `web-shell/src/modification-browser-host.ts`：共享 DOM Observer、全局事件、函数 Wrapper、协议解码、Scheduler 和页面代际。
 - `gateway/runtime/compatibility/*`：跨进程 Schema v2 状态、脱敏报告和只读 v1 兼容读取。
@@ -142,7 +142,7 @@ ESM 默认导出工厂接收宿主创建的冻结 SDK 作用域。插件不能�
 
 完成改动后必须同时满足：
 
-- 103/103 点均有组、直接适配器、依赖链和宿主语义目标，无 legacy/unassigned 项。
+- 106/106 点均有组、直接适配器、依赖链和宿主语义目标，无 legacy/unassigned 项。
 - 编译期错误覆盖错误 Slot、Schema、环境值、进程请求和产物规格。
 - Kernel 覆盖批量编译、依赖环、原子回滚、故障隔离、全量真实命中语义和销毁。
 - 浏览器覆盖共享 Observer/Event/Hook/Protocol 计数与后台暂停。

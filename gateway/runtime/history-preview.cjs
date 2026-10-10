@@ -1,5 +1,6 @@
 const HISTORY_PREVIEW_LIMIT = 12;
-const HISTORY_PREVIEW_CACHE_TTL_MS = 1_000;
+// 历史侧栏快照允许短时间复用，避免每次打开远端 Web 都重新占用中继带宽；新快照仍会在过期后后台刷新。
+const HISTORY_PREVIEW_CACHE_TTL_MS = 30_000;
 const HISTORY_PREVIEW_ATTACH_POLL_MS = 10;
 const HISTORY_PREVIEW_REQUEST_TIMEOUT_MS = 700;
 
@@ -138,6 +139,7 @@ function createHistoryPreviewService({ transport, now = () => Date.now() } = {})
 }
 
 module.exports = {
+  HISTORY_PREVIEW_CACHE_TTL_MS,
   HISTORY_PREVIEW_LIMIT,
   createHistoryPreviewService,
   normalizePreviewThread,

@@ -1,0 +1,16 @@
+{
+  "name": "opencode-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "openCodeProxy - OpenCodex 反向隧道代理服务端（部署在有公网 IP 的 VPS 上）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

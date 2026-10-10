@@ -21,7 +21,9 @@ const COMPOSER_SOURCE = fs.readFileSync(
   "utf8"
 );
 const TOOLTIP_SOURCE = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-tooltip-dismiss-guard.js"), "utf8");
-const BRIDGE_SOURCE = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js"), "utf8");
+// Windows checkout 的 CRLF 不应影响 Statsig 函数片段的定位与行为验证。
+const bridgeSourceText = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js"), "utf8");
+const BRIDGE_SOURCE = bridgeSourceText.replace(/\r\n/g, "\n");
 const SIDEBAR_PREVIEW_SOURCE = fs.readFileSync(
   path.join(INTERNAL_PROVIDER_DIR, "codex-sidebar-preview.js"),
   "utf8"
@@ -56,6 +58,8 @@ const TOKEN_USAGE_CAPABILITY_SOURCE = fs.readFileSync(
 );
 
 function sourceSection(source, startMarker, endMarker) {
+  // 源码片段按逻辑换行定位，Windows checkout 的 CRLF 不改变待验证代码。
+  source = source.replace(/\r\n/g, "\n");
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker, start + startMarker.length);
   assert.notEqual(start, -1, `missing source marker: ${startMarker}`);
@@ -307,7 +311,10 @@ test("sidebar preview hands off immediately when the official sidebar mounts", (
     getAttribute: () => "thread-1",
     setAttribute() {},
   };
-  const officialRow = { getAttribute: () => "local:thread-1" };
+  const officialRow = {
+    getAttribute: (name) => name === "data-app-action-sidebar-thread-id" ? "local:thread-1" : null,
+    click() {},
+  };
   document.documentElement = {};
   document.head = new TestElement("head");
   document.readyState = "loading";
@@ -319,7 +326,7 @@ test("sidebar preview hands off immediately when the official sidebar mounts", (
       ? [localeMarker, shellMarker]
       : selector === 'link[rel="modulepreload"]'
         ? document.head.children
-        : officialReady
+      : officialReady
           ? [officialRow]
           : [];
   const window = new ListenerTarget();
@@ -366,6 +373,23 @@ test("sidebar preview hands off immediately when the official sidebar mounts", (
   assert.equal(removed, true);
   assert.equal(document.listenerCount("click"), 0);
   assert.doesNotMatch(SIDEBAR_PREVIEW_SOURCE, /SidebarPreviewDiagnostics/);
+});
+
+test("sidebar preview keeps a pending history handoff alive during slow startup", () => {
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /MAX_LIFETIME_MS = 30_000/);
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /用户已点选会话时必须保留交接目标/);
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /scheduleRouteHandoffFallback/);
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /\.\/local\/\$\{encodeURIComponent\(threadId\)\}/);
+});
+
+test("sidebar preview exposes loading and retry feedback while history content is pending", () => {
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /HISTORY_LOADING_ID = "opencodex-history-loading"/);
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /正在加载历史会话/);
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /历史会话加载超时/);
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /data-opencodex-history-retry/);
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /historyContentReady/);
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /data-opencodex-history-progress-value/);
+  assert.match(SIDEBAR_PREVIEW_SOURCE, /正在切换到会话 18%/);
 });
 
 test("sidebar preview leaves no observer or timer behind when history is empty", () => {

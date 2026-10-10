@@ -71,9 +71,66 @@
                     <input type="radio" name="hostMode" value="lan" />
                     <span data-i18n="launcher.settings.host.lan">局域网</span>
                   </label>
+                  <!-- [OCX-FORK] 服务器选项（反连隧道模式）+ 下方 relayPanel 面板为本 fork 新增；合并 upstream 时保留此处，详见 FORK-NOTES.md。 -->
+                  <label>
+                    <input type="radio" name="hostMode" value="server" />
+                    <span data-i18n="launcher.settings.host.server">服务器</span>
+                  </label>
                 </div>
               </div>
             </div>
+
+            <!-- [OCX-FORK] BEGIN 服务器中继配置面板（upstream 无此块）；仅「启动地址 = 服务器」时展示，避免占用本机/局域网场景的版面。 -->
+            <div class="setting-item relay-panel" id="relayPanel" hidden>
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="launcher.settings.relay.title">服务器中继配置</div>
+                <div class="setting-desc" data-i18n="launcher.settings.relay.description">由本机主动反连中继服务器暴露服务，无需公网端口；设备密钥在服务器看板「添加设备」生成</div>
+              </div>
+              <div class="setting-control relay-form">
+                <div class="relay-row two">
+                  <label class="relay-field">
+                    <span data-i18n="launcher.settings.relay.host">服务器 IP</span>
+                    <input id="relayHostInput" type="text" spellcheck="false" placeholder="填写 VPS 公网 IP" data-i18n-placeholder="launcher.settings.relay.hostPlaceholder" />
+                  </label>
+                  <label class="relay-field">
+                    <span data-i18n="launcher.settings.relay.port">端口</span>
+                    <input id="relayPortInput" type="number" min="1" max="65535" step="1" inputmode="numeric" placeholder="8443" />
+                  </label>
+                </div>
+                <div class="relay-row two">
+                  <label class="relay-field">
+                    <span data-i18n="launcher.settings.relay.customPath">访问后缀（可选）</span>
+                    <input id="relayCustomPathInput" type="text" spellcheck="false" placeholder="如 my-office，留空使用随机码" data-i18n-placeholder="launcher.settings.relay.customPathPlaceholder" />
+                  </label>
+                  <label class="relay-field">
+                    <span data-i18n="launcher.settings.relay.deviceName">本机名称</span>
+                    <input id="relayDeviceNameInput" type="text" spellcheck="false" placeholder="留空用计算机名" data-i18n-placeholder="launcher.settings.relay.deviceNamePlaceholder" />
+                  </label>
+                </div>
+                <div class="relay-row two">
+                  <label class="relay-field">
+                    <span data-i18n="launcher.settings.relay.deviceId">设备 MAC</span>
+                    <input id="relayDeviceIdText" class="relay-readonly" type="text" readonly tabindex="-1" spellcheck="false" placeholder="-" />
+                  </label>
+                  <label class="relay-field">
+                    <span data-i18n="launcher.settings.relay.secret">设备密钥</span>
+                    <input id="relaySecretInput" type="password" autocomplete="new-password" placeholder="在服务器看板「添加设备」生成后粘贴" data-i18n-placeholder="launcher.settings.relay.secretPlaceholder" />
+                  </label>
+                </div>
+                <div class="relay-row">
+                  <div class="setting-value relay-error" id="relayErrorText" hidden></div>
+                </div>
+                <div class="relay-row relay-actions">
+                  <label class="toggle" for="relayUseHttpsInput">
+                    <input id="relayUseHttpsInput" type="checkbox" data-i18n-aria-label="launcher.settings.relay.useHttps" />
+                    <span aria-hidden="true"></span>
+                  </label>
+                  <span class="relay-toggle-label" data-i18n="launcher.settings.relay.useHttpsLabel">使用 HTTPS</span>
+                  <button id="saveRelay" data-i18n="common.save">保存</button>
+                </div>
+              </div>
+            </div>
+            <!-- [OCX-FORK] END 服务器中继配置面板 -->
 
             <div class="setting-item">
               <div class="setting-info">

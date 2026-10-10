@@ -3,6 +3,8 @@ let currentState = null;
 let pendingHostMode = "";
 let currentLocale = "zh-CN";
 let currentMessages = {};
+// [OCX-FORK] 服务器中继面板「编辑中」标记：编辑期间禁止用已保存设置回填，否则状态推送会抹掉未保存的输入。
+let relayEditing = false;
 
 function $(id) {
   return document.getElementById(id);
@@ -126,10 +128,45 @@ function selectedHostMode() {
 }
 
 function renderHostMode(hostMode) {
-  const value = pendingHostMode || (hostMode === "lan" ? "lan" : "local");
+  const value = pendingHostMode || (hostMode === "lan" ? "lan" : hostMode === "server" ? "server" : "local");
   for (const input of document.querySelectorAll('input[name="hostMode"]')) {
     input.checked = input.value === value;
     input.disabled = !!pendingHostMode;
+  }
+  // 服务器中继配置面板只在「启动地址 = 服务器」时展示。
+  const panel = $("relayPanel");
+  if (panel) panel.hidden = value !== "server";
+}
+
+// [OCX-FORK] 服务器中继面板渲染（upstream 无此函数；配套 DOM 见 index.html 的 relayPanel）。
+function renderRelay(settings, authEnabled) {
+  // 用户正在面板里编辑时跳过回填：launcher 会高频推送状态，回填会清掉未保存的输入。
+  if (relayEditing) return;
+  const relay = settings || {};
+  const setVal = (id, v) => {
+    const node = $(id);
+    if (node && document.activeElement !== node) node.value = v;
+  };
+  setVal("relayHostInput", relay.relayHost || "");
+  setVal("relayPortInput", relay.relayPort ? String(relay.relayPort) : "");
+  setVal("relayCustomPathInput", relay.relayCustomPath || "");
+  const deviceIdText = $("relayDeviceIdText");
+  if (deviceIdText) {
+    // 展示设备 MAC；访问后缀独立保存，不作为设备身份。
+    deviceIdText.value = String(relay.relayDeviceId || "");
+  }
+  setVal("relayDeviceNameInput", relay.relayDeviceName || "");
+  setVal("relaySecretInput", relay.relaySecret || "");
+  const httpsToggle = $("relayUseHttpsInput");
+  // 仅明确开启 HTTPS 时勾选，缺省使用 HTTP。
+  if (httpsToggle) httpsToggle.checked = relay.relayUseHttps === true;
+  // 服务器模式下未设置访问密码时提前提示（保存时主进程也会硬性拦截）。
+  const errNode = $("relayErrorText");
+  if (errNode) {
+    const needPassword =
+      (relay.hostMode || selectedHostMode()) === "server" && (relay.relayHost || "") !== "" && authEnabled === false;
+    errNode.hidden = !needPassword;
+    if (needPassword) errNode.textContent = t("launcher.settings.relay.needPassword");
   }
 }
 
@@ -215,6 +252,7 @@ function render(state) {
   renderUrls(state);
   if (pendingHostMode && settings.hostMode === pendingHostMode) pendingHostMode = "";
   renderHostMode(settings.hostMode);
+  renderRelay(settings, state.auth && state.auth.enabled);
   renderPort(settings.port || state.port);
   renderPluginDirs(settings.pluginDirs);
   renderPreventSleep(settings.preventSleep);
@@ -327,6 +365,39 @@ document.addEventListener("click", async (event) => {
     render(await launcher.updatePluginDirs(""));
     return;
   }
+  // [OCX-FORK] 中继配置保存：失败保持编辑态并展示原因（如服务器模式未设访问密码）。
+  if (target.id === "saveRelay") {
+    const collect = (id) => {
+      const node = $(id);
+      return node ? node.value : "";
+    };
+    const httpsToggle = $("relayUseHttpsInput");
+    // 保存成功后解除编辑态，用保存结果（含自动生成的设备 ID）回填面板。
+    relayEditing = false;
+    const errNode = $("relayErrorText");
+    try {
+      render(
+        await launcher.updateRelay({
+          relayHost: collect("relayHostInput"),
+          relayPort: collect("relayPortInput"),
+          relayDeviceName: collect("relayDeviceNameInput"),
+          relayCustomPath: collect("relayCustomPathInput"),
+          relaySecret: collect("relaySecretInput"),
+          relayUseHttps: !!(httpsToggle && httpsToggle.checked),
+        })
+      );
+      if (errNode) errNode.hidden = true;
+    } catch (error) {
+      // 主进程拒绝保存（如服务器模式未设置访问密码）：保持编辑态并展示原因。
+      relayEditing = true;
+      if (errNode) {
+        errNode.hidden = false;
+        const raw = (error && error.message) || String(error);
+        errNode.textContent = raw.replace(/^Error invoking remote method '[^']*':\s*/i, "").replace(/^Error:\s*/i, "");
+      }
+    }
+    return;
+  }
   if (target.id === "openLogs") {
     await launcher.openLogs();
     return;
@@ -353,6 +424,14 @@ document.addEventListener("click", async (event) => {
   }
 });
 
+document.addEventListener("focusin", (event) => {
+  // 点进中继面板任意输入框即视为编辑开始，直到保存或切换模式才恢复回填。
+  const target = event.target;
+  if (target && typeof target.closest === "function" && target.closest("#relayPanel")) {
+    relayEditing = true;
+  }
+});
+
 document.addEventListener("keydown", async (event) => {
   const target = event.target;
   if (!target || event.key !== "Enter") return;
@@ -372,6 +451,8 @@ document.addEventListener("change", async (event) => {
   if (target.name === "hostMode") {
     const hostMode = selectedHostMode();
     pendingHostMode = hostMode;
+    // 切换启动地址时放弃未保存的中继编辑，恢复为已保存值。
+    relayEditing = false;
     renderHostMode(hostMode);
     render(await launcher.updateHostMode(hostMode));
     return;

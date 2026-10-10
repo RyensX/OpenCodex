@@ -73,6 +73,9 @@ const staticRenderer = Object.freeze({
   historyTurnSignals: requiredPoint("static.cache.renderer.history-turn-signals"),
   applicationMenu: requiredPoint("static.cache.renderer.application-menu"),
   appServerRequestScheduling: requiredPoint("static.cache.renderer.app-server-request-scheduling"),
+  statsigBootstrap: requiredPoint("static.cache.renderer.statsig-bootstrap"),
+  liveSidebarState: requiredPoint("static.cache.renderer.live-sidebar-state"),
+  accountProfile: requiredPoint("static.cache.renderer.account-profile"),
   pluginImageLazyLoad: requiredPoint("static.cache.renderer.plugin-image-lazy-load"),
   openInFolderLocale: requiredPoint("static.cache.renderer.open-in-folder-locale"),
 });

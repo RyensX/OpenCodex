@@ -41,8 +41,14 @@ function gzipIfUseful(req, headers, body) {
   if (!String(req.headers["accept-encoding"] || "").includes("gzip")) return { headers, body };
   const contentType = String(headers["content-type"] || "");
   if (!/javascript|css|html|json|svg|wasm/i.test(contentType)) return { headers, body };
+  // 压缩响应必须保留上游按账号和设备设置的 Vary 维度，避免共享缓存复用错误的会话快照。
+  const varyValues = String(headerValue(headers, "vary") || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!varyValues.some((value) => value.toLowerCase() === "accept-encoding")) varyValues.push("Accept-Encoding");
   return {
-    headers: { ...headers, "content-encoding": "gzip", vary: "Accept-Encoding" },
+    headers: { ...headers, "content-encoding": "gzip", vary: varyValues.join(", ") },
     body: zlib.gzipSync(body),
   };
 }

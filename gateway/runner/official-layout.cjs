@@ -9,6 +9,7 @@ const {
   realpathSafe,
   statSummary,
   uniqueNonEmpty,
+  withPhysicalAsarAccess,
 } = require("./shared/fs-utils.cjs");
 const { logJsonLine } = require("./shared/logging.cjs");
 
@@ -40,7 +41,8 @@ function scanOfficialInstallLayout({ officialBundleDir }) {
   const scanner = new CodexAsarScanner({
     configuredPath: process.env.CODEX_DESKTOP_APP_PATH || "",
   });
-  return scanner.find({ cachedAsarPath: cachedOfficialAsarPath(officialBundleDir) });
+  // 启动器运行在 Electron 中，扫描物理 app.asar 时必须关闭虚拟目录映射；同步扫描结束后恢复原状态。
+  return withPhysicalAsarAccess(() => scanner.find({ cachedAsarPath: cachedOfficialAsarPath(officialBundleDir) }));
 }
 
 function decodeXmlText(value) {

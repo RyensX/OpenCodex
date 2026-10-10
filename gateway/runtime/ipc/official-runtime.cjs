@@ -1,6 +1,7 @@
 const childProcess = require("child_process");
 const electron = require("electron");
 const fs = require("fs");
+const net = require("node:net");
 const os = require("os");
 const path = require("path");
 const util = require("util");
@@ -27,7 +28,7 @@ const {
   officialRuntimeTempDir,
   workspaceRootsFromEnv,
 } = require("../core/config.cjs");
-const { persistedAtomSnapshotForRenderer } = require("../state/desktop-state.cjs");
+const { persistedAtomSnapshotForRenderer, desktopAccountProfileForRenderer, desktopNavigationForRenderer } = require("../state/desktop-state.cjs");
 const { diagnosticLog, diagnosticWarn, shortId } = require("../core/diagnostics.cjs");
 const { resolveOpenCodexI18n } = require("../../../shared/i18n/index.cjs");
 const { withPluginI18nMessages } = require("../core/plugin-assets.cjs");
@@ -62,12 +63,16 @@ let wsHub = null;
 let appServerChildDecorator = null;
 let runtimeCompatibility = null;
 let removeWsClientReadyListener = null;
+let removeWsClientRemovedListener = null;
 // 官方 runtime 会把自身 TMPDIR 改到隔离目录；observer 必须在此之前记住原始 fallback socket。
 const ORIGINAL_SYSTEM_TMPDIR = os.tmpdir();
+const OFFICIAL_WINDOWS_IPC_PIPE = "\\\\.\\pipe\\codex-ipc";
+// 官方协调网络允许多个客户端加入同一路由，发送请求仍按真实 owner 定向执行。
+const observerCreateConnection = net.createConnection;
 
 function officialDesktopIpcSocketPaths(platform = process.platform) {
   // Windows 的 Node IPC 使用 named pipe；Unix socket 路径在该平台不会建立连接。
-  if (platform === "win32") return ["\\\\.\\pipe\\codex-ipc"];
+  if (platform === "win32") return [OFFICIAL_WINDOWS_IPC_PIPE];
   const uid =
     typeof process.getuid === "function"
       ? String(process.getuid())
@@ -78,19 +83,33 @@ function officialDesktopIpcSocketPaths(platform = process.platform) {
   ];
 }
 
-const officialLiveObserver = createOfficialLiveObserver({
-  socketPaths: officialDesktopIpcSocketPaths(),
-  publish(payload) {
-    if (wsHub) wsHub.broadcast(payload, { suppressDiagnostic: true });
-    // peer snapshot 也会改变 recent-conversations-meta；沿用官方 renderer 的 invalidation 协议。
-    scheduleThreadListEventSync(payload.channel, [payload.payload]);
-  },
-  onError(error) {
-    diagnosticWarn("official-live-observer", "observer_error", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  },
-});
+function createRuntimeLiveObserver(socketPaths) {
+  // 状态展示只订阅共享网络；控制权仍由官方 owner discovery 与 follower 请求决定。
+  return createOfficialLiveObserver({
+    followingEnabled: false,
+    socketPaths,
+    socketFactory(socketPath) {
+      // 首次连接与重连都进入官方协调网络，不能把 owner 请求隔离到另一个 pipe。
+      return observerCreateConnection.call(net, socketPath);
+    },
+    publish(payload) {
+      // 保留官方事件格式；共享路由断线时同步清理旧角色，重连后重新接收完整快照。
+      if (wsHub) wsHub.broadcast(payload, { suppressDiagnostic: true });
+      // 共享路由已向隐藏 main 交付缓存广播，不能重新发送同一通知造成循环。
+      // peer snapshot 也会改变 recent-conversations-meta；沿用官方 renderer 的 invalidation 协议。
+      scheduleThreadListEventSync(payload.channel, [payload.payload]);
+    },
+    onError(error) {
+      diagnosticWarn("official-live-observer", "observer_error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+}
+
+// 设备与隐藏 runtime 共用官方协调路由，单个观察器接收双方状态，避免重复快照。
+const officialDesktopLiveObserver = createRuntimeLiveObserver(officialDesktopIpcSocketPaths());
+const officialLiveObservers = [officialDesktopLiveObserver];
 
 const officialIpc = {
   // 官方 main 调 ipcMain.handle/on 注册的 handler 会被这里记录，再由 HTTP IPC invoke 复用。
@@ -666,12 +685,27 @@ function appServerSpawnHookStatus() {
 function setWsHub(nextWsHub) {
   // server.cjs 创建 WebSocket hub 后再注入，避免 runtime 层反向依赖 HTTP server。
   removeWsClientReadyListener?.();
+  removeWsClientRemovedListener?.();
   wsHub = nextWsHub;
   // Web config 首次加载可能早于浏览器 WS hello；页面真正注册后再重发一次 following，确保快照不丢。
   removeWsClientReadyListener =
     typeof nextWsHub?.onClientReady === "function"
-      ? nextWsHub.onClientReady(() => officialLiveObserver.refresh())
+      ? nextWsHub.onClientReady(() => {
+          for (const observer of officialLiveObservers) {
+            // 首个页面上线才允许 follower；所有页面离线后不再阻止官方写入权释放。
+            observer.setFollowingEnabled(true);
+            // Web 重连后向每个来源重新请求完整快照，避免重放旧 revision 的增量。
+            observer.refresh();
+          }
+        })
       : null;
+  removeWsClientRemovedListener = nextWsHub?.onClientRemoved?.(() => {
+    if (nextWsHub.hasClients()) return;
+    for (const observer of officialLiveObservers) {
+      // 最后一个真实页面断开时退订，旧 socket 被新连接替换时仍保留订阅。
+      observer.setFollowingEnabled(false);
+    }
+  }) || null;
 }
 
 function getOfficialBundle() {
@@ -1719,7 +1753,7 @@ const THREAD_LIST_INVALIDATION_METHODS = new Set([
   "thread/unarchived",
   "thread/deleted",
 ]);
-const THREAD_LIST_BROADCAST_INVALIDATION_METHODS = new Set(["thread-archived", "thread-unarchived"]);
+const THREAD_LIST_BROADCAST_INVALIDATION_METHODS = new Set(["thread-archived", "thread-unarchived", "thread-deleted"]);
 
 function threadListInvalidationForOfficialMessage(channel, args) {
   if (channel !== MESSAGE_FOR_VIEW_CHANNEL && channel !== "thread-stream-state-changed") return null;
@@ -1767,13 +1801,8 @@ function runThreadListInvalidation(logEvent, details = {}) {
     if (wsHub) {
       recipientCount = wsHub.broadcast(threadListInvalidationEnvelope(), { suppressDiagnostic: true });
     }
-    // 官方隐藏 renderer 也使用同一条 query cache 协议；Web 广播不能替代 native 通知。
-    void invokeOfficialIpc(MESSAGE_FROM_VIEW_CHANNEL, [threadListInvalidationRequest()]).catch((error) => {
-      diagnosticWarn("official-thread-list-sync", "recent_conversations_meta_native_invalidation_failed", {
-        error: error instanceof Error ? error.message : String(error || ""),
-        source: logEvent,
-      });
-    });
+    // 同一协调广播同时通知设备与隐藏 runtime；不再重复经 main 回广播。
+    officialDesktopLiveObserver?.invalidateThreadList();
     diagnosticLog("official-thread-list-sync", logEvent, { ...details, recipientCount });
     return recipientCount > 0;
   } catch (error) {
@@ -2034,6 +2063,19 @@ function registerOfficialWindow(win) {
   if (shouldBridge) {
     officialIpc.hiddenWindow = win;
     officialIpc.hiddenWebContents = win.webContents;
+    // 隐藏窗口只提供 IPC 服务；官方 hotkey 模式在无焦点时禁止获取会话 writer。
+    // 浏览器使用独立页面，不继承此路由，仍可按正常窗口规则发起执行。
+    const originalLoadURL = win.loadURL.bind(win);
+    win.loadURL = (value, options) => {
+      const target = new URL(value);
+      target.searchParams.set("initialRoute", "/hotkey-window");
+      return originalLoadURL(target.toString(), options);
+    };
+    const originalLoadFile = win.loadFile.bind(win);
+    win.loadFile = (file, options = {}) => {
+      // file 协议沿用官方 query 参数，不能丢失 preload 所需的其他启动字段。
+      return originalLoadFile(file, { ...options, query: { ...options.query, initialRoute: "/hotkey-window" } });
+    };
   }
   hideOfficialWindow(win);
   if (shouldBridge) patchOfficialWebContents(win.webContents);
@@ -2425,7 +2467,10 @@ function buildGatewayStatus() {
         abnormalCount: abnormalPoints.length,
         abnormalPoints,
         // 浏览器认证前尚未上报属于待检查，保留状态与数量，但仅明确异常影响健康结果。
-        ok: abnormalPoints.length === 0,
+        // [OCX-FORK] "unsupported" 不是故障：官方新版布局不支持该优化点时已自动回退官方原始行为
+        // （如 macOS-only 的 Push 注册优化在 Windows 上本就无用），不能把这类纯降级
+        // 报成健康异常，否则官方 Codex 一升级顶栏就常驻「健康异常」误报。
+        ok: abnormalPoints.every((point) => point.issues.every((issue) => issue.type === "unsupported")),
       };
     }
   } catch {
@@ -2482,18 +2527,50 @@ function buildGatewayStatus() {
 async function webConfigScript(options = {}) {
   // 这个脚本由浏览器入口动态加载，避免把本机路径和端口写死到 web-shell 构建产物里。
   const i18n = withPluginI18nMessages(getI18nSnapshot());
+  // 资料和功能缓存共用当前身份，避免生成配置期间切换账号产生不一致快照。
+  const desktopProfile = desktopAccountProfileForRenderer();
+  // 官方缓存只提供真实布尔值，不把 evaluations 中的身份或认证内容带给浏览器。
+  const desktopNavigation = desktopNavigationForRenderer(desktopProfile, officialBundle?.version || "", i18n.locale);
   const initialSidebarBootstrap = await initialSidebarBootstrapForRenderer();
   const gatewayPluginConfig =
     options.gatewayPluginConfig && typeof options.gatewayPluginConfig === "object"
       ? options.gatewayPluginConfig
       : null;
   return `(() => {
+  const locale = ${JSON.stringify(i18n.locale)};
+  // 中继浏览器可能使用英文系统语言；在官方模块读取浏览器偏好前同步覆盖为主机语言。
+  try {
+    document.documentElement.lang = locale;
+  } catch {}
+  try {
+    Object.defineProperty(navigator, "language", { configurable: true, get: () => locale });
+  } catch {}
+  try {
+    Object.defineProperty(navigator, "languages", {
+      configurable: true,
+      get: () => [locale],
+    });
+  } catch {}
+  // 官方 LocaleResolver 读取 Intl 的默认语言；仅覆盖 navigator 无法改变 Chromium 的 ICU 默认值。
+  try {
+    const nativeDateTimeFormat = Intl.DateTimeFormat;
+    Intl.DateTimeFormat = new Proxy(nativeDateTimeFormat, {
+      apply(target, thisArg, args) {
+        const localizedArgs = args.length === 0 || args[0] === undefined ? [locale, ...args.slice(1)] : args;
+        return Reflect.apply(target, thisArg, localizedArgs);
+      },
+      construct(target, args, newTarget) {
+        const localizedArgs = args.length === 0 || args[0] === undefined ? [locale, ...args.slice(1)] : args;
+        return Reflect.construct(target, localizedArgs, newTarget);
+      },
+    });
+  } catch {}
   window.__CODEX_WEB_CONFIG__ = {
     gatewayBaseUrl: location.origin,
     gatewayWsUrl: location.origin.replace(/^http/, "ws") + "/ws",
     workspaceRoots: ${JSON.stringify(workspaceRootsFromEnv())},
     homeDir: ${JSON.stringify(os.homedir())},
-    locale: ${JSON.stringify(i18n.locale)},
+    locale,
     localeSource: ${JSON.stringify(i18n.source || "")},
     localeMode: ${JSON.stringify(i18n.mode || "")},
     messages: ${JSON.stringify(i18n.messages)},
@@ -2507,6 +2584,11 @@ async function webConfigScript(options = {}) {
     sharedObjectSnapshot: ${JSON.stringify({ host_config: { id: "local", kind: "local" } })},
     // persistedAtomSnapshot 用于首屏同步：renderer 会很早请求它，此时 WebSocket 可能还没连上。
     persistedAtomSnapshot: ${JSON.stringify(persistedAtomSnapshotForRenderer())},
+    // 登录身份只用于首屏展示和功能缓存归属校验，不包含认证令牌。
+    desktopAccountProfile: ${JSON.stringify(desktopProfile)},
+    desktopFeatureGates: ${JSON.stringify(desktopNavigation.gates)},
+    // 非认证设备标识仅用于匹配设备端导航评估，不能替代登录身份。
+    desktopStatsigStableId: ${JSON.stringify(desktopNavigation.stableId)},
     // 刷新页面时官方的一次性启动广播已经结束，必须把 main 的同步侧栏快照直接交给 preload bridge。
     initialSidebarBootstrap: ${JSON.stringify(initialSidebarBootstrap)}
   };
@@ -2535,7 +2617,10 @@ async function initialSidebarBootstrapForRenderer() {
     if (effectiveBootstrap) {
       recordRuntimeCompatibilityHit(gatewayPointRefs.initialSidebarBootstrap);
       // 只从 Web 首屏侧栏已知条目订阅，避免 observer 读取或跟踪用户不可见的 thread。
-      officialLiveObserver.observeSidebarBootstrap(effectiveBootstrap);
+      for (const observer of officialLiveObservers) {
+        // 可见会话在共享协调网络中只订阅一次，状态由真实 owner 发布。
+        observer.observeSidebarBootstrap(effectiveBootstrap);
+      }
     }
     return effectiveBootstrap;
   } catch (error) {
@@ -2572,7 +2657,12 @@ function startOfficialRuntime(options = {}) {
   );
   runRuntimeCompatibilityCapability(
     gatewayPointRefs.liveObserver,
-    () => officialLiveObserver.start()
+    () => {
+      for (const observer of officialLiveObservers) {
+        // 共享只读订阅随 gateway 启动，不主动获取 writer。
+        observer.start();
+      }
+    }
   );
   runRuntimeCompatibilityCapability(
     gatewayPointRefs.appServerLaunch,
@@ -2612,6 +2702,7 @@ function startOfficialRuntime(options = {}) {
     patchOfficialAppSingleton
   );
 
+  // 保留官方共享 IPC：owner discovery、follower 发送及状态广播才能在设备和远端之间双向路由。
   // 官方 bootstrap 负责注册 IPC handler、创建隐藏 BrowserWindow 和启动自己的 app-server 连接。
   require(officialBundle.bootstrapPath);
   const electronModuleStatus = officialElectronModuleHookStatus();
@@ -2634,7 +2725,10 @@ function startOfficialRuntime(options = {}) {
 function rejectPendingInternalResponses(error) {
   // 当前没有 gateway 自己发起的官方 IPC 请求；保留出口让 shutdown 路径无需关心内部实现。
   void error;
-  officialLiveObserver.stop();
+  for (const observer of officialLiveObservers) {
+    // 关闭所有来源的连接和重连定时器，避免 shutdown 后继续广播旧 owner 状态。
+    observer.stop();
+  }
 }
 
 function listOfficialIpcChannels() {

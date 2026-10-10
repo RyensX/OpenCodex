@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld("openCodexLauncher", {
   updatePreventSleep: (preventSleep) => ipcRenderer.invoke("launcher:update-prevent-sleep", preventSleep),
   updateOfficialAutoScanUpgrade: (officialAutoScanUpgrade) =>
     ipcRenderer.invoke("launcher:update-official-auto-scan-upgrade", officialAutoScanUpgrade),
+  // [OCX-FORK] 中继配置保存（服务器模式反连）；handler 实现在 launcher/fork/relay-core.cjs。
+  updateRelay: (relay) => ipcRenderer.invoke("launcher:update-relay", relay),
   choosePluginDir: () => ipcRenderer.invoke("launcher:choose-plugin-dir"),
   onState: (callback) => {
     const listener = (_event, state) => callback(state);
