@@ -14,6 +14,7 @@
   const LOCAL_PROJECTS_KEY = "local-projects";
   const REMOTE_PROJECTS_KEY = "remote-projects";
   const PROJECT_ORDER_KEY = "project-order";
+  const UNIFIED_PROJECT_ORDER_KEY = "unified-sidebar-project-order-v1";
   const THREAD_PROJECT_ASSIGNMENTS_KEY = "thread-project-assignments";
   const OWNED_RPC_RESPONSE_TYPE = "opencodex-project-recent-sort-response";
   const RECENT_SORT_MODES = new Set(["created_at", "updated_at"]);
@@ -142,6 +143,10 @@
       let flatSidebarPreferences = plainObject(persistedSnapshot[FLAT_SIDEBAR_PREFERENCES_KEY]);
       let legacySidebarSortMode = normalizedSortMode(persistedSnapshot[LEGACY_SIDEBAR_SORT_MODE_KEY]);
       let officialProjectOrder = [];
+      let officialUnifiedOrder = stringArray(persistedSnapshot[UNIFIED_PROJECT_ORDER_KEY]);
+      let hasUnifiedOrder = Object.prototype.hasOwnProperty.call(persistedSnapshot, UNIFIED_PROJECT_ORDER_KEY);
+      let emittingUnifiedOrder = false;
+      let lastUnifiedOrder = null;
       let projectSequence = 0;
       let threadSequence = 0;
       let disposed = false;
@@ -183,6 +188,17 @@
 
       function emitProjectOrderInvalidation() {
         emitRendererMessage("global-state-updated", { keys: [PROJECT_ORDER_KEY] });
+        if (!hasUnifiedOrder) return;
+        const value = !disposed && usesRecentProjectSort() ? unifiedOrderForRecent() : officialUnifiedOrder;
+        if (sameArray(value, lastUnifiedOrder)) return;
+        lastUnifiedOrder = value.slice();
+        // 只通知当前 renderer，不发送 persisted-atom-update 写入官方存储。
+        emittingUnifiedOrder = true;
+        try {
+          emitRendererMessage("persisted-atom-updated", { key: UNIFIED_PROJECT_ORDER_KEY, value, deleted: false });
+        } finally {
+          emittingUnifiedOrder = false;
+        }
       }
 
       function scheduleProjectOrderInvalidation() {
@@ -227,6 +243,9 @@
           paths,
           sequence: previous?.sequence ?? projectSequence++,
           updatedAt: timestampMs(value?.projectUpdatedAt ?? value?.updatedAt),
+          // 统一侧栏把关联 ChatGPT 的本地工程映射为云项目 key，不能只给 UUID 加前缀。
+          unifiedKey: typeof value?.chatGptBacking?.projectId === "string"
+            ? `chatgpt:project:${value.chatGptBacking.projectId}` : `codex:project:${id}`,
         };
         const unchanged =
           previous &&
@@ -234,6 +253,7 @@
           previous.hostId === next.hostId &&
           previous.kind === next.kind &&
           previous.updatedAt === next.updatedAt &&
+          previous.unifiedKey === next.unifiedKey &&
           sameArray(previous.paths.map((entry) => entry.comparable), next.paths.map((entry) => entry.comparable));
         if (unchanged) return false;
         projects.delete(id);
@@ -424,6 +444,49 @@
         });
       }
 
+      function unifiedOrderForRecent() {
+        const projectIds = new Map();
+        for (const project of projects.values()) {
+          projectIds.set(`codex:project:${project.id}`, project.id);
+          projectIds.set(project.unifiedKey, project.id);
+        }
+        const orderedIds = projectOrderForRecent(officialUnifiedOrder.map((key) => projectIds.get(key)).filter(Boolean));
+        const keys = orderedIds.filter((id) => projects.has(id)).map((id) => projects.get(id).unifiedKey);
+        const rank = new Map();
+        for (const key of keys) if (!rank.has(key)) rank.set(key, rank.size);
+        // 未关联本地工程的云项目没有可信活动时间，保持它们之间的原有顺序。
+        const canonical = officialUnifiedOrder.map((key) => projects.get(projectIds.get(key))?.unifiedKey || key);
+        return [...new Set([...canonical, ...keys])].sort((a, b) =>
+          (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER));
+      }
+
+      function transformPersistedState(value, channel) {
+        const type = value.type || channel;
+        if (type === "persisted-atom-sync" && plainObject(value.state)) {
+          const state = value.state;
+          if (Object.prototype.hasOwnProperty.call(state, FLAT_SIDEBAR_PREFERENCES_KEY)) {
+            flatSidebarPreferences = plainObject(state[FLAT_SIDEBAR_PREFERENCES_KEY]);
+          }
+          // 全量同步是权威快照，缺失的旧偏好不应继续覆盖当前排序模式。
+          legacySidebarSortMode = normalizedSortMode(state[LEGACY_SIDEBAR_SORT_MODE_KEY]);
+          hasUnifiedOrder = Object.prototype.hasOwnProperty.call(state, UNIFIED_PROJECT_ORDER_KEY);
+          officialUnifiedOrder = stringArray(state[UNIFIED_PROJECT_ORDER_KEY]);
+          if (!hasUnifiedOrder || !usesRecentProjectSort()) return value;
+          lastUnifiedOrder = unifiedOrderForRecent();
+          return { ...value, state: { ...state, [UNIFIED_PROJECT_ORDER_KEY]: lastUnifiedOrder } };
+        }
+        if (type === "persisted-atom-updated") {
+          updateSidebarPreference({ ...value, type: "persisted-atom-update" });
+          if (value.key !== UNIFIED_PROJECT_ORDER_KEY) return value;
+          hasUnifiedOrder = true;
+          officialUnifiedOrder = value.deleted ? [] : stringArray(value.value);
+          if (!usesRecentProjectSort()) return value;
+          lastUnifiedOrder = unifiedOrderForRecent();
+          return { ...value, value: lastUnifiedOrder, deleted: false };
+        }
+        return value;
+      }
+
       function captureBootstrap(bootstrap) {
         if (!bootstrap || typeof bootstrap !== "object") return false;
         let changed = false;
@@ -454,6 +517,13 @@
 
       function updateSidebarPreference(payload) {
         if (!payload || typeof payload !== "object" || payload.type !== "persisted-atom-update") return false;
+        if (payload.key === UNIFIED_PROJECT_ORDER_KEY) {
+          if (emittingUnifiedOrder) return false;
+          hasUnifiedOrder = true;
+          officialUnifiedOrder = payload.deleted ? [] : stringArray(payload.value);
+          scheduleProjectOrderInvalidation();
+          return true;
+        }
         if (payload.key !== FLAT_SIDEBAR_PREFERENCES_KEY && payload.key !== LEGACY_SIDEBAR_SORT_MODE_KEY) return false;
         const wasRecent = usesRecentProjectSort();
         if (payload.key === FLAT_SIDEBAR_PREFERENCES_KEY) {
@@ -756,6 +826,11 @@
           if (value.type === "mcp-request") rememberRpcRequest(value.request, hostId);
           else if (typeof value.method === "string" && value.id != null) rememberRpcRequest(value, hostId);
         } else if (
+          channel === "persisted-atom-sync" || channel === "persisted-atom-updated" ||
+          value.type === "persisted-atom-sync" || value.type === "persisted-atom-updated"
+        ) {
+          transformedValue = transformPersistedState(value, channel);
+        } else if (
           channel === "thread-project-assignments-updated" ||
           value.type === "thread-project-assignments-updated"
         ) {
@@ -868,6 +943,8 @@
 
       function handlePersistedAtomUpdated(...args) {
         const payload = args.length > 1 ? args[args.length - 1] : args[0];
+        // 入站 transform 已记住原始顺序；不要把输出给 renderer 的虚拟顺序当成用户手动排序。
+        if (payload?.key === UNIFIED_PROJECT_ORDER_KEY) return;
         updateSidebarPreference({
           type: "persisted-atom-update",
           ...(payload && typeof payload === "object" ? payload : {}),

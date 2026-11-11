@@ -12,6 +12,7 @@ const PLUGIN_SOURCE = fs.readFileSync(
 const FLAT_PREFERENCES_KEY = "flat-project-sidebar-preferences-v1";
 const LEGACY_SORT_MODE_KEY = "codex-sidebar-sort-mode-v1";
 const PROJECT_ORDER_KEY = "project-order";
+const UNIFIED_ORDER_KEY = "unified-sidebar-project-order-v1";
 
 function defaultBootstrap() {
   return {
@@ -50,6 +51,7 @@ function decodedProtocolValue(value) {
 function createHarness({
   flatPreferences = { projectSortMode: "updated_at" },
   legacySortMode,
+  unifiedOrder,
   initialBootstrap = defaultBootstrap(),
 } = {}) {
   const bridgeListeners = new Map();
@@ -63,6 +65,7 @@ function createHarness({
 
   const persistedAtomSnapshot = { [FLAT_PREFERENCES_KEY]: flatPreferences };
   if (legacySortMode !== undefined) persistedAtomSnapshot[LEGACY_SORT_MODE_KEY] = legacySortMode;
+  if (unifiedOrder !== undefined) persistedAtomSnapshot[UNIFIED_ORDER_KEY] = unifiedOrder;
 
   const bridge = {
     getInitialSidebarBootstrap() {
@@ -508,4 +511,67 @@ test("project sort implementation no longer depends on static bundle globals", (
     "utf-8"
   );
   assert.doesNotMatch(staticAssets, /patchProjectRecentSortAppHostQuery|PROJECT_RECENT_GROUP_ORDER/);
+});
+
+test("unified sidebar sync orders namespaced projects without persisting virtual order", () => {
+  const saved = ["codex:project:gamehub", "chatgpt:project:cloud-a", "codex:project:current", "chatgpt:project:cloud-b"];
+  const harness = createHarness({ unifiedOrder: saved });
+  const state = { [UNIFIED_ORDER_KEY]: saved, [FLAT_PREFERENCES_KEY]: { projectSortMode: "updated_at" }, "unified-sidebar-pinned-order-v1": ["pinned"] };
+  const result = harness.processGateway("persisted-atom-sync", { state }, "server");
+  assert.deepEqual(parsed(result.state[UNIFIED_ORDER_KEY]).slice(0, 2), ["codex:project:current", "codex:project:gamehub"]);
+  assert.deepEqual(parsed(result.state[UNIFIED_ORDER_KEY]).filter((key) => key.startsWith("chatgpt:")), ["chatgpt:project:cloud-a", "chatgpt:project:cloud-b"]);
+  assert.equal(state[UNIFIED_ORDER_KEY], saved);
+  assert.deepEqual(parsed(result.state["unified-sidebar-pinned-order-v1"]), ["pinned"]);
+  assert.equal(harness.forwardedMessages.some((message) => message.type === "persisted-atom-update"), false);
+  harness.dispose();
+});
+
+test("unified sidebar follows new activity, restores manual order, and restores on disable", async () => {
+  const saved = ["codex:project:gamehub", "codex:project:current"];
+  const harness = createHarness({ unifiedOrder: saved });
+  const updates = () => harness.postedMessages.filter((message) => message.type === "persisted-atom-updated" && message.key === UNIFIED_ORDER_KEY);
+  assert.equal(updates().at(-1).value[0], "codex:project:current");
+  announceNotification(harness, "thread/started", { thread: { id: "new", cwd: "/work/Gamehub", recencyAt: 4000 } });
+  assert.equal(updates().at(-1).value[0], "codex:project:gamehub");
+  await harness.bridge.sendMessageFromView({ type: "persisted-atom-update", key: FLAT_PREFERENCES_KEY, value: { projectSortMode: "manual" } });
+  assert.deepEqual(parsed(updates().at(-1).value), saved);
+  const manual = { key: UNIFIED_ORDER_KEY, value: saved.slice().reverse(), deleted: false };
+  assert.equal(harness.processGateway("persisted-atom-updated", manual, "server"), manual);
+  await harness.bridge.sendMessageFromView({ type: "persisted-atom-update", key: FLAT_PREFERENCES_KEY, value: { projectSortMode: "updated_at" } });
+  harness.flushMicrotasks();
+  assert.equal(updates().at(-1).value[0], "codex:project:gamehub");
+  harness.dispose();
+  assert.deepEqual(parsed(updates().at(-1).value), manual.value);
+});
+
+test("linked ChatGPT projects share one unified key and sorting remains stable on refresh", () => {
+  const bootstrap = defaultBootstrap();
+  bootstrap.globalStateEntries.find((entry) => entry.key === "local-projects").value.current.chatGptBacking = { projectId: "cloud-current" };
+  const saved = ["codex:project:gamehub", "codex:project:current", "chatgpt:project:cloud-current"];
+  const state = { [UNIFIED_ORDER_KEY]: saved, [FLAT_PREFERENCES_KEY]: { projectSortMode: "updated_at" } };
+  const orders = [];
+  for (let reload = 0; reload < 2; reload++) {
+    const harness = createHarness({ unifiedOrder: saved, initialBootstrap: bootstrap });
+    const result = harness.processGateway("persisted-atom-sync", { state }, "server");
+    orders.push(parsed(result.state[UNIFIED_ORDER_KEY]));
+    assert.equal(orders[reload][0], "chatgpt:project:cloud-current");
+    assert.equal(orders[reload].filter((key) => key === "chatgpt:project:cloud-current").length, 1);
+    assert.equal(orders[reload].includes("codex:project:current"), false);
+    harness.dispose();
+  }
+  assert.deepEqual(orders[0], orders[1]);
+});
+
+test("unified ordering ignores unrelated atoms and preserves unknown project order", () => {
+  const harness = createHarness({ unifiedOrder: ["chatgpt:project:b", "chatgpt:project:a"] });
+  const unrelated = { key: "prompt-history", value: ["untouched"] };
+  assert.equal(harness.processGateway("persisted-atom-updated", unrelated, "server"), unrelated);
+  const update = { key: UNIFIED_ORDER_KEY, value: ["chatgpt:project:b", "chatgpt:project:a"] };
+  const result = harness.processGateway("persisted-atom-updated", update, "server");
+  assert.deepEqual(parsed(result.value).filter((key) => key.startsWith("chatgpt:")), update.value);
+  harness.flushMicrotasks();
+  const before = harness.postedMessages.length;
+  harness.flushMicrotasks();
+  assert.equal(harness.postedMessages.length, before);
+  harness.dispose();
 });

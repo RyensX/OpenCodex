@@ -3144,9 +3144,8 @@
   /** 立即给官方 renderer 回 persisted-atom-sync，消除启动期固定 5 秒等待。 */
   function emitPersistedAtomSync() {
     const payload = { state: persistedAtomSnapshotObject() };
-    const delivered = dispatch("persisted-atom-sync", payload);
-    emitWindowMessage("persisted-atom-sync", payload);
-    return delivered;
+    // 本地首屏同步也经过协议适配，但原始快照仍保留真实持久化值。
+    return deliverLocalRendererMessage("persisted-atom-sync", payload);
   }
 
   /** persisted atom 更新先同步给当前页面，防止 UI 等待官方异步广播。 */
@@ -3156,8 +3155,7 @@
       value: deleted ? null : value,
       deleted: !!deleted,
     };
-    dispatch("persisted-atom-updated", payload);
-    emitWindowMessage("persisted-atom-updated", payload);
+    deliverLocalRendererMessage("persisted-atom-updated", payload);
   }
 
   initializePersistedAtomSnapshot();
