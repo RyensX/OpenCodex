@@ -55,7 +55,7 @@ function createPageHarness(initialPreference = "disabled") {
   };
   const title = new FakeElement({
     dataset: { i18n: "web.runtimeCompatibility.pageTitle" },
-    textContent: "OpenCodex虚拟骨架调试",
+    textContent: "运行时兼容调试",
   });
   const documentListeners = new Map();
   const timers = new Map();
@@ -120,7 +120,8 @@ test("diagnostics page follows locale and persists auto-refresh control", async 
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(page.document.documentElement.lang, "en-US");
-  assert.equal(page.title.textContent, "OpenCodex Virtual Skeleton Diagnostics");
+  // 页面标题随语言切换，不再使用旧版虚拟骨架命名。
+  assert.equal(page.title.textContent, "Runtime Compatibility Diagnostics");
   assert.equal(page.element("autoRefreshToggle").checked, false);
   assert.equal(page.timers.size, 0);
   assert.equal(page.fetchCount(), 1, "initial page load still performs one explicit read");
