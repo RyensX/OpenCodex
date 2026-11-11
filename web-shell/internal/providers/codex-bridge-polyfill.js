@@ -2074,6 +2074,7 @@
     return {
       clientId,
       portId: state.portId,
+      ...(state.service === "git" ? { service: "git" } : {}),
       ...payload,
     };
   }
@@ -2337,6 +2338,10 @@
     if (!state || state.closed || state.closing) return;
     state.closing = true;
     state.closeReason = reason;
+    if (state.service === "git" && state.requestId) {
+      // 与官方 preload 保持一致，让调用方及时销毁失败的 Git RPC 连接。
+      w.postMessage({ type: "codex_desktop:git-worker-port", requestId: state.requestId, closed: true }, w.location.origin);
+    }
     if (notifyGateway) {
       // terminal null 进入同一 FIFO；WS 尚未 ready 时也不能静默丢失关闭信号。
       state.pending.length = 0;
@@ -2410,7 +2415,7 @@
       closeAppHostRelay(state, "decode_failed", true);
       return true;
     }
-    data = publishAppHostData(data, "server");
+    if (state.service !== "git") data = publishAppHostData(data, "server");
     try {
       state.port.postMessage(data);
       if (data === null) closeAppHostRelay(state, "official_closed", false);
@@ -2451,6 +2456,8 @@
         pendingChars: 0,
         port,
         portId: appHostPortId(),
+        service: data.service === "git" ? "git" : "app-host",
+        requestId: data.requestId,
       };
       while (appHostPortRelays.size >= APP_HOST_RELAY_MAX_ENTRIES) {
         const oldestRelay = appHostPortRelays.values().next().value;
@@ -2465,7 +2472,7 @@
         if (state.closed || state.closing) return;
         // MessageEvent.data 可能不是自有属性，直接读取才能拿到新版结构化 RPC 值。
         const originalPortData = portEvent ? portEvent.data : undefined;
-        const portData = publishAppHostData(originalPortData, "client");
+        const portData = state.service === "git" ? originalPortData : publishAppHostData(originalPortData, "client");
         let wireData;
         try {
           wireData = encodeAppHostMessageData(portData);
@@ -3160,6 +3167,15 @@
     w.performance && Number.isFinite(w.performance.timeOrigin) ? w.performance.timeOrigin : Date.now();
 
   /** 把 Electron/Codex bridge API 挂到多个官方可能访问的全局对象上。 */
+  /** 官方会将连接结果作为带 requestId 的可转移端口交给页面；Web 端用现有有界中继承载。 */
+  async function connectGitWorker(requestId) {
+    if (typeof requestId !== "string" || !requestId) return false;
+    const { port1, port2 } = new w.MessageChannel();
+    w.postMessage({ type: "connect-app-host", service: "git", requestId, port: port1 }, w.location.origin, [port1]);
+    w.postMessage({ type: "codex_desktop:git-worker-port", requestId }, w.location.origin, [port2]);
+    return true;
+  }
+
   function attachBridge(target) {
     target.invoke = invoke;
     target.on = (channel, handler) => subscribe(channel, handler);
@@ -3274,6 +3290,7 @@
         }
         return invoke("codex_desktop:message-from-view", payload);
       });
+    target.connectGitWorker = connectGitWorker;
     target.sendWorkerMessageFromView = async (workerId, payload) =>
       invoke(`codex_desktop:worker:${workerId}:from-view`, payload);
     target.subscribeToWorkerMessages = (workerId, handler) =>

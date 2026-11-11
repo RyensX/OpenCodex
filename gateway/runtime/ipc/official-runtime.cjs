@@ -6,6 +6,7 @@ const path = require("path");
 const util = require("util");
 const { AsyncLocalStorage } = require("async_hooks");
 const { EventEmitter } = require("events");
+const { connectGitWorkerRelay } = require("./git-worker-relay.cjs");
 const {
   AUTH_CONFIG_PATH,
   CODEX_HOME,
@@ -2219,6 +2220,16 @@ async function connectOfficialAppHostPort(port, context = {}) {
    * 官方 main listener，服务对象和 RPC 协议仍完全由官方 bundle 负责。
    */
   await waitForOfficialBridgeReady();
+  if (context.service === "git") {
+    const handler = officialIpc.handlers.get("codex_desktop:connect-git-worker");
+    if (!handler) throw new Error("Official Git worker IPC is unavailable");
+    return connectGitWorkerRelay({
+      sender: officialIpc.hiddenWebContents,
+      port,
+      requestId: context.portId,
+      invoke: (sender, requestId) => handler(createOfficialIpcEvent({ ...context, sender }), requestId),
+    });
+  }
   const listeners = officialIpc.listeners.get("codex_desktop:connect-app-host");
   if (!listeners || listeners.size === 0) {
     throw new Error("No official Electron IPC listener for codex_desktop:connect-app-host");
@@ -2249,7 +2260,7 @@ function deliverOfficialAppHostMessage(event, onMessage, close) {
  * 这里不解析 app-host RPC 内容，只保证旧字符串帧、新结构化值和关闭信号按顺序穿过边界。
  */
 function createOfficialAppHostRelay(options = {}) {
-  const { clientId = "", onClose, onError, onMessage, portId = "", remoteAddress = "" } = options;
+  const { clientId = "", onClose, onError, onMessage, portId = "", remoteAddress = "", service = "app-host" } = options;
   if (typeof electron.MessageChannelMain !== "function") {
     throw new Error("Electron MessageChannelMain is unavailable");
   }
@@ -2258,10 +2269,12 @@ function createOfficialAppHostRelay(options = {}) {
   const { port1, port2 } = new electron.MessageChannelMain();
   let closed = false;
   let nullCloseScheduled = false;
+  let disconnect = null;
 
   function close(reason = "closed") {
     if (closed) return;
     closed = true;
+    disconnect?.();
     try {
       port1.close();
     } catch {}
@@ -2292,8 +2305,10 @@ function createOfficialAppHostRelay(options = {}) {
   port2.on("close", () => close("official_port_closed"));
   port2.start();
 
-  connectOfficialAppHostPort(port1, { clientId, portId, remoteAddress }).then(
-    () => {
+  connectOfficialAppHostPort(port1, { clientId, portId, remoteAddress, service }).then(
+    (cleanup) => {
+      disconnect = typeof cleanup === "function" ? cleanup : null;
+      if (closed) disconnect?.();
       if (DEBUG_LOGS) {
         // app-host 正常连接只是生命周期事件；失败仍保持常规日志，方便排查终端/侧栏能力不可用。
         diagnosticLog("official-app-host", "connected", {

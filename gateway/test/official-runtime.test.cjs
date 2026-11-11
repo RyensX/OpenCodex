@@ -16,6 +16,49 @@ const {
   setWsHub,
 } = require("../runtime/ipc/official-runtime.cjs");
 const { __test: portableRunnerTest } = require("../runner/platform/portable.cjs");
+const { EventEmitter } = require("node:events");
+const { connectGitWorkerRelay } = require("../runtime/ipc/git-worker-relay.cjs");
+
+test("Git worker relay isolates browser lifecycles and forwards structured messages", async () => {
+  class Port extends EventEmitter {
+    sent = [];
+    postMessage(data) { this.sent.push(data); }
+    start() {}
+    close() { if (!this.closed) { this.closed = true; this.emit("close"); } }
+  }
+  const sender = Object.assign(new EventEmitter(), { id: 2, mainFrame: {}, isDestroyed: () => false });
+  const identities = new Set();
+  const workerPorts = [];
+  const invoke = (proxy, id) => {
+    assert.equal(proxy.id, sender.id);
+    assert.equal(proxy.mainFrame, sender.mainFrame);
+    identities.add(proxy);
+    proxy.once("destroyed", () => identities.delete(proxy));
+    const worker = new Port();
+    workerPorts.push(worker);
+    proxy.postMessage("codex_desktop:git-worker-port", { requestId: id }, [worker]);
+    return true;
+  };
+  const a = new Port(), b = new Port();
+  const closeA = await connectGitWorkerRelay({ sender, port: a, requestId: "a", invoke });
+  const closeB = await connectGitWorkerRelay({ sender, port: b, requestId: "b", invoke });
+  assert.equal(identities.size, 2);
+  const payload = { data: new Uint8Array([1, 2]), value: 1n };
+  a.emit("message", { data: payload });
+  assert.equal(workerPorts[0].sent[0], payload);
+  workerPorts[1].emit("message", { data: "reply" });
+  assert.equal(b.sent[0], "reply");
+  closeA();
+  assert.equal(identities.size, 1);
+  assert.equal(b.closed, undefined);
+  sender.emit("destroyed");
+  assert.equal(identities.size, 0);
+  assert.equal(b.closed, true);
+  closeB();
+  assert.equal(sender.listenerCount("destroyed"), 0);
+  await assert.rejects(connectGitWorkerRelay({ sender, port: new Port(), requestId: "bad", invoke: () => false }), /did not provide/);
+  assert.equal(sender.listenerCount("destroyed"), 0);
+});
 
 test("forwards structured official app-host messages and preserves close signals", () => {
   const forwarded = [];

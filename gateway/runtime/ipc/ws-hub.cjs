@@ -674,6 +674,8 @@ function createWsHub(
       const relay = createAppHostRelay({
         clientId,
         portId,
+        // 只开放明确支持的两个端口服务，复用已有鉴权、限额及重连隔离。
+        service: message.service === "git" ? "git" : "app-host",
         remoteAddress: req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "",
         onClose(reason) {
           // 旧 generation 的 close 只能释放自身资源，不能通知当前浏览器 relay。

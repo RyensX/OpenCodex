@@ -22,6 +22,25 @@ const COMPOSER_SOURCE = fs.readFileSync(
 );
 const TOOLTIP_SOURCE = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-tooltip-dismiss-guard.js"), "utf8");
 const BRIDGE_SOURCE = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js"), "utf8");
+
+test("Git worker bridge transfers a dedicated port with the official request identity", async () => {
+  // 验证连接控制帧先于官方端口交接，后续 Git RPC 才不会在中继创建之前丢失。
+  const binding = sourceSection(BRIDGE_SOURCE, "  async function connectGitWorker", "  function attachBridge");
+  const calls = [];
+  const port1 = {}, port2 = {};
+  const connect = vm.runInNewContext(`${binding};connectGitWorker`, { w: {
+    location: { origin: "http://localhost" }, MessageChannel: class { constructor() { this.port1 = port1; this.port2 = port2; } },
+    postMessage: (...args) => calls.push(args),
+  } });
+  assert.equal(await connect("request-1"), true);
+  assert.equal(calls[0][0].service, "git");
+  assert.equal(calls[0][2][0], port1);
+  assert.equal(calls[1][0].type, "codex_desktop:git-worker-port");
+  assert.equal(calls[1][0].requestId, "request-1");
+  assert.equal(calls[1][2][0], port2);
+  assert.equal(await connect(null), false);
+  assert.equal(calls.length, 2);
+});
 const SIDEBAR_PREVIEW_SOURCE = fs.readFileSync(
   path.join(INTERNAL_PROVIDER_DIR, "codex-sidebar-preview.js"),
   "utf8"
