@@ -10,6 +10,7 @@ const asar = require("@electron/asar");
 const {
   CodexAsarScanner,
   CodexAsarCandidateProvider,
+  CodexBinaryLocator,
 } = require("../dist/official/CodexAsarScanner.js");
 const { AsarWebviewExtractor } = require("../dist/official/AsarWebviewExtractor.js");
 const { LocalCodexBundleProvider } = require("../dist/official/LocalCodexBundleProvider.js");
@@ -47,6 +48,66 @@ function writeFile(filePath, content = "fixture") {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
 }
+
+test("macOS CLI selection supports signed nested bundles, overrides, and legacy fallback", (t) => {
+  const root = temporaryDirectory(t);
+  const nested = path.join(root, "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex");
+  const legacy = path.join(root, "codex");
+  const override = path.join(root, "custom-codex");
+  for (const file of [nested, legacy, override]) writeFile(file);
+  const locate = (env = {}) => new CodexBinaryLocator({ fileSystem: new OfficialBundleFileSystem(), platform: "darwin", env })
+    .find({ installRoot: root, resourcesDir: root });
+  assert.equal(locate(), nested);
+  assert.equal(locate({ CODEX_CLI_PATH: override }), override);
+  fs.rmSync(nested);
+  assert.equal(locate(), legacy);
+});
+
+test("modern optimizer preserves inline resolver scope and coalesces origin requests", async (t) => {
+  const bundleDir = temporaryDirectory(t);
+  const file = path.join(bundleDir, ".vite", "build", "worker.js");
+  // 构造新版的内联布局，验证缓存及词法作用域，而非仅检查替换字符串。
+  const origin = 'async function(e,t,r){let n=await t.getStableMetadata(e,r);if(null==n)return null;let i=t.getWorktreeRepositoryForRoot(n.root,r);return{dir:e,root:i.root,originUrl:await i.getConfigValue("remote.origin.url"),commonDir:n.commonDir,...null==n.symlinkTarget?{}:{hasCwdSymlink:!0}}}';
+  const prefilter = 'async function(e,t,r){if(!r.isAbsolute(e)||r.normalize(e)!==e||e.endsWith(r.sep)&&e!==r.parse(e).root)return!0;let n=e;for(;;){try{let e=await t.stat(n,{bypassCache:!0,followSymlinks:!1});if(e.isSymbolicLink()||!e.isDirectory())return!0}catch{return!0}for(let e of markers)try{return await t.stat(r.join(n,e),{bypassCache:!0,followSymlinks:!1}),!0}catch(e){if(!missing(e))return!0}let e=r.dirname(n);if(e===n)return!1;n=e}}';
+  const background = 'async function command(e,t,r,n={}){let i,a,{timeoutMs:c}=n,b=0,T=Object.is(c,null)?void 0:c??(6e4),S=crypto.randomUUID().slice(0,8),w=Date.now(),A=null==T?void 0:w+T,x=context(),R=`${r.id}\\0${x.metadataCommonDir??e}`,C=!r.isLocal;return {timeout:T,deadline:A}}';
+  writeFile(file, `${background};function fixture(){let markers=[".git"],missing=e=>e.code==="ENOENT";return {origin:${origin},prefilter:${prefilter}}}/*[git-origins] worker-complete*/`);
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+  assert.equal(optimizer.optimize(bundleDir).gitDiscovery, "gateway-coalesced");
+  const source = fs.readFileSync(file, "utf8");
+  const instantiate = (hidden) => new Function("require", "process", "crypto", "context", `${source};return {api:fixture(),command}`)(
+    require, { env: { OPENCODEX_GATEWAY_HIDDEN_RUNTIME: hidden ? "1" : "0" } }, crypto,
+    () => ({ requestKind: "git-origins" }));
+  let reads = 0;
+  const manager = { getStableMetadata: async () => { reads++; return { root: "/repo", commonDir: "/repo/.git", symlinkTarget: "target" }; },
+    getWorktreeRepositoryForRoot: () => ({ root: "/repo", getConfigValue: async () => "origin" }) };
+  const host = { id: "local", isLocal: true, stat: async () => ({ isSymbolicLink: () => false, isDirectory: () => true }) };
+  const hidden = instantiate(true);
+  const results = await Promise.all([hidden.api.origin("/repo", manager, host), hidden.api.origin("/repo", manager, host)]);
+  assert.equal(reads, 1);
+  assert.equal(results[0].hasCwdSymlink, true);
+  assert.equal(await hidden.api.prefilter("/repo", host, path), true);
+  assert.equal((await hidden.command("/repo", ["status"], host)).timeout, 1000);
+  assert.equal((await hidden.command("/repo", ["status"], host, { timeoutMs: 123 })).timeout, 123);
+  const normal = instantiate(false);
+  await Promise.all([normal.api.origin("/repo", manager, host), normal.api.origin("/repo", manager, host)]);
+  assert.equal(reads, 3);
+  assert.equal((await normal.command("/repo", ["status"], host)).timeout, 60000);
+  assert.equal(optimizer.optimize(bundleDir).patchedFileCount, 0);
+});
+
+test("modern push retry registration is disabled only for the hidden runtime", (t) => {
+  const root = temporaryDirectory(t);
+  const file = path.join(root, ".vite", "build", "main.js");
+  writeFile(file, 'let result="darwin"===process.platform&&flavor===build.x.Prod?function({register:r}){return r()}({register:()=>"registered"}):null;/*Failed to register macOS push notifications*/');
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+  assert.equal(optimizer.optimize(root).macPushRegistration, "gateway-disabled");
+  const source = fs.readFileSync(file, "utf8");
+  const evaluate = (hidden) => new Function("process", "flavor", "build", `${source};return result`)(
+    { platform: "darwin", env: { OPENCODEX_GATEWAY_HIDDEN_RUNTIME: hidden ? "1" : "0" } }, "prod", { x: { Prod: "prod" } });
+  assert.equal(evaluate(true), null);
+  assert.equal(evaluate(false), "registered");
+  assert.equal(optimizer.optimize(root).patchedFileCount, 0);
+});
 
 test("gateway compatibility service initializes from configured runtime paths", (t) => {
   const configuredPaths = hiddenRuntimeServerTest.gatewayCompatibilityPaths();
@@ -204,6 +265,7 @@ test("current cache schema resolves both dynamic and legacy bootstrap paths", (t
       nativePetPrewarm: "not-present",
       macPushRegistration: "not-present",
       patchedFileCount: 0,
+      worktreeShellEnvironment: "not-present",
       unsupportedFiles: [],
     },
   };
@@ -395,6 +457,7 @@ test("runtime optimizer keeps native pet lazy and disables composition only for 
     nativePetPrewarm: "gateway-lazy",
     macPushRegistration: "not-present",
     patchedFileCount: 1,
+    worktreeShellEnvironment: "not-present",
     unsupportedFiles: [],
   });
   assert.match(
@@ -464,6 +527,7 @@ test("runtime optimizer patches the renamed avatar overlay paths in new official
       nativePetPrewarm: "gateway-lazy",
       macPushRegistration: "not-present",
       patchedFileCount: 1,
+      worktreeShellEnvironment: "not-present",
       unsupportedFiles: [],
     });
     const optimized = fs.readFileSync(mainPath, "utf8");
@@ -515,6 +579,7 @@ test("runtime optimizer reports a partially recognized native pet chunk", (t) =>
     nativePetPrewarm: "unsupported-layout",
     macPushRegistration: "not-present",
     patchedFileCount: 1,
+    worktreeShellEnvironment: "not-present",
     unsupportedFiles: ["main-partial.js:native-bridge,prewarm"],
   });
   assert.equal((optimized.match(/OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`/g) || []).length, 2);
@@ -603,6 +668,7 @@ test("runtime optimizer skips unavailable macOS push registration only in the hi
     nativePetPrewarm: "not-present",
     macPushRegistration: "gateway-disabled",
     patchedFileCount: 1,
+    worktreeShellEnvironment: "not-present",
     unsupportedFiles: [],
   });
   const optimized = fs.readFileSync(mainPath, "utf8");
@@ -644,6 +710,7 @@ test("runtime optimizer bounds hidden gateway sidebar Git discovery without chan
     nativePetPrewarm: "not-present",
     macPushRegistration: "not-present",
     patchedFileCount: 1,
+    worktreeShellEnvironment: "not-present",
     unsupportedFiles: [],
     gitDiscovery: "gateway-coalesced",
   });
@@ -979,6 +1046,7 @@ test("runtime optimizer reports an unsupported Git discovery layout without part
     nativePetPrewarm: "not-present",
     macPushRegistration: "not-present",
     patchedFileCount: 0,
+    worktreeShellEnvironment: "not-present",
     unsupportedFiles: ["worker-new-layout.js:git-discovery"],
     gitDiscovery: "unsupported-layout",
   });
@@ -997,6 +1065,7 @@ test("runtime optimizer reports an unsupported macOS push layout without unsafe 
     nativePetPrewarm: "not-present",
     macPushRegistration: "unsupported-layout",
     patchedFileCount: 0,
+    worktreeShellEnvironment: "not-present",
     unsupportedFiles: ["main-push-changed.js:mac-push"],
   });
   assert.equal(fs.readFileSync(mainPath, "utf8"), source);
@@ -1015,6 +1084,7 @@ test("runtime optimizer leaves bundles without native pet composition unchanged"
     nativePetPrewarm: "not-present",
     macPushRegistration: "not-present",
     patchedFileCount: 0,
+    worktreeShellEnvironment: "not-present",
     unsupportedFiles: [],
   });
   assert.equal(fs.readFileSync(mainPath, "utf8"), "module.exports = { ok: true };");
@@ -1054,6 +1124,7 @@ test("cached optimization preserves removed native pet points as disabled", () =
       nativePetPrewarm: "not-present",
       macPushRegistration: "gateway-disabled",
       patchedFileCount: 0,
+      worktreeShellEnvironment: "not-present",
       unsupportedFiles: [],
     });
     // 缓存命中不能把首次扫描得到的“不适用”重新解释成“不支持”。
@@ -1084,6 +1155,7 @@ test("runtime optimizer keeps gateway compatible when an official native pet lay
     nativePetPrewarm: "unsupported-layout",
     macPushRegistration: "not-present",
     patchedFileCount: 0,
+    worktreeShellEnvironment: "not-present",
     unsupportedFiles: ["main-new-layout.js:native-bridge,prewarm"],
   });
   assert.equal(
@@ -1122,6 +1194,7 @@ test("runtime optimizer reports unsupported when any native pet marker file cann
     nativePetPrewarm: "unsupported-layout",
     macPushRegistration: "not-present",
     patchedFileCount: 1,
+    worktreeShellEnvironment: "not-present",
     unsupportedFiles: ["main-unsupported.js:native-bridge,prewarm"],
   });
   assert.match(
@@ -1254,7 +1327,14 @@ test("macOS runner embeds its current ASAR header hash before signing, including
     frameworksDir: path.join(appRoot, "Contents", "Frameworks"),
   };
   writeFile(layout.executablePath, "official executable");
-  writeFile(layout.asarPath, "official archive must remain unchanged");
+  const officialSource = path.join(root, "official-src");
+  writeFile(path.join(officialSource, "package.json"), JSON.stringify({
+    main: "official.js", version: "26.1103.60933", codexBuildFlavor: "prod", codexBuildNumber: "25894",
+    scripts: { start: "must-not-copy" },
+  }));
+  fs.mkdirSync(path.dirname(layout.asarPath), { recursive: true });
+  await asar.createPackage(officialSource, layout.asarPath);
+  const originalAsar = fs.readFileSync(layout.asarPath);
   fs.mkdirSync(layout.frameworksDir, { recursive: true });
   const runtimeDir = path.join(root, "runtime");
   const logs = [];
@@ -1271,6 +1351,11 @@ test("macOS runner embeds its current ASAR header hash before signing, including
         if (point === runnerPoints.gatewayAsar) {
           return (async () => {
             const asarPath = await operation();
+            // Runner 必须保留独立包身份；官方构建元数据由抽取缓存的工作目录提供。
+            const metadata = JSON.parse(asar.extractFile(asarPath, "package.json"));
+            assert.equal(metadata.main, "main.cjs");
+            assert.equal(metadata.codexBuildFlavor, undefined);
+            assert.equal(metadata.scripts, undefined);
             // 模拟入口升级，让第二次构建的哈希发生变化，覆盖 Frameworks 缓存命中后的重新计算。
             const sourceDir = path.join(runtimeDir, "official-electron-runner", "app-src");
             fs.appendFileSync(path.join(sourceDir, "main.cjs"), `\n// fixture revision ${revision}\n`);
@@ -1300,7 +1385,7 @@ test("macOS runner embeds its current ASAR header hash before signing, including
 
   assert.notEqual(hashes[0], hashes[1]);
   assert.ok(logs.some((line) => line.includes("Frameworks cache hit")));
-  assert.equal(fs.readFileSync(layout.asarPath, "utf8"), "official archive must remain unchanged");
+  assert.deepEqual(fs.readFileSync(layout.asarPath), originalAsar);
   assert.equal(fs.readFileSync(layout.executablePath, "utf8"), "official executable");
 });
 

@@ -229,6 +229,7 @@ class LocalCodexBundleProvider {
       {
         points: [staticMainPoints.worktreeShellEnvironment],
         state: runtimeOptimizations.worktreeShellEnvironment,
+        disableWhenAbsent: true,
       },
     ];
     for (const group of groups) {

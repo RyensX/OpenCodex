@@ -784,6 +784,9 @@ function alignOfficialElectronEnvironment(bundle) {
   });
   setProcessResourcesPath(officialResourcesPath);
   setOfficialAppPath(bundle.bundleDir);
+  // 新版元数据读取器还会从 cwd/package.json 取构建字段。保留 Runner 独立包身份，
+  // 将 cwd 对齐到已校验的官方缓存，避免把 prod 标记写入 Runner 后触发原生启动校验。
+  process.chdir(bundle.bundleDir);
 }
 
 function addOfficialListener(channel, listener) {

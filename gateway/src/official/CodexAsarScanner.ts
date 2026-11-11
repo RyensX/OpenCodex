@@ -291,11 +291,15 @@ class CodexBinaryLocator {
       ];
     }
     return [
+      this.env.CODEX_APP_SERVER_BINARY_PATH,
+      this.env.CODEX_CLI_PATH,
+      // 新版 macOS 将 CLI 放入独立签名的应用包，优先于旧版平铺布局。
+      ...(this.platform === "darwin" ? [path.join(resourcesDir, "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex")] : []),
       path.join(resourcesDir, "codex"),
       path.join(resourcesDir, "Codex"),
       path.join(installRoot, "Contents", "Resources", "codex"),
       path.join(installRoot, "codex"),
-    ];
+    ].filter(Boolean);
   }
 
   private windowsCliCandidates(): string[] {

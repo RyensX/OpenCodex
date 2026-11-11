@@ -40,10 +40,16 @@ const MAC_PUSH_REGISTRATION_PATTERN =
   /process\.platform!==`darwin`\|\|([A-Za-z_$][\w$]*)!==([A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]*\.Prod\|\|([A-Za-z_$][\w$]*)\(\{appServerClient:/g;
 const OPTIMIZED_MAC_PUSH_REGISTRATION_PATTERN =
   /process\.platform!==`darwin`\|\|process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`\|\|([A-Za-z_$][\w$]*)!==([A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]*\.Prod\|\|([A-Za-z_$][\w$]*)\(\{appServerClient:/g;
+// 新版 Push 改成条件表达式启动重试控制器；用注册参数约束，避免碰到其他 darwin 分支。
+const MODERN_MAC_PUSH_PATTERN = /"darwin"===process\.platform&&([A-Za-z_$][\w$]*)===([A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]*\.Prod\?function\(\{register:/g;
+const OPTIMIZED_MODERN_MAC_PUSH_PATTERN = /process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME!==`1`&&"darwin"===process\.platform&&[A-Za-z_$][\w$]*===[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\.Prod\?function\(\{register:/g;
+// 新版把单目录 resolver 内联，仍通过元数据、origin 配置和 symlink 标记唯一识别。
+const MODERN_GIT_ORIGIN_PATTERN = /async function\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=await \2\.getStableMetadata\(\1,\3\);if\(null==\4\)return null;let ([A-Za-z_$][\w$]*)=\2\.getWorktreeRepositoryForRoot\(\4\.root,\3\);return\{dir:\1,root:\5\.root,originUrl:await \5\.getConfigValue\("remote\.origin\.url"\),commonDir:\4\.commonDir,\.\.\.null==\4\.symlinkTarget\?\{\}:\{hasCwdSymlink:!0\}\}\}/g;
+const MODERN_GIT_BACKGROUND_PATTERN = /async function (?<functionName>[A-Za-z_$][\w$]*)\((?<cwdName>[A-Za-z_$][\w$]*),(?<argsName>[A-Za-z_$][\w$]*),(?<hostName>[A-Za-z_$][\w$]*),(?<optionsName>[A-Za-z_$][\w$]*)=\{\}\)\{let [^;{}]{0,100}\{[^}]{0,1400}timeoutMs:(?<timeoutOptionName>[A-Za-z_$][\w$]*)[^}]{0,1400}\}=\k<optionsName>,[\s\S]{1,2400}?(?<timeoutName>[A-Za-z_$][\w$]*)=Object\.is\(\k<timeoutOptionName>,null\)\?void 0:\k<timeoutOptionName>\?\?\([^;]{1,400}?\),(?<idName>[A-Za-z_$][\w$]*)=crypto\.randomUUID\(\)\.slice\(0,8\),(?<startedName>[A-Za-z_$][\w$]*)=Date\.now\(\),(?<deadlineName>[A-Za-z_$][\w$]*)=null==\k<timeoutName>\?void 0:\k<startedName>\+\k<timeoutName>,(?<contextName>[A-Za-z_$][\w$]*)=(?<contextFactoryName>[A-Za-z_$][\w$]*)\(\),(?<metadataKeyName>[A-Za-z_$][\w$]*)=[^;]{1,1200}?\k<contextName>\.metadataCommonDir[^;]{1,1200}?;/g;
 const GIT_ORIGIN_RESOLVER_PATTERN =
   /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=await \3\.getStableMetadata\(\2,\4\);if\(\5==null\)return null;let ([A-Za-z_$][\w$]*)=\3\.getWorktreeRepositoryForRoot\(\5\.root,\4\),([A-Za-z_$][\w$]*)=await \3\.getRepoRepository\(\2,\4\);return \7==null\?null:\{dir:\2,root:\6\.root,originUrl:await \7\.getOriginUrl\(\),commonDir:\7\.getCommonDir\(\)\}\}/g;
 const GIT_LOCAL_PREFILTER_PATTERN =
-  /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{if\(!\4\.isAbsolute\(\2\)\|\|\4\.normalize\(\2\)!==\2\|\|\2\.endsWith\(\4\.sep\)&&\2!==\4\.parse\(\2\)\.root\)return!0;let ([A-Za-z_$][\w$]*)=\2;for\(;;\)\{try\{let ([A-Za-z_$][\w$]*)=await \3\.stat\(\5,\{bypassCache:!0,followSymlinks:!1\}\);if\(\6\.isSymbolicLink\(\)\|\|!\6\.isDirectory\(\)\)return!0\}catch(?:\(([A-Za-z_$][\w$]*)\))?\{return(?: process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`&&\([^}]{1,300}\)\?!1:)?!0\}for\(let ([A-Za-z_$][\w$]*) of ([A-Za-z_$][\w$]*)\)try\{return await \3\.stat\(\4\.join\(\5,\8\),\{bypassCache:!0,followSymlinks:!1\}\),!0\}catch\(([A-Za-z_$][\w$]*)\)\{if\(!([A-Za-z_$][\w$]*)\(\10\)\)return!0\}let ([A-Za-z_$][\w$]*)=\4\.dirname\(\5\);if\(\12===\5\)return!1;\5=\12\}\}/g;
+  /async function(?: ([A-Za-z_$][\w$]*))?\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{if\(!\4\.isAbsolute\(\2\)\|\|\4\.normalize\(\2\)!==\2\|\|\2\.endsWith\(\4\.sep\)&&\2!==\4\.parse\(\2\)\.root\)return!0;let ([A-Za-z_$][\w$]*)=\2;for\(;;\)\{try\{let ([A-Za-z_$][\w$]*)=await \3\.stat\(\5,\{bypassCache:!0,followSymlinks:!1\}\);if\(\6\.isSymbolicLink\(\)\|\|!\6\.isDirectory\(\)\)return!0\}catch(?:\(([A-Za-z_$][\w$]*)\))?\{return(?: process\.env\.OPENCODEX_GATEWAY_HIDDEN_RUNTIME===`1`&&\([^}]{1,300}\)\?!1:)?!0\}for\(let ([A-Za-z_$][\w$]*) of ([A-Za-z_$][\w$]*)\)try\{return await \3\.stat\(\4\.join\(\5,\8\),\{bypassCache:!0,followSymlinks:!1\}\),!0\}catch\(([A-Za-z_$][\w$]*)\)\{if\(!([A-Za-z_$][\w$]*)\(\10\)\)return!0\}let ([A-Za-z_$][\w$]*)=\4\.dirname\(\5\);if\(\12===\5\)return!1;\5=\12\}\}/g;
 const GIT_BACKGROUND_TIMEOUT_PATTERN =
   /async function (?<functionName>[A-Za-z_$][\w$]*)\((?<cwdName>[A-Za-z_$][\w$]*),(?<argsName>[A-Za-z_$][\w$]*),(?<hostName>[A-Za-z_$][\w$]*),(?<optionsName>[A-Za-z_$][\w$]*)=\{\}\)\{let\{[^}]{0,1400}timeoutMs:(?<timeoutOptionName>[A-Za-z_$][\w$]*)[^}]{0,1400}\}=\k<optionsName>,[^;]{1,2400}?(?<timeoutName>[A-Za-z_$][\w$]*)=Object\.is\(\k<timeoutOptionName>,null\)\?void 0:\k<timeoutOptionName>\?\?\([^;]{1,400}?\),(?<idName>[A-Za-z_$][\w$]*)=crypto\.randomUUID\(\)\.slice\(0,8\),(?<startedName>[A-Za-z_$][\w$]*)=Date\.now\(\),(?<deadlineName>[A-Za-z_$][\w$]*)=\k<timeoutName>==null\?void 0:\k<startedName>\+\k<timeoutName>,(?<contextName>[A-Za-z_$][\w$]*)=(?<contextFactoryName>[A-Za-z_$][\w$]*)\(\),(?<metadataKeyName>[A-Za-z_$][\w$]*)=[^;]{1,1200}?\k<contextName>\.metadataCommonDir[^;]{1,1200}?;[\s\S]{0,18000}?let (?<timerName>[A-Za-z_$][\w$]*)=\k<timeoutName>==null\?null:setTimeout/g;
 const WORKTREE_SHELL_ENVIRONMENT_PATTERN =
@@ -160,11 +166,13 @@ class OfficialRuntimeOptimizer {
         const markerCount = source.split(MAC_PUSH_LOG_MARKER).length - 1;
         const recognizedCount =
           matchCount(source, MAC_PUSH_REGISTRATION_PATTERN) +
-          matchCount(source, OPTIMIZED_MAC_PUSH_REGISTRATION_PATTERN);
+          matchCount(source, OPTIMIZED_MAC_PUSH_REGISTRATION_PATTERN) +
+          matchCount(source, MODERN_MAC_PUSH_PATTERN);
         // 候选必须与标记一一对应；额外候选同样属于歧义，不能改写无法确认的入口。
         const patchedPush = this.patchMacPushRegistration(optimized);
         const supported = recognizedCount === markerCount &&
-          matchCount(patchedPush, OPTIMIZED_MAC_PUSH_REGISTRATION_PATTERN) === markerCount &&
+          (matchCount(patchedPush, OPTIMIZED_MAC_PUSH_REGISTRATION_PATTERN) +
+            matchCount(patchedPush, OPTIMIZED_MODERN_MAC_PUSH_PATTERN)) === markerCount &&
           matchCount(patchedPush, MAC_PUSH_REGISTRATION_PATTERN) === 0;
         if (supported) macPushReadyFileCount += 1;
         else unsupportedParts.push("mac-push");
@@ -183,7 +191,7 @@ class OfficialRuntimeOptimizer {
         gitDiscoveryMarkerFileCount += 1;
         const markerCount = source.split(GIT_ORIGINS_LOG_MARKER).length - 1;
         const recognizedOriginCount =
-          matchCount(source, GIT_ORIGIN_RESOLVER_PATTERN) +
+          matchCount(source, GIT_ORIGIN_RESOLVER_PATTERN) + matchCount(source, MODERN_GIT_ORIGIN_PATTERN) +
           (source.includes(GIT_ORIGIN_CACHE_MARKER) ? markerCount : 0);
         const recognizedLocalPrefilterCount =
           matchCount(source, GIT_LOCAL_PREFILTER_PATTERN) +
@@ -192,7 +200,7 @@ class OfficialRuntimeOptimizer {
             ? markerCount
             : 0);
         const recognizedBackgroundTimeoutCount =
-          matchCount(source, GIT_BACKGROUND_TIMEOUT_PATTERN) +
+          matchCount(source, GIT_BACKGROUND_TIMEOUT_PATTERN) + matchCount(source, MODERN_GIT_BACKGROUND_PATTERN) +
           (source.includes(GIT_BACKGROUND_TIMEOUT_MARKER) &&
           source.includes(GIT_SIDEBAR_PREFLIGHT_MARKER) &&
           source.includes(GIT_BACKGROUND_CACHE_MARKER)
@@ -294,8 +302,9 @@ class OfficialRuntimeOptimizer {
           ? "gateway-coalesced"
           : "unsupported-layout";
     }
+    result.worktreeShellEnvironment = "not-present";
     if (worktreeShellEnvironmentMarkerFileCount > 0) {
-      // 只在官方版本暴露该接口时记录能力，旧版 manifest 不增加无意义字段。
+      // 显式记录旧 IPC 接口是否存在，缓存命中时才能恢复同样的不适用状态。
       result.worktreeShellEnvironment =
         worktreeShellEnvironmentReadyFileCount === worktreeShellEnvironmentMarkerFileCount
           ? "gateway-coalesced"
@@ -313,7 +322,8 @@ class OfficialRuntimeOptimizer {
     this.reportAbsentPoint(staticMainPoints.gitOriginResolver, gitDiscoveryMarkerFileCount);
     this.reportAbsentPoint(staticMainPoints.gitLocalPrefilter, gitDiscoveryMarkerFileCount);
     this.reportAbsentPoint(staticMainPoints.gitBackgroundCommand, gitDiscoveryMarkerFileCount);
-    this.reportAbsentPoint(staticMainPoints.worktreeShellEnvironment, worktreeShellEnvironmentMarkerFileCount);
+    // 新版读取已迁到 Git Worker，旧 IPC 适配点在没有标记时不再适用。
+    this.reportAbsentPoint(staticMainPoints.worktreeShellEnvironment, worktreeShellEnvironmentMarkerFileCount, true);
     return result;
   }
 
@@ -422,7 +432,10 @@ class OfficialRuntimeOptimizer {
   }
 
   private patchMacPushRegistration(source: string): string {
-    return source.replace(MAC_PUSH_REGISTRATION_PATTERN, (match) =>
+    return source.replace(MODERN_MAC_PUSH_PATTERN, (match) =>
+      source.includes("process.env.OPENCODEX_GATEWAY_HIDDEN_RUNTIME!==`1`&&" + match)
+        ? match : `process.env.${GATEWAY_RUNTIME_ENV}!==\`1\`&&${match}`
+    ).replace(MAC_PUSH_REGISTRATION_PATTERN, (match) =>
       match.replace(
         "process.platform!==`darwin`||",
         // 隐藏 runner 没有官方签名 entitlement，注册必然失败；浏览器通知继续走已有 WS 通知桥。
@@ -439,7 +452,7 @@ class OfficialRuntimeOptimizer {
     ) {
       return source;
     }
-    return source.replace(GIT_BACKGROUND_TIMEOUT_PATTERN, (match, ...replaceArgs) => {
+    const patch = (match, ...replaceArgs) => {
       const groups = replaceArgs.at(-1);
       if (!groups || typeof groups !== "object") return match;
       const {
@@ -458,7 +471,7 @@ class OfficialRuntimeOptimizer {
         timerName,
       } = groups;
       const timerStart = `let ${timerName}=${timeoutName}==null?null:setTimeout`;
-      if (!match.includes(timerStart)) return match;
+      if (timerName && !match.includes(timerStart)) return match;
       const metadataStart = match.indexOf(`,${metadataKeyName}=`);
       const metadataEnd = metadataStart < 0 ? -1 : match.indexOf(";", metadataStart);
       if (metadataEnd < 0) return match;
@@ -507,14 +520,13 @@ class OfficialRuntimeOptimizer {
         `return __opencodexEntry.promise}`,
       ].join("");
       return `${wrapper}${patched.replace(originalHeader, `async function ${uncachedName}(${cwdName},${argsName},${hostName},${optionsName}={}){`)}`;
-    });
+    };
+    return source.replace(GIT_BACKGROUND_TIMEOUT_PATTERN, patch).replace(MODERN_GIT_BACKGROUND_PATTERN, patch);
   }
 
   private patchGitOriginResolver(source: string): string {
     if (source.includes(GIT_ORIGIN_CACHE_MARKER)) return source;
-    return source.replace(
-      GIT_ORIGIN_RESOLVER_PATTERN,
-      (match, functionName, dirName, managerName, hostName) => {
+    const patch = (match, functionName, dirName, managerName, hostName) => {
         const uncachedName = `__opencodexUncached_${functionName}`;
         const uncached = match.replace(
           `async function ${functionName}(`,
@@ -539,13 +551,22 @@ class OfficialRuntimeOptimizer {
           `${GIT_ORIGIN_CACHE_MARKER}.set(__opencodexKey,__opencodexEntry),__opencodexPromise.then(()=>{__opencodexEntry.pending=!1,__opencodexEntry.expiresAt=Date.now()+5e3},__opencodexError=>{__opencodexEntry.pending=!1,__opencodexEntry.expiresAt=Date.now()+(/timed out|Unable to read current working directory|Interrupted system call/i.test(__opencodexError?.message||\`\`)?6e4:5e3)});`,
           `return __opencodexPromise}`,
         ].join("");
-      }
-    );
+      };
+    let helpers = "";
+    const result = source.replace(GIT_ORIGIN_RESOLVER_PATTERN, patch).replace(
+      MODERN_GIT_ORIGIN_PATTERN, (match, dir, manager, host) => {
+        // 提升内联函数以共享缓存，保留函数参数和官方返回结构，不固定压缩变量名。
+        const name = "__opencodexResolveOrigin";
+        helpers += patch(match.replace("async function(", `async function ${name}(`), name, dir, manager, host);
+        return name;
+      });
+    return helpers + result;
   }
 
   private patchGitLocalPrefilter(source: string): string {
     if (source.includes(GIT_LOCAL_PREFILTER_MARKER)) return source;
-    return source.replace(
+    let helpers = "";
+    const result = source.replace(
       GIT_LOCAL_PREFILTER_PATTERN,
       (
         match,
@@ -597,9 +618,19 @@ class OfficialRuntimeOptimizer {
             `catch(${innerErrorName}){if(!${missingCheckName}(${innerErrorName}))return!0}`,
             `catch(${innerErrorName}){if(process.env.${GATEWAY_RUNTIME_ENV}===\`1\`&&${innerErrorName}?.__opencodexSlow)return!1;if(!${missingCheckName}(${innerErrorName}))return!0}`
           );
+        if (!_functionName) {
+          // 保留内联函数所在的词法作用域，仓库标记与错误判断函数由官方模块提供。
+          // 只共享 Map，避免每次求值都丢失在途请求，同时不提升带外部依赖的函数。
+          const scopedHelper = helper.replace(
+            `var ${GIT_LOCAL_PREFILTER_MARKER}=new Map;`,
+            `var ${GIT_LOCAL_PREFILTER_MARKER}=globalThis.${GIT_LOCAL_PREFILTER_MARKER}??=new Map;`,
+          );
+          return `(()=>{${scopedHelper}return ${patched}})()`;
+        }
         return `${helper}${patched}`;
       }
     );
+    return helpers + result;
   }
 
   private patchWorktreeShellEnvironment(source: string): string {
