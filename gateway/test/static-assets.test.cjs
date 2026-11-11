@@ -350,9 +350,10 @@ test("runtime compatibility diagnostics are public, grouped, explained, and repo
 
 test("runtime compatibility page follows the public authentication locale", (t) => {
   const webviewDir = makeOfficialWebviewDir(t);
+  // 使用当前中英文标题作为独立预期，确保页面正确注入对应语言的文案。
   for (const [locale, expectedTitle] of [
-    ["zh-CN", "OpenCodex虚拟骨架调试"],
-    ["en-US", "OpenCodex Virtual Skeleton Diagnostics"],
+    ["zh-CN", "运行时兼容调试"],
+    ["en-US", "Runtime Compatibility Diagnostics"],
   ]) {
     const service = createService(webviewDir, null, locale);
     const reqPath = "/settings/developer/runtime-compatibility";
