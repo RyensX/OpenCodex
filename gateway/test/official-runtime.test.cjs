@@ -78,6 +78,21 @@ test("bridges only the primary official renderer to the Web client", () => {
   );
 });
 
+test("selects the official app view instead of startup auxiliaries or native chrome", () => {
+  // 模拟新版同进程内多个 renderer，只有官方主文档能接收启动 RPC。
+  const contents = (url, preload = "/bundle/preload.js") => ({
+    isDestroyed: () => false,
+    getURL: () => url,
+    getLastWebPreferences: () => ({ preload }),
+  });
+  assert.equal(__test.isPrimaryOfficialRenderer(contents("app://-/index.html"), "/bundle"), true);
+  assert.equal(__test.isPrimaryOfficialRenderer(contents("app://-/index.html?desktopSurface=chrome"), "/bundle"), false);
+  assert.equal(__test.isPrimaryOfficialRenderer(contents("app://-/index.html?initialRoute=/avatar-overlay"), "/bundle"), false);
+  assert.equal(__test.isPrimaryOfficialRenderer(contents("data:text/html,overlay"), "/bundle"), false);
+  assert.equal(__test.isPrimaryOfficialRenderer(contents("https://example.com"), "/bundle"), false);
+  assert.equal(__test.isPrimaryOfficialRenderer(contents("app://-/index.html", "/other/preload.js"), "/bundle"), false);
+});
+
 test("raises only a bounded listener budget for the hidden official renderer", () => {
   let maxListeners = 10;
   const webContents = {

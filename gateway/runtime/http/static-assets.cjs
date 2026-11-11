@@ -951,8 +951,9 @@ function createStaticAssetService({
     // 官方 HTML 是 Electron renderer 用的，浏览器里需要补 locale、移动端 viewport 和站点图标。
     html = patchHtmlLangCompatible(html, i18n.locale);
     html = patchHtmlViewportCompatible(html);
-    html = patchHtmlIconsCompatible(html);
     html = patchHtmlAssetPathsCompatible(html);
+    // 先改写官方资源，再注入宿主图标，避免两个 assets 命名空间混淆。
+    html = patchHtmlIconsCompatible(html);
     html = patchHtmlFontPreloadsCompatible(html);
     const startupPreloads = startupAssetPreloads(html);
     const lateModuleHrefs = lateStartupModuleHrefs(i18n.locale);
@@ -1168,7 +1169,7 @@ function createStaticAssetService({
   function patchHtmlAssetPaths(rawHtml) {
     // 官方产物里的相对路径统一映射到 /official/，避免和 web-shell 自己的 /assets 冲突。
     return rawHtml
-      .replace(/(src|href)=["']\/(?!(?:official|assets)\/)([^"'#?]+)["']/g, '$1="/official/$2"')
+      .replace(/(src|href)=["']\/(?!(?:official)\/)([^"'#?]+)["']/g, '$1="/official/$2"')
       .replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
   }
 
@@ -1556,7 +1557,14 @@ ${pluginGatewayStateBootstrapScript()}
       const rel = reqPath.slice(WEB_SHELL_ASSETS_PREFIX.length);
       const candidate = rel ? path.normalize(path.join(WEB_SHELL_ASSETS_DIR, rel)) : "";
       // assets 目录也用真实路径校验，和官方资源分支保持同一套边界模型。
-      if (candidate && isWithinRoot(candidate, WEB_SHELL_ASSETS_DIR)) return candidate;
+      if (candidate) {
+        if (exists(candidate) && isWithinRoot(candidate, WEB_SHELL_ASSETS_DIR)) return candidate;
+        // 新版运行时以 / 为 publicPath；动态 chunk、CSS 和图片仍会请求 /assets/。
+        // 宿主资源优先，官方回退严格限制在 assets 内，不能读取包内其他文件。
+        const official = locateOfficialAsset(`assets/${rel}`);
+        const root = getOfficialBundle()?.webviewDir;
+        if (official && root && isWithinRoot(official, path.join(root, "assets"))) return official;
+      }
     }
     if (matchedPatchedOfficialPrefix(reqPath)) {
       const rel = patchedOfficialRelPath(reqPath);
@@ -1615,6 +1623,12 @@ ${pluginGatewayStateBootstrapScript()}
 
   /** 发送静态文件，并按路径套用合适的缓存策略。 */
   function serveFile(req, res, file, status = 200, reqPath = "") {
+    // 根路径别名也经过同一套官方响应补丁及缓存策略，避免动态加载绕过兼容层。
+    const officialRoot = getOfficialBundle()?.webviewDir;
+    if (reqPath.startsWith(WEB_SHELL_ASSETS_PREFIX) && officialRoot &&
+        isWithinRoot(file, path.join(officialRoot, "assets"))) {
+      reqPath = `${PATCHED_OFFICIAL_PREFIX}assets/${reqPath.slice(WEB_SHELL_ASSETS_PREFIX.length)}`;
+    }
     if (shouldPatchOfficialAsset(reqPath) && process.env.CODEX_WEB_DISABLE_ASSET_CACHE !== "1") {
       const sendEntry = (entry) => {
         const contentType = mimeType(file);

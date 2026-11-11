@@ -287,6 +287,31 @@ function runtimeBootstrapSource(service) {
   return res.body.toString("utf-8");
 }
 
+test("新版根路径资源兼容首屏与动态加载，宿主资源优先且不允许越界", async (t) => {
+  const dir = makeOfficialWebviewDir(t);
+  fs.mkdirSync(path.join(dir, "assets", "async"), { recursive: true });
+  // 模拟新版数字 chunk、根路径样式和 loading 图片，而非旧版相对路径入口。
+  for (const name of ["782259.7a3e865ee5.js", "async/123.abcdef.js", "app.css", "logo.svg", "pwa-icon-192.png"]) {
+    fs.writeFileSync(path.join(dir, "assets", name), "/* fixture */");
+  }
+  fs.writeFileSync(path.join(dir, "index.html"), '<html><head><title>ChatGPT</title></head><body><script type="module" src="/assets/782259.7a3e865ee5.js"></script></body></html>');
+  const service = createService(dir);
+  const html = service.createRendererResponse();
+  assert.ok(html.includes(`${PATCHED_OFFICIAL_PREFIX}assets/782259.7a3e865ee5.js`));
+  assert.ok(html.includes('href="/assets/pwa-icon-192.png"'));
+  assert.ok(!service.staticFile("/assets/pwa-icon-192.png").startsWith(dir));
+  for (const name of ["782259.7a3e865ee5.js", "async/123.abcdef.js", "app.css", "logo.svg"]) {
+    const reqPath = `/assets/${name}`;
+    assert.equal(service.staticFile(reqPath), path.join(dir, "assets", name));
+    const res = makeResponseRecorder();
+    await service.serveFile({ headers: {} }, res, service.staticFile(reqPath), 200, reqPath);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.toString(), "/* fixture */");
+  }
+  assert.equal(service.staticFile("/assets/../index.html"), null);
+  assert.equal(service.staticFile("/assets/missing.js"), null);
+});
+
 test("runtime compatibility diagnostics are public, grouped, explained, and reported before feature scripts", (t) => {
   const webviewDir = makeOfficialWebviewDir(t);
   const service = createService(webviewDir);

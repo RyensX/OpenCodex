@@ -937,6 +937,37 @@ function shouldBridgeOfficialWebContents(webContents, primaryWebContents) {
   return sameWebContents(webContents, primaryWebContents);
 }
 
+/** 新版辅助窗口可能先创建；只把已加载官方主文档的内容视图用于启动握手。 */
+function isPrimaryOfficialRenderer(contents, bundleDir) {
+  if (!contents || contents.isDestroyed?.() || !bundleDir) return false;
+  try {
+    const preferences = contents.getLastWebPreferences();
+    const preload = preferences?.preload;
+    if (!preload || !path.resolve(preload).startsWith(`${path.resolve(bundleDir)}${path.sep}`)) return false;
+    const url = new URL(contents.getURL());
+    if (url.protocol !== "app:" || !["/", "/index.html"].includes(url.pathname)) return false;
+    // chrome 是原生标签栏壳，overlay 是辅助界面，都不拥有主页面的 startup 服务。
+    if (url.searchParams.get("desktopSurface") === "chrome") return false;
+    const route = url.searchParams.get("initialRoute") || "/";
+    return !/overlay|popup|onboarding|login|sign-in/i.test(route) && preferences.javascript !== false;
+  } catch {
+    return false;
+  }
+}
+
+function refreshOfficialPrimaryRenderer() {
+  const candidates = electron.webContents?.getAllWebContents?.() || [];
+  const current = officialIpc.hiddenWebContents;
+  if (isPrimaryOfficialRenderer(current, officialBundle?.bundleDir)) return;
+  const primary = candidates.find((contents) => isPrimaryOfficialRenderer(contents, officialBundle?.bundleDir));
+  if (!primary) return;
+  officialIpc.hiddenWebContents = primary;
+  officialIpc.hiddenWindow = electron.BrowserWindow.fromWebContents(primary) || officialIpc.hiddenWindow;
+  configureOfficialWebContentsListenerBudget(primary);
+  patchOfficialWebContents(primary);
+  diagnosticLog("official-runtime", "primary_renderer_selected", { webContentsId: primary.id });
+}
+
 function isHiddenOfficialDialogParent(parent) {
   // 官方新版会把目录选择器挂到 event.sender 对应窗口；OpenCodex 的官方窗口是隐藏后台窗口，不能作为可见弹窗 parent。
   if (!parent) return false;
@@ -2136,6 +2167,7 @@ function createOfficialIpcEvent(context = {}) {
 async function waitForOfficialBridgeReady(timeoutMs = 20_000) {
   // 官方 renderer 加载和 app-server 初始化是异步的，IPC 调用前必须等任意官方 IPC 注册完成。
   const startedAt = Date.now();
+  refreshOfficialPrimaryRenderer();
   while (Date.now() - startedAt < timeoutMs) {
     if (
       officialIpc.hiddenWebContents &&
@@ -2670,6 +2702,7 @@ module.exports = {
     routeOfficialWebContentsSend,
     isHiddenOfficialAppServerArgs,
     shouldBridgeOfficialWebContents,
+    isPrimaryOfficialRenderer,
     shouldInterceptRemoteFileManagerStore,
     storeBoundedRequestRoute,
     threadListInvalidationEnvelope,
