@@ -184,11 +184,14 @@ function renderStatus(state) {
   const running = !!state.running;
   // 服务已响应与整体健康分别展示，修改点失败不应让 Gateway 回到启动中。
   const connected = !!state.status;
-  $("healthWarning").hidden = !(state.status ? state.status.ok !== true : !!state.lastError);
-  const appServerMode = state.status && state.status.appServer ? state.status.appServer.mode : "";
+  // 可回退优化仍显示提醒，但不与服务启动失败混为一谈；读取现行应用服务状态。
+  $("healthWarning").hidden = !(state.status
+    ? state.status.ok !== true || state.status.compatibility?.degradedCount > 0
+    : !!state.lastError);
+  const appServer = state.status?.officialAppServer || state.status?.appServer || {};
 
   if (connected) {
-    pill.textContent = appServerMode === "connected" ? t("launcher.status.ready") : t("launcher.status.gatewayStarted");
+    pill.textContent = appServer.ready === true || appServer.mode === "connected" ? t("launcher.status.ready") : t("launcher.status.gatewayStarted");
     pill.classList.remove("offline");
   } else if (running) {
     pill.textContent = t("launcher.status.starting");
@@ -206,7 +209,7 @@ function render(state) {
   const gateway = status.gateway || {};
   const runtime = status.runtime || {};
   const official = status.officialBundle || {};
-  const appServer = status.appServer || {};
+  const appServer = status.officialAppServer || status.appServer || {};
   const paths = state.paths || {};
   const settings = state.settings || {};
   const appInfo = state.app || {};
@@ -241,7 +244,7 @@ function render(state) {
   text("gatewayPid", state.pid ? String(state.pid) : t("common.notRunning"));
   text("gatewayStartedAt", formatDateTime(state.startedAt));
   text("gatewayListen", gateway.host && gateway.port ? `${gateway.host}:${gateway.port}` : `${state.host}:${state.port}`);
-  text("appServerMode", appServer.mode || t("common.unknown"));
+  text("appServerMode", appServer.status || appServer.mode || t("common.unknown"));
   text("nodeVersion", gateway.nodeVersion || t("common.unknown"));
   text("electronVersion", gateway.electronVersion || t("common.unknown"));
   pathButton("configPath", runtime.configPath || paths.configPath, "common.notCreated");

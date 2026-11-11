@@ -650,6 +650,7 @@ function installAppServerSpawnHook(bundle) {
 
 function appServerSpawnHookStatus() {
   return {
+    ...appServerHookHealth(appServerSpawnHook),
     installed: appServerSpawnHook.installed,
     patchedModules: appServerSpawnHook.patchedModules,
     interceptCount: appServerSpawnHook.interceptCount,
@@ -662,6 +663,13 @@ function appServerSpawnHookStatus() {
     decoratorError: appServerSpawnHook.decoratorError,
     lastError: appServerSpawnHook.lastError,
   };
+}
+
+/** 安装拦截器与真正经过拦截是两件事；缺少 CLI、运行错误和待启动分别报告。 */
+function appServerHookHealth(hook) {
+  const unavailable = !hook.installed || !hook.replacementBinaryPath || !!hook.lastError || !!hook.decoratorError;
+  const ready = !unavailable && hook.interceptCount > 0;
+  return { ready, status: unavailable ? "unavailable" : ready ? "healthy" : "pending" };
 }
 
 function setWsHub(nextWsHub) {
@@ -2475,7 +2483,8 @@ function buildGatewayStatus() {
         abnormalCount: abnormalPoints.length,
         abnormalPoints,
         // 浏览器认证前尚未上报属于待检查，保留状态与数量，但仅明确异常影响健康结果。
-        ok: abnormalPoints.length === 0,
+        // 有官方 fallback 的优化降级保留明细，但不等同于网关不可用。
+        ok: unavailableCount === 0,
       };
     }
   } catch {
@@ -2525,6 +2534,7 @@ function buildGatewayStatus() {
     const component = status[name];
     status.checks[name] = component.installed === true && !component.lastError && !component.decoratorError;
   }
+  status.checks.officialAppServer = status.officialAppServer.ready === true;
   status.ok = Object.values(status.checks).every((value) => value === true);
   return status;
 }
@@ -2708,6 +2718,7 @@ module.exports = {
   startOfficialRuntime,
   webConfigScript,
   __test: {
+    appServerHookHealth,
     compactOfficialAppCatalogPayload,
     configureOfficialWebContentsListenerBudget,
     deliverOfficialAppHostMessage,

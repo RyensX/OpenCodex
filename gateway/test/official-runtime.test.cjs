@@ -60,6 +60,15 @@ test("Git worker relay isolates browser lifecycles and forwards structured messa
   assert.equal(sender.listenerCount("destroyed"), 0);
 });
 
+test("app-server health distinguishes missing CLI, unused hooks, and observed interception", () => {
+  // 已安装不代表已生效，只有真实拦截且无错误才报告就绪。
+  const hook = { installed: true, replacementBinaryPath: "/codex", interceptCount: 0 };
+  assert.deepEqual(__test.appServerHookHealth(hook), { ready: false, status: "pending" });
+  assert.equal(__test.appServerHookHealth({ ...hook, replacementBinaryPath: null }).status, "unavailable");
+  assert.equal(__test.appServerHookHealth({ ...hook, interceptCount: 1 }).ready, true);
+  assert.equal(__test.appServerHookHealth({ ...hook, interceptCount: 1, decoratorError: "failed" }).ready, false);
+});
+
 test("forwards structured official app-host messages and preserves close signals", () => {
   const forwarded = [];
   const closed = [];
