@@ -970,9 +970,11 @@ function isPrimaryOfficialRenderer(contents, bundleDir) {
 function refreshOfficialPrimaryRenderer() {
   const candidates = electron.webContents?.getAllWebContents?.() || [];
   const current = officialIpc.hiddenWebContents;
-  if (isPrimaryOfficialRenderer(current, officialBundle?.bundleDir)) return;
-  const primary = candidates.find((contents) => isPrimaryOfficialRenderer(contents, officialBundle?.bundleDir));
-  if (!primary) return;
+  // 账号初始化可能用新主窗口替换旧窗口；旧文档 URL 仍有效，但已不再通过官方 IPC 来源校验。
+  const primary = candidates
+    .filter((contents) => isPrimaryOfficialRenderer(contents, officialBundle?.bundleDir))
+    .sort((left, right) => right.id - left.id)[0];
+  if (!primary || sameWebContents(primary, current)) return;
   officialIpc.hiddenWebContents = primary;
   officialIpc.hiddenWindow = electron.BrowserWindow.fromWebContents(primary) || officialIpc.hiddenWindow;
   configureOfficialWebContentsListenerBudget(primary);
@@ -2078,6 +2080,23 @@ function registerOfficialWindow(win) {
     officialIpc.hiddenWindow = win;
     officialIpc.hiddenWebContents = win.webContents;
   }
+  let readyToShow = false;
+  win.once("ready-to-show", () => { readyToShow = true; });
+  win.webContents.on("did-finish-load", () => {
+    refreshOfficialPrimaryRenderer();
+    // 新版账号刷新等待过渡页首帧；屏幕外隐藏窗口可能不绘制，文档就绪即可继续替换流程。
+    const url = win.webContents.getURL();
+    if (readyToShow || !url.startsWith("data:text/html;charset=utf-8,")) return;
+    let html;
+    try { html = decodeURIComponent(url.slice(url.indexOf(",") + 1)); } catch { return; }
+    if (!html.includes('class="desktop-switch-loader"')) return;
+    setImmediate(() => {
+      if (!readyToShow && !win.isDestroyed()) {
+        diagnosticLog("official-runtime", "hidden_account_switch_ready", { webContentsId: win.webContents.id });
+        win.emit("ready-to-show");
+      }
+    });
+  });
   hideOfficialWindow(win);
   if (shouldBridge) patchOfficialWebContents(win.webContents);
   win.on("show", () => hideOfficialWindow(win));

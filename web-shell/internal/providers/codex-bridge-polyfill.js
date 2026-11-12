@@ -3393,6 +3393,8 @@
   w.__TAURI__ = undefined;
   w.global = w.global || w;
   w.process = w.process || {
+    // 标记为渲染进程，避免新版依赖误用浏览器中不存在的 Node Buffer/crypto。
+    type: "renderer",
     env: {},
     platform: "browser",
     versions: {
