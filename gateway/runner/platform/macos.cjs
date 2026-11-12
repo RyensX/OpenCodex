@@ -17,6 +17,7 @@ const {
   writeJson,
 } = require("../shared/fs-utils.cjs");
 const { logLine } = require("../shared/logging.cjs");
+const { updateFrameworkIntegrity } = require("./macos-integrity.cjs");
 const { writeGatewayAsar } = require("../shared/runner-asar.cjs");
 const { runner: runnerPoints } = require("../../runtime/modification/point-refs.cjs");
 
@@ -83,6 +84,7 @@ function officialFrameworksFingerprint(layout) {
     }
   } catch {}
   return {
+    copyFormat: 3, // 旧缓存的符号链接可能被 fs.cp 改成指向官方安装目录的绝对路径。
     source: realpathSafe(layout.frameworksDir),
     appRoot: realpathSafe(layout.appRoot),
     executable: fileFingerprint(layout.executablePath),
@@ -112,7 +114,7 @@ function ensureFrameworksCopy({ layout, runnerFrameworksDir, markerPath, logger 
    * 内部路径回溯加载 framework，macOS sandbox 会拒绝跨 bundle symlink。这里复制到运行态 cache。
    */
   fs.rmSync(runnerFrameworksDir, { recursive: true, force: true });
-  fs.cpSync(layout.frameworksDir, runnerFrameworksDir, { recursive: true, force: true });
+  fs.cpSync(layout.frameworksDir, runnerFrameworksDir, { recursive: true, force: true, verbatimSymlinks: true });
   writeJson(markerPath, {
     fingerprint: nextFingerprint,
     copiedAt: new Date().toISOString(),
@@ -124,7 +126,7 @@ function ensureFrameworksCopy({ layout, runnerFrameworksDir, markerPath, logger 
 function signRunnerExecutable(executablePath) {
   /**
    * 官方主二进制复制到 runner 后原签名会失效；只重签这个入口壳。
-   * Frameworks 保留官方签名副本，避免 deep 签名破坏 Chromium framework 的封装结构。
+   * Framework 的摘要和 Helper 已按需单独处理，避免 deep 签名破坏 Chromium 的封装结构。
    */
   execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", executablePath], {
     stdio: ["ignore", "ignore", "pipe"],
@@ -164,7 +166,43 @@ async function createMacRunner({ layout, runtimeDir, logger, runCompatibility = 
   );
   runCompatibility(
     runnerPoints.macosEntrySignature,
-    () => signRunnerExecutable(runnerExecutablePath)
+    () => {
+      const headerHash = crypto.createHash("sha256")
+        .update(withPhysicalAsarAccess(() => asar.getRawHeader(runnerAsarPath).headerString)).digest("hex");
+      // 新版 Framework 还校验 plist 的摘要；只更新 Runner 副本，并在主入口签名前重签。
+      updateFrameworkIntegrity(runnerFrameworksDir, headerHash, (framework) => {
+        const sign = (target) => execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", "--preserve-metadata=identifier,entitlements,flags", target], {
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        const helpersDir = path.join(framework, "Versions", "Current", "Helpers");
+        if (fs.existsSync(helpersDir)) {
+          for (const entry of fs.readdirSync(helpersDir, { withFileTypes: true })) {
+            if (!entry.isDirectory() || !entry.name.endsWith(".app")) continue;
+            const helper = path.join(helpersDir, entry.name);
+            const relative = path.relative(fs.realpathSync(runnerFrameworksDir), fs.realpathSync(helper));
+            if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Helper resolves outside runner Frameworks");
+            const temporaryDir = fs.mkdtempSync(path.join(require("os").tmpdir(), "opencodex-helper-sign-"));
+            const entitlementsPath = path.join(temporaryDir, "entitlements.plist");
+            try {
+              const entitlements = execFileSync("/usr/bin/codesign", ["-d", "--entitlements", ":-", helper], { stdio: ["ignore", "pipe", "pipe"] });
+              fs.writeFileSync(entitlementsPath, entitlements);
+              // 临时签名没有 Team ID，仅 Runner Helper 放宽库校验；其他 hardened runtime 权限保留。
+              const key = ":com.apple.security.cs.disable-library-validation";
+              try {
+                execFileSync("/usr/libexec/PlistBuddy", ["-c", `Set ${key} true`, entitlementsPath], { stdio: "pipe" });
+              } catch {
+                execFileSync("/usr/libexec/PlistBuddy", ["-c", `Add ${key} bool true`, entitlementsPath], { stdio: "pipe" });
+              }
+              execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", "--preserve-metadata=identifier,flags", "--entitlements", entitlementsPath, helper], { stdio: "pipe" });
+            } finally {
+              fs.rmSync(temporaryDir, { recursive: true, force: true });
+            }
+          }
+        }
+        sign(framework);
+      });
+      signRunnerExecutable(runnerExecutablePath);
+    }
   );
 
   logLine(logger, `prepared official Electron runner: app=${runnerAppPath}`);
