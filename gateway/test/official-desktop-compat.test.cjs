@@ -1389,6 +1389,65 @@ test("macOS runner embeds its current ASAR header hash before signing, including
   assert.equal(fs.readFileSync(layout.executablePath, "utf8"), "official executable");
 });
 
+test("macOS runner preserves relative symlinks and patches ElectronAsar integrity sentinel in Frameworks", async (t) => {
+  const root = temporaryDirectory(t);
+  const appRoot = path.join(root, "ChatGPT.app");
+  const layout = {
+    appRoot,
+    executablePath: path.join(appRoot, "Contents", "MacOS", "ChatGPT"),
+    asarPath: path.join(appRoot, "Contents", "Resources", "app.asar"),
+    frameworksDir: path.join(appRoot, "Contents", "Frameworks"),
+  };
+  writeFile(layout.executablePath, "official executable");
+  writeFile(layout.asarPath, "official archive must remain unchanged");
+
+  const fwDir = path.join(layout.frameworksDir, "Codex Framework.framework");
+  const versionDir = path.join(fwDir, "Versions", "155.0.0");
+  const sourceBinaryPath = path.join(versionDir, "Codex Framework");
+  const sentinel = Buffer.from("AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A");
+  const mockBinaryData = Buffer.concat([
+    Buffer.from("mock mach-o header"),
+    sentinel,
+    Buffer.from([1, 1]),
+    Buffer.alloc(32, 0xbb),
+    Buffer.from("mock mach-o footer"),
+  ]);
+  writeFile(sourceBinaryPath, mockBinaryData);
+  fs.symlinkSync("155.0.0", path.join(fwDir, "Versions", "Current"));
+  fs.symlinkSync("Versions/Current/Codex Framework", path.join(fwDir, "Codex Framework"));
+
+  const runtimeDir = path.join(root, "runtime");
+  const logs = [];
+
+  await createMacRunner({
+    layout,
+    runtimeDir,
+    logger: (line) => logs.push(line),
+    runCompatibility(point, operation) {
+      if (point === runnerPoints.macosEntrySignature) return;
+      return operation();
+    },
+  });
+
+  const runnerFwDir = path.join(runtimeDir, "official-electron-runner", "OpenCodex Gateway.app", "Contents", "Frameworks", "Codex Framework.framework");
+  const runnerBinaryPath = path.join(runnerFwDir, "Versions", "155.0.0", "Codex Framework");
+
+  const currentLink = fs.readlinkSync(path.join(runnerFwDir, "Versions", "Current"));
+  assert.equal(currentLink, "155.0.0");
+  assert.equal(path.isAbsolute(currentLink), false);
+
+  const patchedData = fs.readFileSync(runnerBinaryPath);
+  const idx = patchedData.indexOf(sentinel);
+  assert.notEqual(idx, -1);
+  assert.equal(patchedData[idx + sentinel.length], 0);
+  assert.equal(patchedData[idx + sentinel.length + 1], 0);
+
+  const sourceData = fs.readFileSync(sourceBinaryPath);
+  const srcIdx = sourceData.indexOf(sentinel);
+  assert.equal(sourceData[srcIdx + sentinel.length], 1);
+  assert.equal(sourceData[srcIdx + sentinel.length + 1], 1);
+});
+
 test("Linux executable candidates retain Codex names and add electron fallback", () => {
   const appRoot = "/opt/codex-app";
   const candidates = layoutTest.linuxElectronExecutableCandidates(appRoot);

@@ -20,6 +20,8 @@ const { logLine } = require("../shared/logging.cjs");
 const { writeGatewayAsar } = require("../shared/runner-asar.cjs");
 const { runner: runnerPoints } = require("../../runtime/modification/point-refs.cjs");
 
+const INTEGRITY_DIGEST_SENTINEL = Buffer.from("AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A");
+
 function escapePlistString(value) {
   return String(value || "")
     .replace(/&/g, "&amp;")
@@ -95,24 +97,118 @@ function sameFrameworksFingerprint(left, right) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
 
+function hasExternalSymlinks(dirPath, rootDir = dirPath) {
+  try {
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isSymbolicLink()) {
+        const target = fs.readlinkSync(fullPath);
+        if (path.isAbsolute(target) && !target.startsWith(rootDir)) {
+          return true;
+        }
+      } else if (entry.isDirectory()) {
+        if (hasExternalSymlinks(fullPath, rootDir)) return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
+function patchFrameworkBinaryIntegrity(binaryPath, frameworkDir, logger) {
+  try {
+    const data = fs.readFileSync(binaryPath);
+    let patched = false;
+    let index = data.indexOf(INTEGRITY_DIGEST_SENTINEL);
+    while (index !== -1) {
+      const usedOffset = index + INTEGRITY_DIGEST_SENTINEL.length;
+      if (usedOffset < data.length && data[usedOffset] !== 0) {
+        data[usedOffset] = 0;
+        data[usedOffset + 1] = 0;
+        patched = true;
+      }
+      index = data.indexOf(INTEGRITY_DIGEST_SENTINEL, index + 1);
+    }
+    if (patched) {
+      fs.writeFileSync(binaryPath, data);
+      logLine(logger, `patched macOS ElectronAsar integrity digest sentinel: ${binaryPath}`);
+      /**
+       * 修改二进制后原签名会失效；必须对 Framework 进行 deep 签名，
+       * 以便同步重签 Helpers/ 目录下的辅助进程 bundle（如 Renderer），
+       * 保证 helper 与 framework 均为 ad-hoc 签名，避免因 Team ID 不一致被 macOS 拦截。
+       */
+      try {
+        execFileSync("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", frameworkDir], {
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+      } catch {
+        execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", binaryPath], {
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || "");
+    logLine(logger, `[warning] failed to patch framework integrity: ${binaryPath}: ${message}`);
+  }
+}
+
+function patchRunnerFrameworksIntegrity({ runnerFrameworksDir, logger }) {
+  if (!isDirectory(runnerFrameworksDir)) return;
+  try {
+    for (const entry of fs.readdirSync(runnerFrameworksDir, { withFileTypes: true })) {
+      if (!entry.name.endsWith(".framework")) continue;
+      const frameworkDir = path.join(runnerFrameworksDir, entry.name);
+      const frameworkName = path.basename(entry.name, ".framework");
+      const versionsDir = path.join(frameworkDir, "Versions");
+      if (isDirectory(versionsDir)) {
+        for (const vEntry of fs.readdirSync(versionsDir, { withFileTypes: true })) {
+          if (vEntry.isSymbolicLink()) continue;
+          const candidateBinary = path.join(versionsDir, vEntry.name, frameworkName);
+          if (fs.existsSync(candidateBinary)) {
+            patchFrameworkBinaryIntegrity(candidateBinary, frameworkDir, logger);
+          }
+        }
+      } else {
+        const candidateBinary = path.join(frameworkDir, frameworkName);
+        if (fs.existsSync(candidateBinary)) {
+          patchFrameworkBinaryIntegrity(candidateBinary, frameworkDir, logger);
+        }
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || "");
+    logLine(logger, `[warning] patchRunnerFrameworksIntegrity error: ${message}`);
+  }
+}
+
 function ensureFrameworksCopy({ layout, runnerFrameworksDir, markerPath, logger }) {
   const nextFingerprint = officialFrameworksFingerprint(layout);
   const previous = readJsonIfPresent(markerPath);
   if (
     previous &&
     sameFrameworksFingerprint(previous.fingerprint, nextFingerprint) &&
-    isDirectory(runnerFrameworksDir)
+    isDirectory(runnerFrameworksDir) &&
+    !hasExternalSymlinks(runnerFrameworksDir, runnerFrameworksDir)
   ) {
     logLine(logger, `official Electron Frameworks cache hit: ${runnerFrameworksDir}`);
+    patchRunnerFrameworksIntegrity({ runnerFrameworksDir, logger });
     return { copied: false };
   }
 
   /**
    * 不能把 Contents/Frameworks 做成指向 /Applications 的符号链接：官方 helper 进程会按 runner
    * 内部路径回溯加载 framework，macOS sandbox 会拒绝跨 bundle symlink。这里复制到运行态 cache。
+   *
+   * Node.js fs.cpSync 默认会将相对符号链接解析并转为指向原目录的绝对链接；必须启用
+   * verbatimSymlinks 以保持相对符号链接，确保 runner 加载的是独立副本。
    */
   fs.rmSync(runnerFrameworksDir, { recursive: true, force: true });
-  fs.cpSync(layout.frameworksDir, runnerFrameworksDir, { recursive: true, force: true });
+  fs.cpSync(layout.frameworksDir, runnerFrameworksDir, {
+    recursive: true,
+    force: true,
+    verbatimSymlinks: true,
+  });
+  patchRunnerFrameworksIntegrity({ runnerFrameworksDir, logger });
   writeJson(markerPath, {
     fingerprint: nextFingerprint,
     copiedAt: new Date().toISOString(),
@@ -185,4 +281,9 @@ async function createMacRunner({ layout, runtimeDir, logger, runCompatibility = 
 
 module.exports = {
   createMacRunner,
+  __test: {
+    hasExternalSymlinks,
+    patchRunnerFrameworksIntegrity,
+    INTEGRITY_DIGEST_SENTINEL,
+  },
 };
