@@ -419,6 +419,7 @@ function createRequestHandler({
   pickedFiles,
   pluginService,
   requestRestart = () => false,
+  getRpcRecovery = () => null,
   staticAssets,
   workspaceRoots,
 }) {
@@ -447,7 +448,15 @@ function createRequestHandler({
     // 认证接口必须在通用 auth gate 之前处理，否则首次登录会被拦截。
     if (pathname === "/api/auth/status") return handleAuthStatus(req, res, url);
     if (pathname === "/api/auth/login") return handleAuthLogin(req, res);
-    if (pathname === "/api/auth/logout") return handleAuthLogout(req, res, url);
+    if (pathname === "/api/auth/logout") {
+      if (isAuthed(req, url)) getRpcRecovery()?.logout(req);
+      return handleAuthLogout(req, res, url);
+    }
+    if (pathname === "/api/rpc/page") {
+      const recovery = getRpcRecovery();
+      if (!recovery) return sendJson(res, 503, { error: "RPC recovery unavailable" });
+      return recovery.initialize(req, res);
+    }
     if (pathname === "/api/health") {
       // 健康检查用于外部探活，必须在通用认证门之前允许匿名读取。
       return sendJson(res, 200, buildGatewayStatus(), { "cache-control": "no-store" });
@@ -569,6 +578,7 @@ function createRequestHandler({
     }
 
     if (pathname === "/api/ipc/invoke" && req.method === "POST") {
+      if (getRpcRecovery() && !getRpcRecovery().validateHttp(req)) return sendJson(res, 409, { ok: false, error: "Page session replaced" });
       return handleIpcInvoke(
         req,
         res,
@@ -892,6 +902,7 @@ async function createGateway() {
     pickedFiles,
     pluginService,
     requestRestart: () => requestRestart(),
+    getRpcRecovery: () => webSocketHub.recovery,
     staticAssets,
     workspaceRoots,
   });
@@ -908,6 +919,7 @@ async function createGateway() {
 
   // 注入 app-host relay 工厂：WS hub 只管理浏览器连接，真正的官方 MessagePort 仍由 official-runtime 创建。
   const webSocketHub = createWsHub(server, {
+    runtimeDir: RUNTIME_DIR,
     createAppHostRelay: createOfficialAppHostRelay,
     handleIpcInvoke({ clientId, request, req }) {
       return handleWsIpcInvoke(

@@ -117,6 +117,7 @@ function createWsHub(
     maxClients = WS_MAX_CLIENTS,
     maxPayloadBytes = WS_MAX_PAYLOAD_BYTES,
     observeAppHostFrame,
+    runtimeDir,
   }
 ) {
   if (!WebSocketServer) {
@@ -149,6 +150,14 @@ function createWsHub(
   let suppressedAuthRejectCount = 0;
   const appHostTraffic = new Map();
   let nextAppHostRelayGeneration = 0;
+  const recovery = runtimeDir ? require("./recoverable-sessions.cjs").createRecoverableSessions({
+    runtimeDir, isAuthed,
+    deliver: (socket, req, payload) => handleWsControlMessage(socket, req, payload),
+    dispose: (socket) => closeAppHostRelays(socket, "session_closed"),
+    log: (event, data) => diagnosticLog("rpc-session", event, data),
+  }) : null;
+  server.on("close", () => recovery?.close());
+
 
   function socketRemoteAddress(socket) {
     return (socket && socket.__codexRemoteAddress) || "";
@@ -488,7 +497,8 @@ function createWsHub(
 
   function removeClient(ws) {
     flushAppHostTrafficForClient(socketClientId(ws));
-    closeAppHostRelays(ws, "client_disconnected");
+    if (ws.__rpcSession) recovery.detach(ws);
+    else closeAppHostRelays(ws, "client_disconnected");
     clients.delete(ws);
     if (ws.__codexWebClientId && clientsById.get(ws.__codexWebClientId) === ws) {
       const clientId = ws.__codexWebClientId;
@@ -653,6 +663,9 @@ function createWsHub(
       } catch {}
       closeAppHostRelay(relays, existing, "replaced", { notify: false, closePort: !graceful });
     }
+    if (ws.__recoverable && relays.size >= Math.max(1, Number(maxAppHostRelays) || 1)) {
+      throw new Error("RPC port limit exceeded");
+    }
     while (relays.size >= Math.max(1, Number(maxAppHostRelays) || 1)) {
       const [oldestPortId, oldestContext] = relays.entries().next().value || [];
       if (!oldestPortId) break;
@@ -802,6 +815,7 @@ function createWsHub(
       return true;
     }
     let context = relays.get(portId);
+    if (!context && ws.__recoverable) throw new Error("RPC port is missing");
     if (!context) {
       // WS 重连会释放旧 socket 上的 relay，但浏览器 MessagePort 仍会继续发送；按原身份懒重建后再转发首帧。
       handleAppHostConnect(ws, req, { ...message, type: "app-host-connect" });
@@ -946,6 +960,11 @@ function createWsHub(
           const clientId = message && typeof message.clientId === "string" ? message.clientId : "";
           // hello 是浏览器接入 IPC 的握手消息，拿到 clientId 后才能定向投递事件。
           if (message && message.type === "hello" && clientId) {
+            if (ws.__rpcSession) return;
+            if (message.version === 1 && (!recovery || !recovery.attach(ws, req, message))) {
+              if (!recovery) ws.close(4001, "recovery unsupported");
+              return;
+            }
             const previousClientId = ws.__codexWebClientId;
             if (previousClientId && previousClientId !== clientId && clientsById.get(previousClientId) === ws) {
               clientsById.delete(previousClientId);
@@ -987,6 +1006,7 @@ function createWsHub(
                 error: error instanceof Error ? error.message : String(error),
               });
             }
+            if (ws.__rpcSession) recovery.ready(ws);
             for (const listener of clientReadyListeners) {
               try {
                 listener({ clientId, socket: ws });
@@ -999,8 +1019,13 @@ function createWsHub(
             }
             return;
           }
+          if (ws.__rpcSession) {
+            if (recovery.message(ws, req, message)) return;
+            if (["app-host-connect", "app-host-port-message"].includes(message?.type)) return;
+          }
           if (handleWsControlMessage(ws, req, message)) return;
         } catch (error) {
+          if (ws.__rpcSession) recovery.fail(ws);
           diagnosticWarn("ws-hub", "message_parse_failed", {
             error: error instanceof Error ? error.message : String(error),
           });
@@ -1033,7 +1058,7 @@ function createWsHub(
     });
   });
 
-  return { broadcast, clients, sendTo, hasClient, onClientReady, onClientRemoved };
+  return { broadcast, clients, sendTo, hasClient, onClientReady, onClientRemoved, recovery };
 }
 
 module.exports = {

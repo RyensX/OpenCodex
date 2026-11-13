@@ -2012,20 +2012,188 @@
     }
   }
 
+  // 恢复层仅封装传输帧，官方 MessagePort、调用编号及订阅在短暂断线时保持不变。
+  let rpcPage = null;
+  let rpcInitializing = false;
+  let rpcStopped = false;
+  let rpcSent = 0;
+  let rpcReceived = 0;
+  let rpcAcked = 0;
+  let rpcBytes = 0;
+  const rpcPending = new Map();
+  let rpcAckTimer = null;
+  let rpcConnectTimer = null;
+  let rpcProbeTimer = null;
+  let rpcProbeNonce = null;
+  let rpcLastProbeAt = 0;
+  let rpcFlushTimer = null;
+  let rpcSentThrough = 0;
+  let rpcStatusElement = null;
+  const rpcByteLength = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+
+  // 与认证页共用网关注入的 locale/messages，不另按浏览器语言推断。
+  function showRpcStatus(text, stopped = false) {
+    if ((wsReady && !stopped) || (rpcStopped && !stopped)) return;
+    if (!document.body) { scheduler.setTimeout(() => showRpcStatus(text, stopped), 50); return; }
+    if (!rpcStatusElement) {
+      rpcStatusElement = document.createElement("div");
+      rpcStatusElement.setAttribute("role", "status");
+      rpcStatusElement.setAttribute("aria-live", "polite");
+      rpcStatusElement.setAttribute("data-opencodex-connection-status", "");
+      // 顶部提示沿用官方主题颜色，仅将分隔线调为半像素。
+      rpcStatusElement.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:2147483647;box-sizing:border-box;min-height:40px;padding:8px 16px;padding-top:max(8px,env(safe-area-inset-top));background:var(--color-background-primary,Canvas);color:var(--color-text-secondary,CanvasText);border-bottom:0.5px solid var(--color-border-subtle,ButtonBorder);display:flex;align-items:center;justify-content:center;gap:12px;font:inherit;font-size:13px;line-height:20px";
+      document.body.appendChild(rpcStatusElement);
+    }
+    rpcStatusElement.replaceChildren();
+    if (!stopped) {
+      // 指示器跟随文字颜色；减少动态效果时保留静态圆环，不影响状态朗读。
+      const style = document.createElement("style");
+      style.textContent = `
+        @keyframes opencodex-connection-spin { to { transform: rotate(360deg); } }
+        [data-opencodex-connection-spinner] {
+          box-sizing: border-box; width: 12px; height: 12px; flex-shrink: 0;
+          border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%;
+          animation: opencodex-connection-spin .8s linear infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          [data-opencodex-connection-spinner] { animation: none; }
+        }
+      `;
+      const spinner = document.createElement("span");
+      spinner.setAttribute("data-opencodex-connection-spinner", "");
+      spinner.setAttribute("aria-hidden", "true");
+      rpcStatusElement.append(style, spinner);
+    }
+    const label = document.createElement("span");
+    label.style.cssText = "min-width:0;overflow-wrap:anywhere";
+    label.textContent = text; rpcStatusElement.append(label);
+    // 自动连接期间只展示状态，只有恢复终止、需要用户接管时才显示操作。
+    if (stopped) {
+      const button = document.createElement("button");
+      button.textContent = t("web.connection.refresh");
+      button.style.cssText = "flex-shrink:0;border:1px solid var(--color-border-default,ButtonBorder);border-radius:8px;background:var(--color-background-secondary,ButtonFace);color:var(--color-text-primary,ButtonText);padding:3px 10px;font:inherit;cursor:pointer";
+      button.onclick = () => w.location.reload();
+      rpcStatusElement.append(button);
+    }
+    // 提交保护由事件和传输层负责；提示条不阻挡阅读、滚动和编辑草稿。
+  }
+  function hideRpcStatus() { rpcStatusElement?.remove(); rpcStatusElement = null; }
+  function stopRpcRecovery(reason) {
+    if (rpcStopped) return;
+    console.warn("[codex-web] RPC session stopped", JSON.stringify({ reason, pendingFrames: rpcPending.size, pendingBytes: rpcBytes, sent: rpcSent, received: rpcReceived, acked: rpcAcked, sentThrough: rpcSentThrough }));
+    rpcStopped = true; wsReady = false;
+    scheduler.clearTimeout(rpcConnectTimer); scheduler.clearTimeout(rpcProbeTimer);
+    scheduler.clearTimeout(rpcAckTimer); scheduler.clearTimeout(reconnectTimer); reconnectTimer = null;
+    rpcPending.clear(); rpcBytes = 0;
+    rejectPendingGatewayIpc(new Error("RPC session ended"));
+    for (const state of [...appHostPortRelays.values()]) {
+      try { state.port.postMessage(null); } catch {}
+      closeAppHostRelay(state, reason, false); finalizeAppHostRelay(state);
+    }
+    try { ws?.close(); } catch {}
+    showRpcStatus(reason === "superseded" ? t("web.connection.superseded") : reason === "auth_required" ? t("web.connection.authRequired") : t("web.connection.unrecoverable"), true);
+  }
+  function acceptRpcAck(ack) {
+    if (!Number.isSafeInteger(ack) || ack < 0 || ack > rpcSent) throw new Error("Invalid RPC acknowledgement");
+    rpcAcked = Math.max(rpcAcked, ack);
+    for (const [seq, frame] of rpcPending) {
+      if (seq > ack) break;
+      rpcBytes -= frame.bytes; rpcPending.delete(seq);
+    }
+  }
+  function sendRpcFrame(payload) {
+    if (rpcStopped || !rpcPage) return false;
+    // 首屏会突发数千条细粒度 RPC，把尚未发送的小消息合并为一个有序传输帧。
+    // 一旦帧已发送就不再修改，确保补传的序号始终对应同一批消息。
+    const previous = rpcPending.get(rpcSent);
+    if (previous && rpcSent > rpcSentThrough && previous.wire.payload.messages.length < 32 && previous.bytes < 64 * 1024) {
+      const wire = { ...previous.wire, payload: { type: "rpc-batch", messages: [...previous.wire.payload.messages, payload] } };
+      const bytes = rpcByteLength(wire);
+      if (rpcBytes - previous.bytes + bytes > 16 * 1024 * 1024) { stopRpcRecovery("overflow"); return false; }
+      rpcBytes += bytes - previous.bytes; rpcPending.set(rpcSent, { wire, bytes });
+    } else {
+      const wire = { type: "rpc-frame", generation: rpcPage.generation, seq: rpcSent + 1, ack: rpcReceived, payload: { type: "rpc-batch", messages: [payload] } };
+      const bytes = rpcByteLength(wire);
+      if (rpcPending.size >= 2000 || rpcBytes + bytes > 16 * 1024 * 1024) { stopRpcRecovery("overflow"); return false; }
+      rpcSent += 1; rpcBytes += bytes; rpcPending.set(rpcSent, { wire, bytes });
+    }
+    scheduleRpcFlush();
+    // 已进入可靠队列，即使发送失败也由原序号补传，不让调用者再排入另一份。
+    return true;
+  }
+  function scheduleRpcFlush() {
+    if (rpcFlushTimer || rpcStopped) return;
+    rpcFlushTimer = scheduler.setTimeout(() => {
+      rpcFlushTimer = null;
+      if (!wsReady || !ws || ws.readyState !== w.WebSocket.OPEN) return;
+      // 限制在途窗口，避免首屏突发 RPC 抢占接收确认的机会；排队数据仍受总上限约束。
+      let count = 0;
+      for (const [seq, frame] of rpcPending) {
+        if (seq <= rpcSentThrough) continue;
+        if (seq > rpcAcked + 64 || count++ >= 32) break;
+        try {
+          ws.send(JSON.stringify({ ...frame.wire, ack: rpcReceived }));
+          rpcSentThrough = seq;
+        } catch { ws.close(); return; }
+      }
+      if (rpcSentThrough < rpcSent && rpcSentThrough < rpcAcked + 64) scheduleRpcFlush();
+    }, 0);
+  }
+  function handleRpcTransport(message) {
+    if (message.type === "rpc-reset") { stopRpcRecovery(message.reason); return true; }
+    if (message.type === "rpc-probe-ack") {
+      if (message.nonce === rpcProbeNonce) { scheduler.clearTimeout(rpcProbeTimer); rpcProbeNonce = null; }
+      return true;
+    }
+    if (!["rpc-ready", "rpc-frame", "rpc-ack"].includes(message.type)) return false;
+    try {
+      if (!rpcPage || message.generation !== rpcPage.generation) throw new Error("RPC generation mismatch");
+      acceptRpcAck(message.ack);
+      if (message.type === "rpc-ready") {
+        scheduler.clearTimeout(rpcConnectTimer);
+        rpcSentThrough = rpcAcked;
+        markGatewayWsReady(); scheduleRpcFlush(); hideRpcStatus(); return true;
+      }
+      scheduleRpcFlush();
+      if (message.type === "rpc-ack") return true;
+      if (!Number.isSafeInteger(message.seq) || message.seq < 1 || message.seq > rpcReceived + 1) throw new Error("RPC sequence gap");
+      if (message.seq === rpcReceived + 1) {
+        if (!handleAppHostGatewayMessage(message.payload)) throw new Error("Invalid RPC frame");
+        rpcReceived = message.seq;
+      }
+      if (!rpcAckTimer) rpcAckTimer = scheduler.setTimeout(() => {
+        rpcAckTimer = null;
+        if (wsReady && ws?.readyState === w.WebSocket.OPEN) ws.send(JSON.stringify({ type: "rpc-ack", generation: rpcPage.generation, ack: rpcReceived }));
+      }, 25);
+    } catch (error) { console.warn("[codex-web] RPC recovery failed", error); stopRpcRecovery("sequence_error"); }
+    return true;
+  }
+  function checkRpcConnection() {
+    if (rpcStopped || document.visibilityState === "hidden" || rpcProbeNonce || Date.now() - rpcLastProbeAt < 1000) return;
+    rpcLastProbeAt = Date.now();
+    if (!ws || ws.readyState === w.WebSocket.CLOSED) { scheduler.clearTimeout(reconnectTimer); reconnectTimer = null; void connect(); return; }
+    if (!wsReady || ws.readyState !== w.WebSocket.OPEN) return;
+    const socket = ws;
+    rpcProbeNonce = crypto.randomUUID();
+    socket.send(JSON.stringify({ type: "rpc-probe", nonce: rpcProbeNonce }));
+    rpcProbeTimer = scheduler.setTimeout(() => {
+      rpcProbeNonce = null;
+      if (ws !== socket) return;
+      wsReady = false; ws = null; socket.close(); showRpcStatus(t("web.connection.recovering")); scheduleReconnect();
+    }, 10000);
+  }
+
   function markGatewayWsReady() {
     wsReady = true;
     settleWsReadyWaiters(true);
-    // 新 WS 没有旧 relay；先重发仍存活 port 的 connect，再冲刷断线期间积压的数据帧。
-    for (const state of appHostPortRelays.values()) {
-      if (
-        !state.closed &&
-        !state.closing &&
-        !state.connected &&
-        !state.pending.some((payload) => payload.type === "app-host-connect")
-      ) {
-        const connectPayload = appHostWsPayload(state, { type: "app-host-connect" });
-        state.pending.unshift(connectPayload);
-        state.pendingChars += appHostPendingPayloadChars(connectPayload);
+    // 新协议保留原 RPC；仅旧协议宿主继续使用原有端口重连流程。
+    if (typeof ws?.__opencodexReliableSend !== "function") {
+      for (const state of appHostPortRelays.values()) {
+        if (!state.closed && !state.closing && !state.connected && !state.pending.some((payload) => payload.type === "app-host-connect")) {
+          const connectPayload = appHostWsPayload(state, { type: "app-host-connect" });
+          state.pending.unshift(connectPayload);
+          state.pendingChars += appHostPendingPayloadChars(connectPayload);
+        }
       }
     }
     flushAllAppHostRelayMessages();
@@ -2080,21 +2248,13 @@
   }
 
   function sendAppHostWsPayload(payload) {
+    // 新协议离线帧也进入同一个有界队列，避免每个端口各自缓存而突破页面总上限。
+    if (typeof rpcPage !== "undefined" && rpcPage) return sendRpcFrame(payload);
     // app-host 比普通 IPC 更早启动；WS 未 open 或 hello 未完成时不能直接发送，否则 gateway 无法建立路由。
     if (!ws || ws.readyState !== w.WebSocket.OPEN || !wsReady) return false;
-    try {
-      ws.send(JSON.stringify(payload));
-      return true;
-    } catch (error) {
-      clientDiagnostic("app-host-ws-send-failed", {
-        error: error instanceof Error ? error.message : String(error),
-        errorName: error && error.name ? String(error.name) : "",
-        portId: payload && payload.portId,
-        wsReady,
-        wsState: websocketStateName(ws),
-      });
-      return false;
-    }
+    if (typeof ws.__opencodexReliableSend === "function") return ws.__opencodexReliableSend(payload);
+    // 保留旧协议宿主的透明发送接口；新版连接始终安装可靠传输实现。
+    try { ws.send(JSON.stringify(payload)); return true; } catch { return false; }
   }
 
   function sendGatewayControlPayload(payload, eventName) {
@@ -2375,6 +2535,7 @@
     const portId = typeof message.portId === "string" ? message.portId : "";
     const state = appHostPortRelays.get(portId);
     if (!state) {
+      if (typeof rpcPage !== "undefined" && rpcPage) throw new Error("RPC response has no local port");
       clientDiagnostic("app-host-message-missing-port", {
         portId,
         type: message.type,
@@ -2413,6 +2574,7 @@
         portId,
       });
       closeAppHostRelay(state, "decode_failed", true);
+      if (typeof rpcPage !== "undefined" && rpcPage) throw error;
       return true;
     }
     if (state.service !== "git") data = publishAppHostData(data, "server");
@@ -2426,6 +2588,7 @@
         portId,
       });
       closeAppHostRelay(state, "post_to_browser_failed", true);
+      if (typeof rpcPage !== "undefined" && rpcPage) throw error;
     }
     return true;
   }
@@ -2643,7 +2806,8 @@
         }
       }
       if (!wsResponse || lastFetchError) {
-        // 老页面、浏览器不支持 WS 或握手尚未完成时继续走原 HTTP 通道，行为与升级前一致。
+        // 仅已握手的新页面允许 HTTP 大包回退；离线不能绕过恢复层继续提交。
+        if (rpcStopped || !rpcPage || !wsReady) throw new Error("Connection is recovering; request was not resent");
         for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
           if (retryDelays[attempt] > 0) await delay(retryDelays[attempt]);
           const attemptStartedAtMs = CLIENT_DIAGNOSTICS_ENABLED ? Date.now() : 0;
@@ -2663,7 +2827,7 @@
             res = await w.fetch("/api/ipc/invoke", {
               method: "POST",
               credentials: "same-origin",
-              headers: gatewayAuthHeaders({ "content-type": "application/json" }),
+              headers: gatewayAuthHeaders({ "content-type": "application/json", "x-opencodex-page-id": rpcPage.pageId, "x-opencodex-page-generation": rpcPage.generation, "x-opencodex-page-credential": rpcPage.credential }),
               body,
               signal: controller?.signal,
             });
@@ -3575,8 +3739,24 @@
   };
 
   /** 建立到 gateway 的 WebSocket，接收 app-server/业务广播事件。 */
-  function connect() {
-    if (!cfg.gatewayWsUrl || !("WebSocket" in w)) return;
+  async function connect() {
+    if (rpcStopped || rpcInitializing) return;
+    if (!rpcPage) {
+      rpcInitializing = true; showRpcStatus(t("web.connection.connecting"));
+      const controller = new AbortController();
+      const timeout = scheduler.setTimeout(() => controller.abort(), 10000);
+      try {
+        const response = await w.fetch("/api/rpc/page", { method: "POST", credentials: "same-origin", cache: "no-store", headers: gatewayAuthHeaders({}), signal: controller.signal });
+        if (response.status === 401) { stopRpcRecovery("auth_required"); return; }
+        if (response.status === 404 || response.status === 405) { stopRpcRecovery("unsupported"); return; }
+        if (!response.ok) throw new Error("RPC initialization failed");
+        const page = await response.json();
+        if (page.version !== 1 || !page.pageId || !page.generation || !page.credential) { stopRpcRecovery("unsupported"); return; }
+        rpcPage = page;
+      } catch { scheduleReconnect(); return; }
+      finally { scheduler.clearTimeout(timeout); rpcInitializing = false; }
+    }
+    if (rpcStopped || !cfg.gatewayWsUrl || !("WebSocket" in w)) return;
     if (ws && (ws.readyState === w.WebSocket.CONNECTING || ws.readyState === w.WebSocket.OPEN)) return;
     wsReady = false;
     let socket = null;
@@ -3587,6 +3767,12 @@
     try {
       socket = new WebSocket(gatewayWebSocketUrl());
       ws = socket;
+      socket.__opencodexReliableSend = sendRpcFrame;
+      showRpcStatus(t("web.connection.recovering"));
+      rpcConnectTimer = scheduler.setTimeout(() => {
+        if (ws !== socket) return;
+        ws = null; wsReady = false; socket.close(); scheduleReconnect();
+      }, 10000);
     } catch (error) {
       console.warn("[codex-web] failed to open gateway socket", error);
       clientDiagnostic("ws-connect-failed", {
@@ -3613,9 +3799,15 @@
 
     socket.addEventListener("open", () => {
       // hello 会把本页面 clientId 注册到 gateway，后续审批/fetch 响应才能定向回来。
+      if (ws !== socket || rpcStopped) return;
       reconnectDelay = 500;
+      scheduler.clearTimeout(rpcConnectTimer);
+      rpcConnectTimer = scheduler.setTimeout(() => {
+        if (ws !== socket) return;
+        ws = null; wsReady = false; socket.close(); scheduleReconnect();
+      }, 10000);
       try {
-        socket.send(JSON.stringify({ type: "hello", clientId }));
+        socket.send(JSON.stringify({ type: "hello", clientId, version: 1, ...rpcPage, ack: rpcReceived }));
         clientDiagnostic("ws-hello-sent", {
           wsReady,
           wsState: websocketStateName(socket),
@@ -3634,6 +3826,7 @@
       emitSharedObjectSnapshotValue(STATSIG_DEFAULT_FEATURES_CONFIG);
     });
     socket.addEventListener("message", (event) => {
+      if (ws !== socket || rpcStopped) return;
       const rawData = event.data;
       // 这些字段只用于 debugWs 排障；默认值保持 0，避免常态下多做字符串长度和 Date.now 采样。
       const rawChars = WS_DEBUG_ENABLED ? rawWsMessageChars(rawData) : 0;
@@ -3644,9 +3837,10 @@
         // 官方桥接协议要求浏览器收到完整 JSON 后再按 channel/MessagePort 分发，不能在这里改消息形状。
         msg = JSON.parse(rawData);
         parseMs = WS_DEBUG_ENABLED ? Date.now() - parseStartedAtMs : 0;
+        if (handleRpcTransport(msg)) return;
         if (msg && msg.type === "hello-ack" && msg.clientId === clientId) {
           // ack 表示 gateway 已经把 clientId 写入路由表，之后再发 IPC 才不会丢首批异步回包。
-          markGatewayWsReady();
+          // 恢复协议必须等待 rpc-ready 的累计确认，再补传旧帧并发送新请求。
           clientDiagnostic("ws-hello-ack", {
             ready: true,
             wsReady,
@@ -3790,14 +3984,19 @@
       rejectPendingGatewayIpc(new Error("Gateway WebSocket disconnected"), socket);
       if (ws === socket) {
         wsReady = false;
-        // MessagePort 属于页面而不是 WS；保留它，并在下一次 hello-ack 后重新接到官方 listener。
-        for (const state of appHostPortRelays.values()) state.connected = false;
+        scheduler.clearTimeout(rpcConnectTimer); scheduler.clearTimeout(rpcProbeTimer); rpcProbeNonce = null;
+        showRpcStatus(t("web.connection.recovering"));
+        // 保留本页 MessagePort 和未确认帧，服务端决定是否仍可恢复原会话。
+        if (typeof socket.__opencodexReliableSend !== "function") {
+          for (const state of appHostPortRelays.values()) state.connected = false;
+        }
       }
       clientDiagnostic("ws-close", {
         status: event && typeof event.code === "number" ? event.code : 0,
         wsReady,
         wsState: websocketStateName(socket),
       });
+      if (ws !== socket) return;
       // 自然关闭后移除页面生命周期中的 socket disposer，后续重连会登记新的 socket。
       releaseSocket();
       scheduleReconnect();
@@ -3816,7 +4015,7 @@
 
   /** WebSocket 断开后的指数退避重连。 */
   function scheduleReconnect() {
-    if (reconnectTimer) return;
+    if (rpcStopped || reconnectTimer) return;
     if (document.visibilityState === "hidden") {
       reconnectDeferredUntilVisible = true;
       return;
@@ -3831,7 +4030,7 @@
       reconnectTimer = null;
       reconnectDelay = Math.min(reconnectDelay * 2, 5000);
       connect();
-    }, reconnectDelay);
+    }, reconnectDelay * (0.8 + Math.random() * 0.4));
   }
 
   function handleReconnectVisibilityChange() {
@@ -3841,7 +4040,9 @@
       if (!ws || ws.readyState === w.WebSocket.CLOSED) reconnectDeferredUntilVisible = true;
       return;
     }
-    if (reconnectDeferredUntilVisible || !ws || ws.readyState === w.WebSocket.CLOSED) scheduleReconnect();
+    if (reconnectDeferredUntilVisible || !ws || ws.readyState === w.WebSocket.CLOSED) {
+      scheduler.clearTimeout(reconnectTimer); reconnectTimer = null; void connect();
+    } else checkRpcConnection();
   }
 
   modificationScope?.own?.(() => {
@@ -3865,5 +4066,29 @@
 
   // 已连接 socket 保持后台业务语义；只有断线重试暂停，回到前台后再按原退避策略恢复。
   adapterHost.events.observe({ key: {}, target: document, type: "visibilitychange", callback: handleReconnectVisibilityChange });
+  adapterHost.events.observe({ key: {}, target: w, type: "online", callback: checkRpcConnection });
+  const blockDisconnectedSubmit = (event) => {
+    if (wsReady && !rpcStopped || rpcStatusElement?.contains(event.target)) return;
+    const target = event.target instanceof Element ? event.target : null;
+    const button = target?.closest("button");
+    const label = button?.getAttribute("aria-label") || button?.textContent || "";
+    const isSendButton = button?.matches('[type="submit"],[data-testid="send-button"],[data-testid="composer-submit-button"]') ||
+      button?.closest('[data-codex-composer-root],[data-thread-find-composer]') && /发送|提交|send|submit/i.test(label);
+    if (event.type === "submit" || isSendButton) {
+      event.preventDefault(); event.stopImmediatePropagation(); checkRpcConnection();
+    }
+  };
+  adapterHost.events.observe({ key: {}, target: document, type: "click", capture: true, callback: blockDisconnectedSubmit });
+  adapterHost.events.observe({ key: {}, target: document, type: "submit", capture: true, callback: blockDisconnectedSubmit });
+  adapterHost.events.observe({ key: {}, target: document, type: "keydown", capture: true, callback: (event) => {
+    if (event.key === "Enter" && (!wsReady || rpcStopped) && !rpcStatusElement?.contains(event.target)) { event.preventDefault(); event.stopImmediatePropagation(); checkRpcConnection(); }
+    else if (event.key === "Enter" && Date.now() - rpcLastProbeAt > 30000) checkRpcConnection();
+  } });
+  adapterHost.events.observe({ key: {}, target: document, type: "pointerdown", capture: true, callback: () => { if (!wsReady) checkRpcConnection(); } });
+  modificationScope?.own?.(() => {
+    rpcStopped = true;
+    for (const timer of [rpcConnectTimer, rpcProbeTimer, rpcAckTimer, rpcFlushTimer, reconnectTimer]) scheduler.clearTimeout(timer);
+    rpcPending.clear(); rpcBytes = 0; hideRpcStatus();
+  });
   connect();
 })();
