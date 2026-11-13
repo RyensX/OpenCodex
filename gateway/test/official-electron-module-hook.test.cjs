@@ -62,6 +62,7 @@ test("shared Electron wrapper shadows immutable Tray and Notification exports", 
     onIntercept() { notificationIntercepts += 1; },
   });
   installOfficialTrayHook(electronModule, {
+    moduleLoader,
     registerElectronOverride: electronHook.registerOverride,
     onIntercept() { trayIntercepts += 1; },
   });
@@ -116,4 +117,46 @@ test("shared Electron wrapper shadows immutable Tray and Notification exports", 
   droppedNotification.close();
   assert.equal(hiddenTrayHookStatus().installed, true);
   assert.equal(hiddenTrayHookStatus().createdCount, 1);
+});
+
+test("native status item hook hides macOS UI and preserves other addon functions", () => {
+  const { createOfficialNativeStatusItemHook } = require("../runtime/electron/official-native-status-item-hook.cjs");
+  let nativeCalls = 0;
+  let created = 0;
+  let destroyed = 0;
+  const addon = { marker: "native" };
+  // 模拟不可写的原生接口；任何真实菜单栏调用都应被拦截。
+  for (const name of ["createStatusItem", "destroyStatusItem", "updateStatusItemState", "updateStatusItemMenuState"]) {
+    Object.defineProperty(addon, name, { value() { nativeCalls += 1; }, enumerable: true });
+  }
+  addon.setWindowDragTarget = function (value) {
+    assert.equal(this, addon);
+    return value;
+  };
+  const loads = [];
+  const moduleLoader = { _load(...args) { loads.push(args); return addon; } };
+  const hook = createOfficialNativeStatusItemHook({ moduleLoader });
+  hook.install({ onCreate() { created += 1; }, onDestroy() { destroyed += 1; } });
+  const installedLoad = moduleLoader._load;
+  hook.install();
+  assert.equal(moduleLoader._load, installedLoad);
+  const parent = {};
+  const wrapped = moduleLoader._load("/resources/native/sky.node", parent, false);
+  assert.deepEqual(loads[0], ["/resources/native/sky.node", parent, false]);
+  assert.notEqual(wrapped, addon);
+  assert.equal(wrapped.createStatusItem("icon", () => assert.fail("后台托盘不应触发菜单事件")), true);
+  wrapped.updateStatusItemState(true, true);
+  wrapped.updateStatusItemMenuState("{}");
+  assert.equal(wrapped.setWindowDragTarget("window"), "window");
+  assert.equal(wrapped.marker, "native");
+  wrapped.destroyStatusItem();
+  wrapped.destroyStatusItem();
+  assert.deepEqual([nativeCalls, created, destroyed], [0, 1, 1]);
+  assert.equal(moduleLoader._load("/app/native/sky-addon/build/Release-arm64/sky.node"), wrapped);
+  assert.equal(moduleLoader._load("/resources/native/other.node"), addon);
+  assert.equal(moduleLoader._load("electron"), addon);
+  // 销毁后可再次创建，保持官方托盘重新启用时的生命周期。
+  assert.equal(wrapped.createStatusItem("icon"), true);
+  wrapped.destroyStatusItem();
+  assert.deepEqual([nativeCalls, created, destroyed], [0, 2, 2]);
 });

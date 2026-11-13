@@ -1,5 +1,6 @@
 const { EventEmitter } = require("events");
 const { diagnosticLog, diagnosticWarn } = require("../core/diagnostics.cjs");
+const { createOfficialNativeStatusItemHook } = require("./official-native-status-item-hook.cjs");
 const {
   registerOfficialElectronModuleOverride,
 } = require("./official-electron-module-hook.cjs");
@@ -141,6 +142,19 @@ function installOfficialTrayHook(electronModule, options = {}) {
       : registerOfficialElectronModuleOverride;
   try {
     registerElectronOverride(electronModule, "Tray", HiddenTray);
+    createOfficialNativeStatusItemHook({ moduleLoader: options.moduleLoader }).install({
+      onCreate() {
+        state.createdCount += 1;
+        state.lastCreatedAt = new Date().toISOString();
+        reportIntercept();
+        diagnosticLog("official-tray", "hidden_native_status_item_created", { createdCount: state.createdCount });
+      },
+      onDestroy() {
+        state.destroyedCount += 1;
+        state.lastDestroyedAt = new Date().toISOString();
+        diagnosticLog("official-tray", "hidden_native_status_item_destroyed", { destroyedCount: state.destroyedCount });
+      },
+    });
   } catch (error) {
     state.lastError = error instanceof Error ? error.message : String(error);
     diagnosticWarn("official-tray", "tray_patch_failed", { error: state.lastError });
@@ -149,7 +163,7 @@ function installOfficialTrayHook(electronModule, options = {}) {
 
   state.installed = true;
   state.lastError = null;
-  diagnosticLog("official-tray", "tray_hook_installed", { strategy: "module_load_wrapper" });
+  diagnosticLog("official-tray", "tray_hook_installed", { strategy: "electron_and_native_module_load_wrapper" });
   return hiddenTrayHookStatus();
 }
 
