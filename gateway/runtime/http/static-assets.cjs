@@ -33,7 +33,7 @@ const PATCHED_ASSET_CACHE_MAX_BYTES = Math.max(
     ? configuredPatchedAssetCacheMaxBytes
     : 96 * 1024 * 1024
 );
-const PATCHED_ASSET_PATCH_REVISION = "11";
+const PATCHED_ASSET_PATCH_REVISION = "12";
 const ASYNC_PATCH_MIN_BYTES = 512 * 1024;
 const OFFICIAL_ASSET_PATCH_WORKER_IDLE_MS = 30_000;
 const OFFICIAL_ASSET_PATCH_WORKER_PATH = path.join(__dirname, "official-asset-patch-worker.cjs");
@@ -1303,8 +1303,8 @@ ${pluginGatewayStateBootstrapScript()}
   function shouldPatchOfficialAsset(reqPath) {
     const rel = patchedOfficialAssetName(reqPath);
     if (!rel) return false;
-    // 只 patch 当前官方 assets 目录下的 JS chunk，避免路径拼接穿透到子目录或非脚本资源。
-    return rel.endsWith(".js") && !rel.includes("/");
+    // 新版拆分脚本位于 async/；只接受这两种已知层级，仍拒绝任意目录和路径穿越。
+    return /^(?:async\/)?[A-Za-z0-9_$.-]+\.js$/.test(rel) && !rel.split("/").includes("..");
   }
 
   /** 恢复历史 turn 时旧 renderer 转换漏了 firstTurnWorkItemStartedAtMs，导致折叠摘要退回“上 x 条消息”。 */
@@ -1512,14 +1512,35 @@ ${pluginGatewayStateBootstrapScript()}
     return patched;
   }
 
+  /** 远程网页不具备桌面宠物宿主；在发起 RPC 前返回空资源，避免传输整套内联精灵图。 */
+  function patchRemotePetResources(source) {
+    let patched = source.replace(
+      /[A-Za-z_$][\w$]*\.appServices\.customAvatars\.load\(\)/g,
+      "Promise.resolve({avatarDirectory:null,avatars:[]})"
+    ).replace(
+      /[A-Za-z_$][\w$]*\.appServices\.customAvatars\.loadAvatar\(([A-Za-z_$][\w$]*)\)/g,
+      "Promise.resolve(null)"
+    );
+    // 仅关闭当前官方宠物开关的读取，不改写账号配置或本机运行时的功能状态。
+    patched = patched.replace(
+      /[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*,"(?:1655510532|998088620)"\)/g,
+      "false"
+    );
+    return patched;
+  }
+
   function officialAssetHasPatchCandidate(reqPath, data, req) {
     const loopback = isLoopbackHostHeader(req && req.headers && req.headers.host);
+    const hasPetCandidate = data.includes(".customAvatars.load") || data.includes('"1655510532"') || data.includes('"998088620"');
+    // 新版 async 脚本仅启用本次确认过的宠物适配，不顺带激活旧版文本补丁。
+    if (patchedOfficialAssetName(reqPath).startsWith("async/")) return !loopback && hasPetCandidate;
     return (
       /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath) ||
       data.includes(APPLICATION_MENU_TOKEN) ||
       data.includes(APP_SERVER_REQUEST_CLIENT_DISPATCH_ERROR) ||
       (!loopback &&
-        (data.includes(OPEN_IN_FOLDER_LOCALE_TOKEN) ||
+        (hasPetCandidate ||
+          data.includes(OPEN_IN_FOLDER_LOCALE_TOKEN) ||
           (data.includes("composerIconPath") && data.includes("read-file-binary"))))
     );
   }
@@ -1532,12 +1553,17 @@ ${pluginGatewayStateBootstrapScript()}
     const isHistorySignalsChunk = /\/app-server-manager-signals-[^/]+\.js$/.test(reqPath);
     // 绝大多数官方 chunk 已在候选检查中直接返回；只有命中的少量资源才进行 UTF-8 文本改写。
     const source = data.toString("utf-8");
+    if (patchedOfficialAssetName(reqPath).startsWith("async/")) {
+      const remote = patchRemotePetResources(source);
+      return remote === source ? data : Buffer.from(remote, "utf-8");
+    }
     let patched = isHistorySignalsChunk
       ? patchHistorySignalsCompatible(source)
       : source;
     patched = patchApplicationMenuCompatible(patched);
     patched = patchRequestSchedulingCompatible(patched);
     if (!loopback) {
+      patched = patchRemotePetResources(patched);
       patched = patchPluginImageCompatible(patched);
       patched = patchOpenInFolderLocaleCompatible(patched, options.downloadMessage || downloadFileMessage());
     }
@@ -1589,12 +1615,12 @@ ${pluginGatewayStateBootstrapScript()}
         return "private, no-cache, must-revalidate";
       }
       /**
-       * patched JS 的相对动态导入会让 CSS、字体和图片也落到当前 patched 命名空间；
+       * patched JS 的相对动态导入会让 CSS、字体、图片和音频也落到当前 patched 命名空间；
        * 这些文件不做响应期改写，只要文件名含 Vite content hash，就能和未改写 JS 一样安全长缓存。
        */
       if (
         reqPath.startsWith(PATCHED_OFFICIAL_PREFIX) &&
-        /-[A-Za-z0-9_-]{8}\.(?:avif|css|gif|ico|jpe?g|js|png|svg|webp|woff2?)$/i.test(
+        /(?:-[A-Za-z0-9_-]{8}|\.[a-f0-9]{8,64}|(?:^|\/)[a-f0-9]{12,64})\.(?:avif|css|gif|ico|jpe?g|js|png|svg|wav|webp|woff2?)$/i.test(
           patchedOfficialAssetName(reqPath)
         )
       ) {
