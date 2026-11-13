@@ -82,6 +82,7 @@
   "web.connection.authRequired": "Please sign in again. Keep any unconfirmed input.",
   "web.connection.unrecoverable": "Unable to restore the connection. Check your unsent draft before reloading the chat.",
   "web.connection.refresh": "Reload page",
+  "web.connection.signIn": "Sign in again",
   "web.auth.passwordLabel": "Access password",
   "web.auth.passwordPlaceholder": "Enter password",
   "web.auth.enter": "Enter",

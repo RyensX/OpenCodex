@@ -2037,7 +2037,7 @@
 
   // 与认证页共用网关注入的 locale/messages，不另按浏览器语言推断。
   function showRpcStatus(text, mode = "connecting") {
-    const stopped = mode === "stopped";
+    const stopped = mode === "stopped" || mode === "auth";
     scheduler.clearTimeout(rpcStatusRenderTimer);
     rpcStatusRenderTimer = null;
     if ((wsReady && !stopped) || (rpcStopped && !stopped)) return;
@@ -2087,9 +2087,12 @@
     if (mode === "waiting" || stopped) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = t(stopped ? "web.connection.refresh" : "web.connection.retryNow");
+      button.textContent = t(mode === "auth" ? "web.connection.signIn" : stopped ? "web.connection.refresh" : "web.connection.retryNow");
       button.style.cssText = "flex-shrink:0;border:1px solid var(--color-border-default,ButtonBorder);border-radius:8px;background:var(--color-background-secondary,ButtonFace);color:var(--color-text-primary,ButtonText);padding:3px 10px;font:inherit;cursor:pointer";
-      button.onclick = stopped ? () => w.location.reload() : retryRpcConnectionNow;
+      button.onclick = stopped ? () => {
+        if (mode === "auth") forceGatewayLoginOnNextBoot();
+        w.location.reload();
+      } : retryRpcConnectionNow;
       rpcStatusElement.append(button);
     }
     // 提交保护由事件和传输层负责；提示条不阻挡阅读、滚动和编辑草稿。
@@ -2107,13 +2110,22 @@
     scheduler.clearTimeout(rpcConnectTimer); scheduler.clearTimeout(rpcProbeTimer);
     scheduler.clearTimeout(rpcAckTimer); cancelScheduledReconnect();
     rpcPending.clear(); rpcBytes = 0;
+    if (reason === "auth_required") {
+      // 等用户点击登录再刷新，保留本地端口，避免端口终止通知触发官方界面重新初始化。
+      scheduler.clearTimeout(rpcFlushTimer);
+      const socket = ws;
+      ws = null;
+      try { socket?.close(); } catch {}
+      showRpcStatus(t("web.connection.authRequired"), "auth");
+      return;
+    }
     rejectPendingGatewayIpc(new Error("RPC session ended"));
     for (const state of [...appHostPortRelays.values()]) {
       try { state.port.postMessage(null); } catch {}
       closeAppHostRelay(state, reason, false); finalizeAppHostRelay(state);
     }
     try { ws?.close(); } catch {}
-    showRpcStatus(reason === "superseded" ? t("web.connection.superseded") : reason === "auth_required" ? t("web.connection.authRequired") : t("web.connection.unrecoverable"), "stopped");
+    showRpcStatus(reason === "superseded" ? t("web.connection.superseded") : t("web.connection.unrecoverable"), "stopped");
   }
   function acceptRpcAck(ack) {
     if (!Number.isSafeInteger(ack) || ack < 0 || ack > rpcSent) throw new Error("Invalid RPC acknowledgement");
@@ -3763,6 +3775,39 @@
   /** 建立到 gateway 的 WebSocket，接收 app-server/业务广播事件。 */
   async function connect() {
     if (rpcStopped || rpcInitializing) return;
+    if (ws && (ws.readyState === w.WebSocket.CONNECTING || ws.readyState === w.WebSocket.OPEN)) return;
+    if (rpcPage) {
+      // 旧页面重连前校验认证，识别网关重启后失效的凭据，避免握手被拒后无限重试。
+      rpcInitializing = true;
+      showRpcStatus(t("web.connection.recovering"));
+      const controller = new AbortController();
+      const timeout = scheduler.setTimeout(() => controller.abort(), 10000);
+      try {
+        const response = await w.fetch("/api/auth/status", {
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: gatewayAuthHeaders({}),
+          signal: controller.signal,
+        });
+        if (rpcStopped) return;
+        if (response.status === 401) { stopRpcRecovery("auth_required"); return; }
+        if (!response.ok) throw new Error("Authentication check failed");
+        const auth = await response.json();
+        if (rpcStopped) return;
+        if (auth.authRequired === true && auth.authenticated === false) {
+          stopRpcRecovery("auth_required");
+          return;
+        }
+        if (auth.authenticated !== true && auth.authRequired !== false) throw new Error("Invalid authentication status");
+      } catch {
+        // 网络不可达时保留当前会话，由退避计时继续尝试。
+        scheduleReconnect();
+        return;
+      } finally {
+        scheduler.clearTimeout(timeout);
+        rpcInitializing = false;
+      }
+    }
     if (!rpcPage) {
       rpcInitializing = true; showRpcStatus(t("web.connection.connecting"));
       const controller = new AbortController();
