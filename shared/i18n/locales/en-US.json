@@ -76,6 +76,8 @@
   "web.status.checkingAuth": "Checking access...",
   "web.connection.connecting": "Connecting…",
   "web.connection.recovering": "Reconnecting…",
+  "web.connection.retryIn": "Retrying the connection in {seconds}s",
+  "web.connection.retryNow": "Retry now",
   "web.connection.superseded": "Another page has taken over this session",
   "web.connection.authRequired": "Please sign in again. Keep any unconfirmed input.",
   "web.connection.unrecoverable": "Unable to restore the connection. Check your unsent draft before reloading the chat.",

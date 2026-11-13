@@ -475,6 +475,7 @@
   const pendingGatewayIpc = new Map();
   let gatewayIpcSequence = 0;
   let reconnectTimer = null;
+  let reconnectCountdownTimer = null;
   let reconnectDelay = 500;
   let reconnectDeferredUntilVisible = false;
   const bridgeStartedAtMs = Date.now();
@@ -2029,12 +2030,25 @@
   let rpcFlushTimer = null;
   let rpcSentThrough = 0;
   let rpcStatusElement = null;
+  let rpcStatusLabel = null;
+  let rpcStatusMode = null;
+  let rpcStatusRenderTimer = null;
   const rpcByteLength = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 
   // 与认证页共用网关注入的 locale/messages，不另按浏览器语言推断。
-  function showRpcStatus(text, stopped = false) {
+  function showRpcStatus(text, mode = "connecting") {
+    const stopped = mode === "stopped";
+    scheduler.clearTimeout(rpcStatusRenderTimer);
+    rpcStatusRenderTimer = null;
     if ((wsReady && !stopped) || (rpcStopped && !stopped)) return;
-    if (!document.body) { scheduler.setTimeout(() => showRpcStatus(text, stopped), 50); return; }
+    if (!document.body) {
+      rpcStatusRenderTimer = scheduler.setTimeout(() => showRpcStatus(text, mode), 50);
+      return;
+    }
+    if (rpcStatusMode === mode && rpcStatusLabel) {
+      rpcStatusLabel.textContent = text;
+      return;
+    }
     if (!rpcStatusElement) {
       rpcStatusElement = document.createElement("div");
       rpcStatusElement.setAttribute("role", "status");
@@ -2045,7 +2059,8 @@
       document.body.appendChild(rpcStatusElement);
     }
     rpcStatusElement.replaceChildren();
-    if (!stopped) {
+    rpcStatusMode = mode;
+    if (mode === "connecting") {
       // 指示器跟随文字颜色；减少动态效果时保留静态圆环，不影响状态朗读。
       const style = document.createElement("style");
       style.textContent = `
@@ -2066,24 +2081,31 @@
     }
     const label = document.createElement("span");
     label.style.cssText = "min-width:0;overflow-wrap:anywhere";
+    rpcStatusLabel = label;
     label.textContent = text; rpcStatusElement.append(label);
-    // 自动连接期间只展示状态，只有恢复终止、需要用户接管时才显示操作。
-    if (stopped) {
+    // 等待时可跳过退避，恢复终止后则由用户决定是否刷新。
+    if (mode === "waiting" || stopped) {
       const button = document.createElement("button");
-      button.textContent = t("web.connection.refresh");
+      button.type = "button";
+      button.textContent = t(stopped ? "web.connection.refresh" : "web.connection.retryNow");
       button.style.cssText = "flex-shrink:0;border:1px solid var(--color-border-default,ButtonBorder);border-radius:8px;background:var(--color-background-secondary,ButtonFace);color:var(--color-text-primary,ButtonText);padding:3px 10px;font:inherit;cursor:pointer";
-      button.onclick = () => w.location.reload();
+      button.onclick = stopped ? () => w.location.reload() : retryRpcConnectionNow;
       rpcStatusElement.append(button);
     }
     // 提交保护由事件和传输层负责；提示条不阻挡阅读、滚动和编辑草稿。
   }
-  function hideRpcStatus() { rpcStatusElement?.remove(); rpcStatusElement = null; }
+  function hideRpcStatus() {
+    scheduler.clearTimeout(rpcStatusRenderTimer);
+    rpcStatusRenderTimer = null;
+    rpcStatusElement?.remove();
+    rpcStatusElement = rpcStatusLabel = rpcStatusMode = null;
+  }
   function stopRpcRecovery(reason) {
     if (rpcStopped) return;
     console.warn("[codex-web] RPC session stopped", JSON.stringify({ reason, pendingFrames: rpcPending.size, pendingBytes: rpcBytes, sent: rpcSent, received: rpcReceived, acked: rpcAcked, sentThrough: rpcSentThrough }));
     rpcStopped = true; wsReady = false;
     scheduler.clearTimeout(rpcConnectTimer); scheduler.clearTimeout(rpcProbeTimer);
-    scheduler.clearTimeout(rpcAckTimer); scheduler.clearTimeout(reconnectTimer); reconnectTimer = null;
+    scheduler.clearTimeout(rpcAckTimer); cancelScheduledReconnect();
     rpcPending.clear(); rpcBytes = 0;
     rejectPendingGatewayIpc(new Error("RPC session ended"));
     for (const state of [...appHostPortRelays.values()]) {
@@ -2091,7 +2113,7 @@
       closeAppHostRelay(state, reason, false); finalizeAppHostRelay(state);
     }
     try { ws?.close(); } catch {}
-    showRpcStatus(reason === "superseded" ? t("web.connection.superseded") : reason === "auth_required" ? t("web.connection.authRequired") : t("web.connection.unrecoverable"), true);
+    showRpcStatus(reason === "superseded" ? t("web.connection.superseded") : reason === "auth_required" ? t("web.connection.authRequired") : t("web.connection.unrecoverable"), "stopped");
   }
   function acceptRpcAck(ack) {
     if (!Number.isSafeInteger(ack) || ack < 0 || ack > rpcSent) throw new Error("Invalid RPC acknowledgement");
@@ -2171,7 +2193,7 @@
   function checkRpcConnection() {
     if (rpcStopped || document.visibilityState === "hidden" || rpcProbeNonce || Date.now() - rpcLastProbeAt < 1000) return;
     rpcLastProbeAt = Date.now();
-    if (!ws || ws.readyState === w.WebSocket.CLOSED) { scheduler.clearTimeout(reconnectTimer); reconnectTimer = null; void connect(); return; }
+    if (!ws || ws.readyState === w.WebSocket.CLOSED) { retryRpcConnectionNow(); return; }
     if (!wsReady || ws.readyState !== w.WebSocket.OPEN) return;
     const socket = ws;
     rpcProbeNonce = crypto.randomUUID();
@@ -2179,7 +2201,7 @@
     rpcProbeTimer = scheduler.setTimeout(() => {
       rpcProbeNonce = null;
       if (ws !== socket) return;
-      wsReady = false; ws = null; socket.close(); showRpcStatus(t("web.connection.recovering")); scheduleReconnect();
+      wsReady = false; ws = null; socket.close(); scheduleReconnect();
     }, 10000);
   }
 
@@ -3985,7 +4007,6 @@
       if (ws === socket) {
         wsReady = false;
         scheduler.clearTimeout(rpcConnectTimer); scheduler.clearTimeout(rpcProbeTimer); rpcProbeNonce = null;
-        showRpcStatus(t("web.connection.recovering"));
         // 保留本页 MessagePort 和未确认帧，服务端决定是否仍可恢复原会话。
         if (typeof socket.__opencodexReliableSend !== "function") {
           for (const state of appHostPortRelays.values()) state.connected = false;
@@ -4013,35 +4034,72 @@
     });
   }
 
+  function cancelScheduledReconnect() {
+    scheduler.clearTimeout(reconnectTimer);
+    scheduler.clearTimeout(reconnectCountdownTimer);
+    reconnectTimer = reconnectCountdownTimer = null;
+  }
+
+  // 手动重试和切回前台都跳过同一轮等待；connect 自身会避免重复握手。
+  function retryRpcConnectionNow() {
+    if (rpcStopped || document.visibilityState === "hidden") return;
+    cancelScheduledReconnect();
+    reconnectDeferredUntilVisible = false;
+    void connect();
+  }
+
   /** WebSocket 断开后的指数退避重连。 */
   function scheduleReconnect() {
     if (rpcStopped || reconnectTimer) return;
     if (document.visibilityState === "hidden") {
       reconnectDeferredUntilVisible = true;
+      hideRpcStatus();
       return;
     }
     reconnectDeferredUntilVisible = false;
+    const delay = Math.round(reconnectDelay * (0.8 + Math.random() * 0.4));
+    const retryAt = w.performance.now() + delay;
     clientDiagnostic("ws-reconnect-scheduled", {
-      elapsedMs: reconnectDelay,
+      elapsedMs: delay,
       wsReady,
       wsState: websocketStateName(ws),
     });
     reconnectTimer = scheduler.setTimeout(() => {
       reconnectTimer = null;
       reconnectDelay = Math.min(reconnectDelay * 2, 5000);
-      connect();
-    }, reconnectDelay * (0.8 + Math.random() * 0.4));
+      if (document.visibilityState === "hidden") {
+        cancelScheduledReconnect();
+        reconnectDeferredUntilVisible = true;
+        hideRpcStatus();
+        return;
+      }
+      retryRpcConnectionNow();
+    }, delay);
+
+    // 倒计时展示含抖动的实际截止时间，定时器延迟执行也不会累积显示误差。
+    function updateCountdown() {
+      const remaining = retryAt - w.performance.now();
+      if (remaining <= 0) return;
+      const seconds = Math.ceil(remaining / 1000);
+      showRpcStatus(t("web.connection.retryIn", { seconds }), "waiting");
+      if (seconds > 1) {
+        reconnectCountdownTimer = scheduler.setTimeout(updateCountdown, Math.ceil(remaining - (seconds - 1) * 1000));
+      }
+    }
+    updateCountdown();
   }
 
   function handleReconnectVisibilityChange() {
     if (document.visibilityState === "hidden") {
-      if (reconnectTimer) scheduler.clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-      if (!ws || ws.readyState === w.WebSocket.CLOSED) reconnectDeferredUntilVisible = true;
+      if (reconnectTimer || (!rpcStopped && (!ws || ws.readyState === w.WebSocket.CLOSED))) {
+        cancelScheduledReconnect();
+        reconnectDeferredUntilVisible = true;
+        hideRpcStatus();
+      }
       return;
     }
-    if (reconnectDeferredUntilVisible || !ws || ws.readyState === w.WebSocket.CLOSED) {
-      scheduler.clearTimeout(reconnectTimer); reconnectTimer = null; void connect();
+    if (reconnectTimer || reconnectDeferredUntilVisible || !ws || ws.readyState === w.WebSocket.CLOSED) {
+      retryRpcConnectionNow();
     } else checkRpcConnection();
   }
 
@@ -4081,13 +4139,18 @@
   adapterHost.events.observe({ key: {}, target: document, type: "click", capture: true, callback: blockDisconnectedSubmit });
   adapterHost.events.observe({ key: {}, target: document, type: "submit", capture: true, callback: blockDisconnectedSubmit });
   adapterHost.events.observe({ key: {}, target: document, type: "keydown", capture: true, callback: (event) => {
-    if (event.key === "Enter" && (!wsReady || rpcStopped) && !rpcStatusElement?.contains(event.target)) { event.preventDefault(); event.stopImmediatePropagation(); checkRpcConnection(); }
+    if (rpcStatusElement?.contains(event.target)) return;
+    if (event.key === "Enter" && (!wsReady || rpcStopped)) { event.preventDefault(); event.stopImmediatePropagation(); checkRpcConnection(); }
     else if (event.key === "Enter" && Date.now() - rpcLastProbeAt > 30000) checkRpcConnection();
   } });
-  adapterHost.events.observe({ key: {}, target: document, type: "pointerdown", capture: true, callback: () => { if (!wsReady) checkRpcConnection(); } });
+  adapterHost.events.observe({ key: {}, target: document, type: "pointerdown", capture: true, callback: (event) => {
+    // 提示条按钮自行处理点击，避免在 click 前重绘并移除该按钮。
+    if (!wsReady && !rpcStatusElement?.contains(event.target)) checkRpcConnection();
+  } });
   modificationScope?.own?.(() => {
     rpcStopped = true;
-    for (const timer of [rpcConnectTimer, rpcProbeTimer, rpcAckTimer, rpcFlushTimer, reconnectTimer]) scheduler.clearTimeout(timer);
+    for (const timer of [rpcConnectTimer, rpcProbeTimer, rpcAckTimer, rpcFlushTimer]) scheduler.clearTimeout(timer);
+    cancelScheduledReconnect();
     rpcPending.clear(); rpcBytes = 0; hideRpcStatus();
   });
   connect();
