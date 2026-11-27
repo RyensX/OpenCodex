@@ -154,6 +154,7 @@ OpenCodex本身不提供远程访问服务，如果需要在其他设备中远�
 | `CODEX_WEB_OFFICIAL_AUTO_SCAN_UPGRADE` | `1` | 控制是否在启动时自动扫描官方 Codex 运行时更新；设为 `0` 后优先复用现有缓存，仅在缓存缺失或不可用时扫描。 |
 | `CODEX_WEB_OFFICIAL_USER_DATA_DIR` | `.data/official-user-data` | 指定官方 Electron profile 隔离目录。 |
 | `CODEX_WEB_OFFICIAL_TMPDIR` / `CODEX_WEB_OFFICIAL_TMP_DIR` | 自动生成 | 指定官方 hidden runtime 的临时目录，用于隔离官方 IPC socket。 |
+| `OPENCODEX_TRUSTED_PROXIES` | 空 | 可信反代 IP 或 IPv4 CIDR，逗号/空格分隔；仅这些来源的 `x-forwarded-host` / `x-forwarded-proto` 会被信任。 |
 | `CODEX_WEB_REPORTS_DIR` | `.data/reports` | gateway 诊断报告输出目录。 |
 | `CODEX_WEB_WORKSPACE_ROOTS` | 空 | 初始 workspace roots，多个路径用逗号分隔。 |
 | `CODEX_HOME` | `~/.codex` | Codex CLI / app-server 的配置和运行数据目录。 |
