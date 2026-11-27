@@ -155,6 +155,7 @@ OpenCodex本身不提供远程访问服务，如果需要在其他设备中远�
 | `CODEX_WEB_OFFICIAL_USER_DATA_DIR` | `.data/official-user-data` | 指定官方 Electron profile 隔离目录。 |
 | `CODEX_WEB_OFFICIAL_TMPDIR` / `CODEX_WEB_OFFICIAL_TMP_DIR` | 自动生成 | 指定官方 hidden runtime 的临时目录，用于隔离官方 IPC socket。 |
 | `OPENCODEX_TRUSTED_PROXIES` | 空 | 可信反代 IP 或 IPv4 CIDR，逗号/空格分隔；仅这些来源的 `x-forwarded-host` / `x-forwarded-proto` 会被信任。 |
+| `OPENCODEX_THREAD_ITEMS_PAGE_LIMIT` | `20` | 长会话每次加载的 item 数；网关私有官方运行时缓存会按该值限制分页。 |
 | `CODEX_WEB_REPORTS_DIR` | `.data/reports` | gateway 诊断报告输出目录。 |
 | `CODEX_WEB_WORKSPACE_ROOTS` | 空 | 初始 workspace roots，多个路径用逗号分隔。 |
 | `CODEX_HOME` | `~/.codex` | Codex CLI / app-server 的配置和运行数据目录。 |

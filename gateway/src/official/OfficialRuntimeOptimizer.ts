@@ -10,6 +10,26 @@ const AVATAR_OVERLAY_MARKER = "`avatar-overlay`);supportsInputShape=";
 const MAC_PUSH_LOG_MARKER = "Failed to register macOS push notifications";
 const GIT_ORIGINS_LOG_MARKER = "[git-origins] worker-complete";
 const WORKTREE_SHELL_ENVIRONMENT_MARKER = '"worktree-shell-environment-config"';
+const THREAD_ITEM_LIMIT_MARKER = "getTurnItemLimit";
+const THREAD_ITEM_LIMIT_PATTERN =
+  /getTurnItemLimit\([^)]*\)\{let [A-Za-z_$][\w$]*=this\.client\.getConversation\([^)]*\);return [^{}]*\?\d+:1\/0\}/g;
+const TURN_PAGE_LIMIT_SOURCE = "limit:s?.limit??re.xp";
+const TURN_PAGE_LIMIT_OPTIMIZED = 'limit:s?.limit??(n.handle.cursor!=null&&(typeof n.handle.cursor==="string"?n.handle.cursor:JSON.stringify(n.handle.cursor)).includes(\'"includeAnchor":true\')?1:re.xp)';
+const ITEM_PAGE_DEFAULT_PATTERN = /async function oy\(e,t,r,n,i,s=\d+,a="desc"\)/g;
+const ITEM_LIMIT_DEFAULT_PATTERN = /let n=t\.limit\?\?\d+/g;
+const ITEM_PAGINATION_PAGE_PATTERN = /null!=c\?\d+:\d+/g;
+
+function threadItemPageLimit() {
+  return Math.max(1, Number(process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT) || 20);
+}
+
+function threadItemPatchStrings(limit) {
+  return {
+    itemPageDefault: `async function oy(e,t,r,n,i,s=${limit},a="desc")`,
+    itemLimitDefault: `let n=t.limit??${limit}`,
+    itemPaginationPage: `null!=c?${Math.max(1, limit - 2)}:${limit}`,
+  };
+}
 const GATEWAY_RUNTIME_ENV = "OPENCODEX_GATEWAY_HIDDEN_RUNTIME";
 const GIT_ORIGIN_CACHE_MARKER = "__opencodexGitOriginCache";
 const GIT_LOCAL_PREFILTER_MARKER = "__opencodexGitStatCache";
@@ -98,7 +118,8 @@ class OfficialRuntimeOptimizer {
       const hasMacPush = source.includes(MAC_PUSH_LOG_MARKER);
       const hasGitDiscovery = source.includes(GIT_ORIGINS_LOG_MARKER);
       const hasWorktreeShellEnvironment = source.includes(WORKTREE_SHELL_ENVIRONMENT_MARKER);
-      if (!hasNativePet && !hasMacPush && !hasGitDiscovery && !hasWorktreeShellEnvironment) continue;
+      const hasThreadItemLimit = source.includes(THREAD_ITEM_LIMIT_MARKER);
+      if (!hasNativePet && !hasMacPush && !hasGitDiscovery && !hasWorktreeShellEnvironment && !hasThreadItemLimit) continue;
 
       let optimized = source;
       const unsupportedParts = [];
@@ -264,6 +285,29 @@ class OfficialRuntimeOptimizer {
         });
       }
 
+      if (hasThreadItemLimit) {
+        const markerCount = matchCount(source, THREAD_ITEM_LIMIT_PATTERN);
+        const patched = this.patchThreadItemLimit(optimized);
+        const limit = threadItemPageLimit();
+        const expected = threadItemPatchStrings(limit);
+        const optimizedLimitMatches = patched.match(THREAD_ITEM_LIMIT_PATTERN) || [];
+        const itemDefaultsPatched =
+          patched.includes(expected.itemPageDefault) &&
+          patched.includes(expected.itemLimitDefault);
+        const itemPaginationPatched = patched.includes(expected.itemPaginationPage);
+        const turnPageLimitPatched =
+          source.includes(TURN_PAGE_LIMIT_OPTIMIZED) ||
+          (source.includes(TURN_PAGE_LIMIT_SOURCE) && patched.includes(TURN_PAGE_LIMIT_OPTIMIZED));
+        const supported = markerCount === 1 &&
+          optimizedLimitMatches.length >= markerCount &&
+          optimizedLimitMatches.every((match) => match.includes(`?${limit}:1/0}`)) &&
+          itemDefaultsPatched &&
+          itemPaginationPatched &&
+          turnPageLimitPatched;
+        if (supported) optimized = patched;
+        else unsupportedParts.push("thread-item-pagination");
+      }
+
       if (optimized !== source) {
         this.fileSystem.writeFile(filePath, optimized);
         patchedFileCount += 1;
@@ -384,6 +428,18 @@ class OfficialRuntimeOptimizer {
       );
       this.modificationCoordinator.useFallback(point, "Official behavior");
     } catch {}
+  }
+
+  private patchThreadItemLimit(source: string): string {
+    // 首次锚点页只取最新 1 轮；每轮与后台补页使用 OPENCODEX_THREAD_ITEMS_PAGE_LIMIT（默认 20），普通上拉仍取 5 轮。
+    const limit = threadItemPageLimit();
+    const expected = threadItemPatchStrings(limit);
+    return source
+      .replace(THREAD_ITEM_LIMIT_PATTERN, (match) => match.replace(/\?\d+:1\/0\}/, `?${limit}:1/0}`))
+      .replace(TURN_PAGE_LIMIT_SOURCE, TURN_PAGE_LIMIT_OPTIMIZED)
+      .replace(ITEM_PAGE_DEFAULT_PATTERN, expected.itemPageDefault)
+      .replace(ITEM_LIMIT_DEFAULT_PATTERN, expected.itemLimitDefault)
+      .replace(ITEM_PAGINATION_PAGE_PATTERN, expected.itemPaginationPage);
   }
 
   private patchNativePetFactory(source: string): string {
