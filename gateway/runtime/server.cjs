@@ -916,6 +916,18 @@ async function createGateway() {
       if (!res.headersSent) sendJson(res, 500, { ok: false, error: String(error.message || error) });
     });
   });
+  // 默认 keepAliveTimeout 只有 5 秒，公网/反向代理链路上很容易被中途设备先行回收；
+  // 这里放宽，并保持 headersTimeout 大于 keepAliveTimeout 以避免竞争条件。
+  const KEEP_ALIVE_TIMEOUT_MS = Math.max(
+    5_000,
+    Number(process.env.OPENCODEX_KEEP_ALIVE_TIMEOUT_MS || 75_000)
+  );
+  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
+  server.headersTimeout = KEEP_ALIVE_TIMEOUT_MS + 10_000;
+  server.requestTimeout = Math.max(
+    300_000,
+    Number(process.env.OPENCODEX_REQUEST_TIMEOUT_MS || 0) || server.requestTimeout || 300_000
+  );
 
   // 注入 app-host relay 工厂：WS hub 只管理浏览器连接，真正的官方 MessagePort 仍由 official-runtime 创建。
   const webSocketHub = createWsHub(server, {

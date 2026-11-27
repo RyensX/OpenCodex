@@ -2243,29 +2243,54 @@ async function invokeOfficialIpc(channel, args = [], context = {}) {
   throw new Error(`No official Electron IPC handler for ${channel}`);
 }
 
-async function connectOfficialAppHostPort(port, context = {}) {
+async function connectOfficialAppHostPort(port, context = {}, dependencies = {}) {
   /**
    * 官方新版 renderer 启动时不再只走 electronBridge.invoke，而是通过 MessageChannel
    * 建立 app-host RPC。这里只补齐官方 preload 的转发动作，把 MessagePort 原样交给
    * 官方 main listener，服务对象和 RPC 协议仍完全由官方 bundle 负责。
    */
-  await waitForOfficialBridgeReady();
+  const ipc = dependencies.officialIpc || officialIpc;
+  const waitForReady = dependencies.waitForReady || waitForOfficialBridgeReady;
+  const createEvent = dependencies.createEvent || createOfficialIpcEvent;
+  await waitForReady();
   if (context.service === "git") {
-    const handler = officialIpc.handlers.get("codex_desktop:connect-git-worker");
+    const handler = ipc.handlers.get("codex_desktop:connect-git-worker");
     if (!handler) throw new Error("Official Git worker IPC is unavailable");
     return connectGitWorkerRelay({
-      sender: officialIpc.hiddenWebContents,
+      sender: ipc.hiddenWebContents,
       port,
       requestId: context.portId,
-      invoke: (sender, requestId) => handler(createOfficialIpcEvent({ ...context, sender }), requestId),
+      invoke: (sender, requestId) => handler(createEvent({ ...context, sender }), requestId),
     });
   }
-  const listeners = officialIpc.listeners.get("codex_desktop:connect-app-host");
+  if (context.service === "app-server-manager") {
+    // 新版官方 renderer 用独立端口直连 app-server manager；按 preload 协议交给官方 listener 校验并绑定。
+    const channel = "codex_desktop:connect-app-server-manager";
+    const listeners = ipc.listeners.get(channel);
+    const validGeneration =
+      (typeof context.generation === "string" && context.generation.length > 0 && context.generation.length <= 160) ||
+      (Number.isSafeInteger(context.generation) && context.generation >= 0);
+    if (typeof context.hostId !== "string" || !context.hostId.trim() || !validGeneration) {
+      throw new Error("Invalid app-server manager binding");
+    }
+    if (!listeners || listeners.size === 0) {
+      throw new Error("No official Electron IPC listener for codex_desktop:connect-app-server-manager");
+    }
+    const event = createEvent({ ...context, ports: [port] });
+    let cleanup = true;
+    for (const listener of [...listeners]) {
+      const result = await listener(event, { hostId: context.hostId, generation: context.generation });
+      if (typeof result === "function") cleanup = result;
+    }
+    recordRuntimeCompatibilityHit(gatewayPointRefs.appHostRelay);
+    return cleanup;
+  }
+  const listeners = ipc.listeners.get("codex_desktop:connect-app-host");
   if (!listeners || listeners.size === 0) {
     throw new Error("No official Electron IPC listener for codex_desktop:connect-app-host");
   }
   // 等价于官方 preload 的 ipcRenderer.postMessage(channel, undefined, [port])。
-  const event = createOfficialIpcEvent({ ...context, ports: [port] });
+  const event = createEvent({ ...context, ports: [port] });
   for (const listener of [...listeners]) {
     await listener(event);
   }
@@ -2290,7 +2315,7 @@ function deliverOfficialAppHostMessage(event, onMessage, close) {
  * 这里不解析 app-host RPC 内容，只保证旧字符串帧、新结构化值和关闭信号按顺序穿过边界。
  */
 function createOfficialAppHostRelay(options = {}) {
-  const { clientId = "", onClose, onError, onMessage, portId = "", remoteAddress = "", service = "app-host" } = options;
+  const { clientId = "", onClose, onError, onMessage, portId = "", remoteAddress = "", service = "app-host", hostId = "", generation } = options;
   if (typeof electron.MessageChannelMain !== "function") {
     throw new Error("Electron MessageChannelMain is unavailable");
   }
@@ -2335,7 +2360,7 @@ function createOfficialAppHostRelay(options = {}) {
   port2.on("close", () => close("official_port_closed"));
   port2.start();
 
-  connectOfficialAppHostPort(port1, { clientId, portId, remoteAddress, service }).then(
+  connectOfficialAppHostPort(port1, { clientId, portId, remoteAddress, service, hostId, generation }).then(
     (cleanup) => {
       disconnect = typeof cleanup === "function" ? cleanup : null;
       if (closed) disconnect?.();
@@ -2344,6 +2369,8 @@ function createOfficialAppHostRelay(options = {}) {
         diagnosticLog("official-app-host", "connected", {
           clientId: shortId(clientId),
           portId: shortId(portId),
+          service,
+          hostId: shortId(hostId),
         });
       }
     },
@@ -2352,6 +2379,8 @@ function createOfficialAppHostRelay(options = {}) {
         clientId: shortId(clientId),
         error: error instanceof Error ? error.message : String(error),
         portId: shortId(portId),
+        service,
+        hostId: shortId(hostId),
       });
       try {
         onError && onError(error);
@@ -2740,6 +2769,7 @@ module.exports = {
     appServerHookHealth,
     compactOfficialAppCatalogPayload,
     configureOfficialWebContentsListenerBudget,
+    connectOfficialAppHostPort,
     deliverOfficialAppHostMessage,
     fileManagerPathFromSpawn,
     normalizeInitialSidebarBootstrap,

@@ -109,6 +109,105 @@ test("modern push retry registration is disabled only for the hidden runtime", (
   assert.equal(optimizer.optimize(root).patchedFileCount, 0);
 });
 
+test("remote thread item pages are capped at 20 in the private runtime cache", (t) => {
+  const root = temporaryDirectory(t);
+  const file = path.join(root, ".vite", "build", "main.js");
+  const source = "class Fixture{constructor(client){this.client=client}getTurnItemLimit(e,t){let r=this.client.getConversation(e);return t&&(!this.client.isCloudHost&&\"local\"!==this.client.getHostId()||of(r?.threadStartKind,r?.threadSource))?100:1/0}}const constants={mO:\"App server does not support bounded history reads\",t1:3e4,xp:5};async function oy(e,t,r,n,i,s=100,a=\"desc\"){return s}async function og(e,t,r){let n=t.limit??100;return n}function page(c){return null!=c?98:100}function turns(s,n){return {limit:s?.limit??re.xp}}";
+  writeFile(file, source);
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+  const result = optimizer.optimize(root);
+  assert.deepEqual(result.unsupportedFiles, []);
+  const patched = fs.readFileSync(file, "utf8");
+  assert.match(patched, /\?20:1\/0\}/);
+  assert.match(patched, /mO:"App server does not support bounded history reads",t1:3e4,xp:5/);
+  assert.doesNotMatch(patched, /mO:"App server does not support bounded history reads",t1:3e4,xp:1/);
+  assert.match(patched, /n\.handle\.cursor!=null&&\(typeof n\.handle\.cursor==="string"\?n\.handle\.cursor:JSON\.stringify\(n\.handle\.cursor\)\)\.includes\('"includeAnchor":true'\)\?1:re\.xp/);
+  assert.match(patched, /async function oy\(e,t,r,n,i,s=20,a="desc"\)/);
+  assert.match(patched, /let n=t\.limit\?\?20/);
+  assert.match(patched, /null!=c\?18:20/);
+  const Fixture = new Function("of", `${patched};return Fixture`)(() => false);
+  const client = (hostId, isCloudHost = false) => ({
+    isCloudHost,
+    getHostId: () => hostId,
+    getConversation: () => ({}),
+  });
+  assert.equal(new Fixture(client("remote")).getTurnItemLimit("thread", true), 20);
+  assert.equal(new Fixture(client("local")).getTurnItemLimit("thread", true), Infinity);
+  assert.equal(new Fixture(client("remote", true)).getTurnItemLimit("thread", true), Infinity);
+  const turns = new Function("re", `${patched};return turns`)({ xp: 5 });
+  assert.equal(turns(null, { handle: { cursor: '{"includeAnchor":true}' } }).limit, 1);
+  assert.equal(turns(null, { handle: { cursor: '{"includeAnchor":false}' } }).limit, 5);
+  assert.equal(turns(null, { handle: { cursor: { includeAnchor: true } } }).limit, 1);
+  assert.equal(turns(null, { handle: { cursor: null } }).limit, 5);
+  assert.equal(optimizer.optimize(root).patchedFileCount, 0);
+});
+
+test("changed thread item limit layout is reported without unsafe rewriting", (t) => {
+  const root = temporaryDirectory(t);
+  const file = path.join(root, ".vite", "build", "main.js");
+  const source = "class Fixture{getTurnItemLimit(){return 100}}";
+  writeFile(file, source);
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+  const result = optimizer.optimize(root);
+  assert.equal(fs.readFileSync(file, "utf8"), source);
+  assert.equal(result.unsupportedFiles.some((entry) => entry.includes("thread-item-pagination")), true);
+});
+
+test("uses the configured thread item page limit", (t) => {
+  const previous = process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT;
+  process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT = "30";
+  t.after(() => {
+    if (previous == null) delete process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT;
+    else process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT = previous;
+  });
+  const root = temporaryDirectory(t);
+  const file = path.join(root, ".vite", "build", "main.js");
+  const source = "class Fixture{constructor(client){this.client=client}getTurnItemLimit(e,t){let r=this.client.getConversation(e);return t&&(!this.client.isCloudHost&&\"local\"!==this.client.getHostId()||of(r?.threadStartKind,r?.threadSource))?100:1/0}}const constants={mO:\"App server does not support bounded history reads\",t1:3e4,xp:5};async function oy(e,t,r,n,i,s=100,a=\"desc\"){return s}async function og(e,t,r){let n=t.limit??100;return n}function page(c){return null!=c?98:100}function turns(s,n){return {limit:s?.limit??re.xp}}";
+  writeFile(file, source);
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+  const result = optimizer.optimize(root);
+  const patched = fs.readFileSync(file, "utf8");
+  assert.match(patched, /\?30:1\/0\}/);
+  assert.match(patched, /async function oy\(e,t,r,n,i,s=30,a="desc"\)/);
+  assert.match(patched, /let n=t\.limit\?\?30/);
+  assert.match(patched, /null!=c\?28:30/);
+  assert.deepEqual(result.unsupportedFiles, []);
+});
+
+test("reapplies a changed thread item limit to an optimized cache", (t) => {
+  const previous = process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT;
+  t.after(() => {
+    if (previous == null) delete process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT;
+    else process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT = previous;
+  });
+  const root = temporaryDirectory(t);
+  const file = path.join(root, ".vite", "build", "main.js");
+  const source = "class Fixture{constructor(client){this.client=client}getTurnItemLimit(e,t){let r=this.client.getConversation(e);return t&&(!this.client.isCloudHost&&\"local\"!==this.client.getHostId()||of(r?.threadStartKind,r?.threadSource))?100:1/0}}const constants={mO:\"App server does not support bounded history reads\",t1:3e4,xp:5};async function oy(e,t,r,n,i,s=100,a=\"desc\"){return s}async function og(e,t,r){let n=t.limit??100;return n}function page(c){return null!=c?98:100}function turns(s,n){return {limit:s?.limit??re.xp}}";
+  writeFile(file, source);
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+  delete process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT;
+  assert.deepEqual(optimizer.optimize(root).unsupportedFiles, []);
+  process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT = "30";
+  const result = optimizer.optimize(root);
+  const patched = fs.readFileSync(file, "utf8");
+  assert.match(patched, /\?30:1\/0\}/);
+  assert.match(patched, /async function oy\(e,t,r,n,i,s=30,a="desc"\)/);
+  assert.match(patched, /let n=t\.limit\?\?30/);
+  assert.match(patched, /null!=c\?28:30/);
+  assert.deepEqual(result.unsupportedFiles, []);
+});
+
+test("does not partially patch thread pagination when companion layouts change", (t) => {
+  const root = temporaryDirectory(t);
+  const file = path.join(root, ".vite", "build", "main.js");
+  const source = "class Fixture{getTurnItemLimit(e,t){let r=this.client.getConversation(e);return t&&(!this.client.isCloudHost&&\"local\"!==this.client.getHostId()||of(r?.threadStartKind,r?.threadSource))?100:1/0}}";
+  writeFile(file, source);
+  const optimizer = new OfficialRuntimeOptimizer({ fileSystem: new OfficialBundleFileSystem() });
+  const result = optimizer.optimize(root);
+  assert.equal(fs.readFileSync(file, "utf8"), source);
+  assert.equal(result.unsupportedFiles.some((entry) => entry.includes("thread-item-pagination")), true);
+});
+
 test("gateway compatibility service initializes from configured runtime paths", (t) => {
   const configuredPaths = hiddenRuntimeServerTest.gatewayCompatibilityPaths();
   assert.equal(path.isAbsolute(configuredPaths.runtimeDir), true);

@@ -122,6 +122,95 @@ test("recreates an app-host relay when the browser WebSocket reconnects", async 
   assert.equal(relays[1].messages[1].sentAt.getTime(), 4567);
 });
 
+test("limits thread item pages while preserving cursors and unrelated requests", () => {
+  // 初始页和上拉分页都收窄到 20 条，但不能修改原消息或影响其它 RPC。
+  const request = ["push", ["pipeline", 7, ["sendRequest"], ["thread/items/list", {
+    threadId: "thread-1",
+    turnId: "turn-1",
+    cursor: null,
+    limit: 100,
+    sortDirection: "desc",
+  }, { priority: "background" }]]];
+  const limited = __test.limitThreadItemsPage(request);
+  assert.notEqual(limited, request);
+  assert.equal(limited[1][3][1].limit, 20);
+  assert.equal(limited[1][3][1].cursor, null);
+  assert.equal(request[1][3][1].limit, 100);
+
+  const older = ["push", ["pipeline", 8, ["sendRequest"], ["thread/items/list", {
+    threadId: "thread-1",
+    turnId: "turn-1",
+    cursor: "next-page",
+    limit: 98,
+  }, {}]]];
+  const olderLimited = __test.limitThreadItemsPage(older);
+  assert.equal(olderLimited[1][3][1].limit, 20);
+  assert.equal(olderLimited[1][3][1].cursor, "next-page");
+
+  const modelRequest = ["push", ["pipeline", 9, ["sendRequest"], ["model/list", { limit: 100 }, {}]]];
+  assert.equal(__test.limitThreadItemsPage(modelRequest), modelRequest);
+});
+
+test("routes app-server manager ports with host binding and structured replies", async (t) => {
+  const server = http.createServer();
+  const relayOptions = [];
+  const sockets = [];
+  createWsHub(server, {
+    createAppHostRelay(options) {
+      relayOptions.push(options);
+      return {
+        close() {},
+        postMessage() { return true; },
+      };
+    },
+    handleNotificationEvent() {},
+    isAuthed: () => true,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    for (const socket of sockets) socket.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/ws`);
+  sockets.push(socket);
+  await waitForOpen(socket);
+  const clientId = "manager-client";
+  const portId = "manager-port";
+  socket.send(JSON.stringify({ type: "hello", clientId }));
+  await waitForMessage(socket, (message) => message.type === "hello-ack");
+  socket.send(JSON.stringify({
+    type: "app-host-connect",
+    clientId,
+    portId,
+    service: "app-server-manager",
+    hostId: "remote-test",
+    generation: "generation-1",
+  }));
+  await waitForMessage(socket, (message) => message.type === "app-host-port-connected" && message.portId === portId);
+  assert.equal(relayOptions.length, 1);
+  assert.equal(relayOptions[0].service, "app-server-manager");
+  assert.equal(relayOptions[0].hostId, "remote-test");
+  assert.equal(relayOptions[0].generation, "generation-1");
+
+  const response = { id: 7n, data: new Uint8Array([4, 5]) };
+  const replyWait = waitForMessage(socket, (message) => message.type === "app-host-port-message" && message.portId === portId);
+  relayOptions[0].onMessage(response);
+  const reply = await replyWait;
+  assert.deepEqual(appHostMessageCodec.decodeMessageData(reply), response);
+
+  socket.send(JSON.stringify({
+    type: "app-host-connect",
+    clientId,
+    portId: "invalid-manager-port",
+    service: "app-server-manager",
+    hostId: "remote-test",
+  }));
+  const rejected = await waitForMessage(socket, (message) => message.type === "app-host-port-error" && message.portId === "invalid-manager-port");
+  assert.match(rejected.error, /Invalid app-server manager binding/);
+  assert.equal(relayOptions.length, 1);
+});
+
 test("caps app-host relays per browser socket", async (t) => {
   const server = http.createServer();
   const relays = [];

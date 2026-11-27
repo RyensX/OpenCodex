@@ -1,11 +1,56 @@
 const crypto = require("crypto");
 const fs = require("fs");
+const net = require("net");
 const path = require("path");
 const COOKIE = "opencodex_browser";
 const positive = (name, fallback) => {
   const value = Number(process.env[name]);
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 };
+
+function normalizeIp(value) {
+  let text = String(value || "").trim().toLowerCase();
+  if (text.startsWith("[") && text.includes("]")) text = text.slice(1, text.indexOf("]"));
+  if (text.startsWith("::ffff:")) text = text.slice(7);
+  const zone = text.indexOf("%");
+  return zone >= 0 ? text.slice(0, zone) : text;
+}
+
+function ipv4ToInt(value) {
+  const parts = value.split(".");
+  if (parts.length !== 4) return null;
+  let result = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const octet = Number(part);
+    if (octet > 255) return null;
+    result = result * 256 + octet;
+  }
+  return result;
+}
+
+function matchesTrustedProxy(address, entry) {
+  const ip = normalizeIp(address);
+  const candidate = normalizeIp(entry);
+  if (net.isIP(ip) && net.isIP(candidate)) return ip === candidate;
+  const slash = candidate.indexOf("/");
+  if (slash < 0 || !net.isIPv4(ip)) return false;
+  const network = candidate.slice(0, slash);
+  const prefix = Number(candidate.slice(slash + 1));
+  if (!net.isIPv4(network) || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+  const ipInt = ipv4ToInt(ip);
+  const networkInt = ipv4ToInt(network);
+  if (ipInt == null || networkInt == null) return false;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return ((ipInt & mask) >>> 0) === ((networkInt & mask) >>> 0);
+}
+
+function isTrustedProxy(req, trustedProxies = process.env.OPENCODEX_TRUSTED_PROXIES || "") {
+  const address = normalizeIp(req?.socket?.remoteAddress);
+  if (!address) return false;
+  if (address === "::1" || address.startsWith("127.")) return true;
+  return String(trustedProxies).split(/[\s,]+/).filter(Boolean).some((entry) => matchesTrustedProxy(address, entry));
+}
 
 /** 页面身份、连接绑定和传输确认独立于官方 RPC；不解析或重新执行聊天请求。 */
 function createRecoverableSessions({ runtimeDir, isAuthed, deliver, dispose, log = () => {} }) {
@@ -17,6 +62,9 @@ function createRecoverableSessions({ runtimeDir, isAuthed, deliver, dispose, log
   const key = fs.readFileSync(keyPath);
   if (key.length !== 32) throw new Error("Invalid browser identity signing key");
   const sessions = new Map();
+  // cookie 在 iOS Safari/PWA 的 WS upgrade 上可能丢失；用登录 token 派生的 key 做备用绑定，
+  // attach 仍需 hello 里的 pageId/generation/credential 全对才可接管，不构成越权入口。
+  const bound = new Map();
   const ttl = positive("OPENCODEX_RPC_RETENTION_MS", 43200000);
   const limitBytes = positive("OPENCODEX_RPC_BUFFER_BYTES", 64 * 1024 * 1024);
   const limitFrames = positive("OPENCODEX_RPC_BUFFER_FRAMES", 10000);
@@ -30,6 +78,17 @@ function createRecoverableSessions({ runtimeDir, isAuthed, deliver, dispose, log
     if (!/^[a-f0-9]{64}$/.test(id || "") || !/^[a-f0-9]{64}$/.test(signature || "")) return null;
     return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(mac(id))) ? id : null;
   }
+  function tokenFrom(req) {
+    try {
+      const { authTokenFromRequest } = require("../http/auth.cjs");
+      const url = req.url ? new URL(req.url, "http://localhost") : null;
+      return String(authTokenFromRequest(req, url) || "").trim();
+    } catch { return ""; }
+  }
+  const bindKey = (req) => {
+    const token = tokenFrom(req);
+    return token ? crypto.createHmac("sha256", key).update(token).digest("hex") : "";
+  };
   function write(socket, message) {
     if (!socket || socket.readyState !== 1) return false;
     try {
@@ -42,6 +101,7 @@ function createRecoverableSessions({ runtimeDir, isAuthed, deliver, dispose, log
     session.closed = true;
     clearTimeout(session.timer); clearTimeout(session.ackTimer);
     if (sessions.get(session.browserId) === session) sessions.delete(session.browserId);
+    if (session.boundKey && bound.get(session.boundKey) === session) bound.delete(session.boundKey);
     totalBytes -= session.bytes; session.bytes = 0; session.out.clear();
     write(session.socket, { type: "rpc-reset", reason });
     try { session.socket?.close(4001, reason); } catch {}
@@ -86,8 +146,14 @@ function createRecoverableSessions({ runtimeDir, isAuthed, deliver, dispose, log
     // 初始化会接管旧页面，禁止跨站请求触发接管。
     if (req.headers["sec-fetch-site"] === "cross-site") return reply(403, { error: "Cross-site request rejected" });
     if (req.headers.origin) {
-      try { if (new URL(req.headers.origin).host !== req.headers.host) return reply(403, { error: "Origin mismatch" }); }
-      catch { return reply(403, { error: "Invalid origin" }); }
+      // 反代可能改写 Host；只有直连本机或显式可信代理的转发头才参与 Origin 校验，避免客户端伪造转发链绕过。
+      const forwardedHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim().toLowerCase();
+      const trustedProxy = isTrustedProxy(req);
+      try {
+        const originHost = new URL(req.headers.origin).host.toLowerCase();
+        const host = String(req.headers.host || "").toLowerCase();
+        if (originHost !== host && !(trustedProxy && forwardedHost && originHost === forwardedHost)) return reply(403, { error: "Origin mismatch" });
+      } catch { return reply(403, { error: "Invalid origin" }); }
     }
     const browserId = browser(req) || crypto.randomBytes(32).toString("hex");
     const previous = sessions.get(browserId);
@@ -100,14 +166,28 @@ function createRecoverableSessions({ runtimeDir, isAuthed, deliver, dispose, log
     };
     if (previous) expire(previous, "superseded");
     sessions.set(browserId, session); timer(session, 60000, "unclaimed");
-    const secure = req.socket.encrypted || String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
+    session.boundKey = bindKey(req);
+    if (session.boundKey) {
+      const priorBound = bound.get(session.boundKey);
+      if (priorBound && priorBound !== session && priorBound.browserId !== browserId) expire(priorBound, "superseded");
+      bound.set(session.boundKey, session);
+    }
+    const secure = req.socket.encrypted || (isTrustedProxy(req) && String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https");
     reply(200, { version: 1, pageId: session.id, generation: session.generation, credential: session.secret, retentionMs: ttl }, {
       "Set-Cookie": `${COOKIE}=${browserId}.${mac(browserId)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000${secure ? "; Secure" : ""}`,
     });
     log("rpc_session_created", { pageId: session.id.slice(0, 8) });
   }
   function attach(socket, req, hello) {
-    const session = sessions.get(browser(req));
+    let session = sessions.get(browser(req));
+    // WS upgrade 没带 opencodex_browser cookie 时（iOS 常见），回退到登录 token 绑定的同一 session。
+    if (!session) {
+      const key = bindKey(req);
+      session = key ? bound.get(key) : null;
+      if (session && !session.closed && !sessions.has(session.browserId)) sessions.set(session.browserId, session);
+      // initialize 阶段没带 token 时，attach 验证通过后补记绑定，后续重连不再依赖 cookie。
+      if (session && key && !session.boundKey) { session.boundKey = key; bound.set(key, session); }
+    }
     if (!session || session.id !== hello.pageId || session.generation !== hello.generation || session.secret !== hello.credential) {
       write(socket, { type: "rpc-reset", reason: session ? "superseded" : "expired" }); socket.close(4001, "session unavailable"); return false;
     }
@@ -172,4 +252,4 @@ function createRecoverableSessions({ runtimeDir, isAuthed, deliver, dispose, log
   function close() { for (const s of [...sessions.values()]) expire(s, "shutdown"); }
   return { initialize, attach, ready, message, detach, logout, close, validateHttp, fail: (socket) => { if (socket.__rpcSession?.socket === socket) expire(socket.__rpcSession, "invalid_frame"); } };
 }
-module.exports = { createRecoverableSessions };
+module.exports = { createRecoverableSessions, __test: { isTrustedProxy, matchesTrustedProxy, normalizeIp } };

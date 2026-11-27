@@ -501,6 +501,7 @@ module.exports = {
   AUTH_PASSWORD_HASH,
   authRefreshHeaders,
   authResultForRequest,
+  authTokenFromRequest,
   handleAuthLogin,
   handleAuthLogout,
   handleAuthStatus,
