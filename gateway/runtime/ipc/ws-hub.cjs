@@ -20,7 +20,6 @@ const WS_DEFLATE_THRESHOLD = Number(process.env.OPENCODEX_WS_DEFLATE_THRESHOLD |
 const WS_DEFLATE_CONCURRENCY = Number(process.env.OPENCODEX_WS_DEFLATE_CONCURRENCY || 4);
 const WS_DEFLATE_LEVEL = Number(process.env.OPENCODEX_WS_DEFLATE_LEVEL || 3);
 const WS_DEBUG_ENABLED = process.env.OPENCODEX_DEBUG_WS === "1";
-const OPENCODEX_WS_CONTROL_PROBE = process.env.OPENCODEX_THREAD_READ_PROBE === "1";
 const WS_MAX_CLIENTS = Math.max(1, Number(process.env.OPENCODEX_WS_MAX_CLIENTS) || 128);
 const WS_MAX_PAYLOAD_BYTES = Math.max(
   1024 * 1024,
@@ -991,7 +990,7 @@ function createWsHub(
     }
     if (message.type === "app-host-connect") return handleAppHostConnect(ws, req, message);
     if (message.type === "app-host-port-message") return handleAppHostPortMessage(ws, req, message);
-    if (OPENCODEX_WS_CONTROL_PROBE && String(message.type || "").includes("app-host")) {
+    if (WS_DEBUG_ENABLED && String(message.type || "").includes("app-host")) {
       diagnosticWarn("ws-hub", "app_host_control_missed", { type: String(message.type || "").slice(0, 40), clientId: shortId(ws.__codexWebClientId || ""), recoverable: !!ws.__recoverable });
     }
     return false;

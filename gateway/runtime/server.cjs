@@ -662,16 +662,6 @@ async function executeIpcInvoke(
     // IPC 上下文提取已经完成，命中统计失败不能改变后续官方调用。
   }
   const startedAtMs = Date.now();
-  if (THREAD_READ_PROBE_ENABLED) {
-    const probeSummary = ipcPayloadSummary(payload);
-    diagnosticLog("thread-read-probe", "ipc_invoke", {
-      channel,
-      method: probeSummary.method || "",
-      requestMethod: probeSummary.requestMethod || "",
-      payloadType: probeSummary.type || "",
-      clientId: shortId(clientId),
-    });
-  }
   const diagnosticBase = {
     ...ipcPayloadSummary(payload),
     argsCount: args.length,
@@ -846,61 +836,6 @@ function createGatewayCompatibilityService(paths = gatewayCompatibilityPaths()) 
   });
 }
 
-// OPENCODEX_THREAD_READ_PROBE=1 时记录 thread/read 请求与响应的结构摘要（不含正文），
-// 用于设计历史分页；默认关闭，不参与任何业务路径。
-const THREAD_READ_PROBE_ENABLED = process.env.OPENCODEX_THREAD_READ_PROBE === "1";
-const threadReadProbePending = new Map();
-function observeThreadReadProbe(frame) {
-  if (!THREAD_READ_PROBE_ENABLED || !frame || typeof frame !== "object") return;
-  try {
-    const { clientId, data, direction } = frame;
-    const queue = [];
-    const seen = new WeakSet();
-    const walk = (value, depth) => {
-      if (typeof value === "string" && value.length <= 4 * 1024 * 1024 && /^\s*[\[{]/.test(value) && value.includes("thread/")) {
-        try { value = JSON.parse(value); } catch { return; }
-      }
-      if (!value || typeof value !== "object" || depth > 4 || queue.length > 12 || seen.has(value)) return;
-      seen.add(value);
-      if (Array.isArray(value)) { for (let i = 0; i < Math.min(value.length, 12); i += 1) walk(value[i], depth + 1); return; }
-      queue.push(value);
-      for (const key of ["message", "request", "payload", "body", "data"]) if (value[key] && typeof value[key] !== "function") walk(value[key], depth + 1);
-    };
-    walk(data, 0);
-    for (const value of queue) {
-      const method = String(value.method || "");
-      if (!method.startsWith("thread/")) continue;
-      if (direction === "client" && value.id != null) {
-        threadReadProbePending.set(String(value.id), { method, at: Date.now(), paramKeys: Object.keys(value.params || {}).slice(0, 12) });
-        diagnosticLog("thread-read-probe", "request", { clientId: shortId(clientId), method, paramKeys: Object.keys(value.params || {}).slice(0, 12), id: String(value.id).slice(0, 12) });
-      } else if (direction === "server" && value.id == null && (value.result || value.error)) {
-        const shape = {};
-        const src = value.result || {};
-        for (const [k, v] of Object.entries(src)) {
-          if (Array.isArray(v)) shape[k] = `array(${v.length})`;
-          else if (v && typeof v === "object") shape[k] = typeof v.type === "string" ? `${v.type}:object` : "object";
-          else shape[k] = typeof v;
-        }
-        diagnosticLog("thread-read-probe", "response_shape", { clientId: shortId(clientId), shape, keys: Object.keys(src).slice(0, 20) });
-      } else if (direction === "server" && value.id != null && (value.result || value.error)) {
-        const pending = threadReadProbePending.get(String(value.id));
-        if (!pending || Date.now() - pending.at > 120000) continue;
-        threadReadProbePending.delete(String(value.id));
-        const shape = {};
-        const src = value.result || {};
-        for (const [k, v] of Object.entries(src)) {
-          if (Array.isArray(v)) shape[k] = `array(${v.length})`;
-          else if (v && typeof v === "object") shape[k] = typeof v.type === "string" ? `${v.type}:object` : "object";
-          else shape[k] = typeof v;
-        }
-        diagnosticLog("thread-read-probe", "response", { clientId: shortId(clientId), method: pending.method, id: String(value.id).slice(0, 12), shape, keys: Object.keys(src).slice(0, 24) });
-      }
-    }
-  } catch (error) {
-    diagnosticWarn("thread-read-probe", "probe_failed", { error: error instanceof Error ? error.message : String(error) });
-  }
-}
-
 async function createGateway() {
   /**
    * 启动顺序：
@@ -1014,7 +949,6 @@ async function createGateway() {
     isAuthed,
     observeAppHostFrame(frame) {
       pluginService.smartSchedulingPresentation?.observeAppHostFrame(frame);
-      observeThreadReadProbe(frame);
     },
   });
   pluginService.bindSmartSchedulingPresentation({

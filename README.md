@@ -156,6 +156,8 @@ OpenCodex本身不提供远程访问服务，如果需要在其他设备中远�
 | `CODEX_WEB_OFFICIAL_TMPDIR` / `CODEX_WEB_OFFICIAL_TMP_DIR` | 自动生成 | 指定官方 hidden runtime 的临时目录，用于隔离官方 IPC socket。 |
 | `OPENCODEX_TRUSTED_PROXIES` | 空 | 可信反代 IP 或 IPv4 CIDR，逗号/空格分隔；仅这些来源的 `x-forwarded-host` / `x-forwarded-proto` 会被信任。 |
 | `OPENCODEX_THREAD_ITEMS_PAGE_LIMIT` | `20` | 长会话每次加载的 item 数；网关私有官方运行时缓存会按该值限制分页。 |
+| `OPENCODEX_KEEP_ALIVE_TIMEOUT_MS` | `75000` | HTTP keep-alive 超时，需大于反向代理侧的空闲回收时间，`headersTimeout` 自动取其 +10s。 |
+| `OPENCODEX_REQUEST_TIMEOUT_MS` | `300000` | 单个 HTTP 请求的总超时，用于公网长连接场景。 |
 | `CODEX_WEB_REPORTS_DIR` | `.data/reports` | gateway 诊断报告输出目录。 |
 | `CODEX_WEB_WORKSPACE_ROOTS` | 空 | 初始 workspace roots，多个路径用逗号分隔。 |
 | `CODEX_HOME` | `~/.codex` | Codex CLI / app-server 的配置和运行数据目录。 |
