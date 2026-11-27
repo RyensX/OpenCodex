@@ -25,7 +25,14 @@
   }
   const OPENCODEX_LANGUAGES = [OPENCODEX_LOCALE, "zh-CN", "zh", "en-US", "en"];
   const AUTH_FORCE_LOGIN_STORAGE_KEY = "codex_web_force_login";
-  const WS_READY_WAIT_TIMEOUT_MS = 2500;
+  // 公网/高延迟链路上 WS 握手可能远超 2.5 秒；放宽到 15 秒，避免桥接层先于网络判定失败。
+  const WS_READY_WAIT_TIMEOUT_MS = 15_000;
+  // 公网链路 RTT 高、TLS 与反代握手慢，10 秒会让桥接层先于网络判定失败。
+  const RPC_PROBE_TIMEOUT_MS = 30_000;
+  const AUTH_STATUS_TIMEOUT_MS = 45_000;
+  const RPC_PAGE_TIMEOUT_MS = 45_000;
+  const WS_OPEN_TIMEOUT_MS = 45_000;
+  const WS_HELLO_ACK_TIMEOUT_MS = 45_000;
   const CLIENT_DIAGNOSTIC_FLUSH_DELAY_MS = 120;
   const CLIENT_DIAGNOSTIC_MAX_BATCH = 40;
   const LOW_PRIORITY_IPC_CONCURRENCY = 2;
@@ -2214,7 +2221,7 @@
       rpcProbeNonce = null;
       if (ws !== socket) return;
       wsReady = false; ws = null; socket.close(); scheduleReconnect();
-    }, 10000);
+    }, RPC_PROBE_TIMEOUT_MS);
   }
 
   function markGatewayWsReady() {
@@ -2272,11 +2279,16 @@
   }
 
   function appHostWsPayload(state, payload) {
-    // 所有 app-host 控制帧都带 clientId + portId，gateway 据此绑定到正确浏览器页面。
+    // 所有端口控制帧都带 clientId + portId；manager 直连端口还要带官方主进程校验用的 hostId/generation。
     return {
       clientId,
       portId: state.portId,
       ...(state.service === "git" ? { service: "git" } : {}),
+      ...(state.service === "app-server-manager" ? {
+        service: "app-server-manager",
+        hostId: state.hostId,
+        generation: state.generation,
+      } : {}),
       ...payload,
     };
   }
@@ -2634,7 +2646,11 @@
       // 官方 renderer 按 Electron preload 协议给 window 自己 postMessage，不处理 iframe/外部来源。
       if (event.source !== w) return;
       const data = event.data;
-      if (!data || typeof data !== "object" || data.type !== "connect-app-host") return;
+      if (!data || typeof data !== "object") return;
+      const appHost = data.type === "connect-app-host";
+      // 新版官方 renderer 用独立 MessagePort 直连 app-server；Web 端必须把它转成带 hostId/generation 的 relay 控制帧。
+      const appServerManager = data.type === "codex_desktop:connect-app-server-manager" && event.origin === w.location.origin;
+      if (!appHost && !appServerManager) return;
       modificationEffects?.appHostPort?.emit();
       const port = data.port || (event.ports && event.ports[0]);
       if (!port || typeof port.postMessage !== "function" || typeof port.start !== "function") {
@@ -2653,7 +2669,9 @@
         pendingChars: 0,
         port,
         portId: appHostPortId(),
-        service: data.service === "git" ? "git" : "app-host",
+        service: appServerManager ? "app-server-manager" : data.service === "git" ? "git" : "app-host",
+        hostId: appServerManager ? data.hostId : undefined,
+        generation: appServerManager ? data.generation : undefined,
         requestId: data.requestId,
       };
       while (appHostPortRelays.size >= APP_HOST_RELAY_MAX_ENTRIES) {
@@ -2691,13 +2709,15 @@
         closeAppHostRelay(state, "browser_message_error", true);
       });
       /**
-       * 官方 preload 会把 connect-app-host 的 port 直接转给 ipcRenderer.postMessage。
-       * Web 端不能跨进程传 MessagePort，所以这里先发 connect 控制帧，再兼容转发旧字符串和新版结构化 RPC。
+       * 官方 preload 会把 app-host 与 app-server-manager 的 port 直接转给 ipcRenderer.postMessage。
+       * Web 端不能跨进程传 MessagePort，所以先发 connect 控制帧，再兼容转发旧字符串和新版结构化 RPC。
        */
       queueAppHostRelayPayload(state, { type: "app-host-connect" });
       port.start();
       clientDiagnostic("app-host-connect-captured", {
         portId: state.portId,
+        service: state.service,
+        hostId: state.hostId,
         wsReady,
         wsState: websocketStateName(ws),
       });
@@ -3781,7 +3801,7 @@
       rpcInitializing = true;
       showRpcStatus(t("web.connection.recovering"));
       const controller = new AbortController();
-      const timeout = scheduler.setTimeout(() => controller.abort(), 10000);
+      const timeout = scheduler.setTimeout(() => controller.abort(), AUTH_STATUS_TIMEOUT_MS);
       try {
         const response = await w.fetch("/api/auth/status", {
           credentials: "same-origin",
@@ -3811,7 +3831,7 @@
     if (!rpcPage) {
       rpcInitializing = true; showRpcStatus(t("web.connection.connecting"));
       const controller = new AbortController();
-      const timeout = scheduler.setTimeout(() => controller.abort(), 10000);
+      const timeout = scheduler.setTimeout(() => controller.abort(), RPC_PAGE_TIMEOUT_MS);
       try {
         const response = await w.fetch("/api/rpc/page", { method: "POST", credentials: "same-origin", cache: "no-store", headers: gatewayAuthHeaders({}), signal: controller.signal });
         if (response.status === 401) { stopRpcRecovery("auth_required"); return; }
@@ -3839,7 +3859,7 @@
       rpcConnectTimer = scheduler.setTimeout(() => {
         if (ws !== socket) return;
         ws = null; wsReady = false; socket.close(); scheduleReconnect();
-      }, 10000);
+      }, WS_OPEN_TIMEOUT_MS);
     } catch (error) {
       console.warn("[codex-web] failed to open gateway socket", error);
       clientDiagnostic("ws-connect-failed", {
@@ -3872,7 +3892,7 @@
       rpcConnectTimer = scheduler.setTimeout(() => {
         if (ws !== socket) return;
         ws = null; wsReady = false; socket.close(); scheduleReconnect();
-      }, 10000);
+      }, WS_HELLO_ACK_TIMEOUT_MS);
       try {
         socket.send(JSON.stringify({ type: "hello", clientId, version: 1, ...rpcPage, ack: rpcReceived }));
         clientDiagnostic("ws-hello-sent", {

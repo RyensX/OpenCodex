@@ -23,6 +23,72 @@ const COMPOSER_SOURCE = fs.readFileSync(
 const TOOLTIP_SOURCE = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-tooltip-dismiss-guard.js"), "utf8");
 const BRIDGE_SOURCE = fs.readFileSync(path.join(INTERNAL_PROVIDER_DIR, "codex-bridge-polyfill.js"), "utf8");
 
+test("app-server manager bridge captures the official window message and forwards its binding", () => {
+  // 不仅检查源码字符串：实际执行窗口消息桥，确认 hostId/generation 进入 relay 控制帧且端口消息继续转发。
+  const payloadSection = sourceSection(BRIDGE_SOURCE, "  function appHostWsPayload", "  function sendAppHostWsPayload");
+  const installSection = sourceSection(BRIDGE_SOURCE, "  function installAppHostMessagePortBridge", "  function payloadFromIpcArgs");
+  const queued = [];
+  const listeners = new Map();
+  const relays = new Map();
+  const windowStub = { location: { origin: "https://example.com" } };
+  let observer = null;
+  const port = {
+    postMessage() {},
+    start() {},
+    addEventListener(type, callback) { listeners.set(type, callback); },
+  };
+  const api = vm.runInNewContext(`(() => {
+    ${payloadSection}
+    ${installSection}
+    return { appHostWsPayload, installAppHostMessagePortBridge };
+  })()`, {
+    w: windowStub,
+    providerGeneration: {},
+    adapterHost: { events: { observe: (options) => { observer = options.callback; } } },
+    modificationEffects: null,
+    payloadShape: () => "object",
+    clientDiagnostic: () => {},
+    appHostPortId: () => "app-host-manager-test",
+    appHostPortRelays: relays,
+    APP_HOST_RELAY_MAX_ENTRIES: 8,
+    closeAppHostRelay: () => {},
+    finalizeAppHostRelay: () => {},
+    publishAppHostData: (data) => data,
+    encodeAppHostMessageData: (data) => ({ data }),
+    queueAppHostRelayPayload: (state, payload) => queued.push({ state, payload }),
+    wsReady: true,
+    websocketStateName: () => "open",
+    ws: {},
+    clientId: "client-manager-test",
+  });
+  api.installAppHostMessagePortBridge();
+  observer({
+    source: windowStub,
+    origin: "https://example.com",
+    data: { type: "codex_desktop:connect-app-server-manager", hostId: "remote-test", generation: "generation-1" },
+    ports: [port],
+  });
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].payload.type, "app-host-connect");
+  const wire = api.appHostWsPayload(queued[0].state, queued[0].payload);
+  assert.equal(wire.clientId, "client-manager-test");
+  assert.equal(wire.portId, "app-host-manager-test");
+  assert.equal(wire.service, "app-server-manager");
+  assert.equal(wire.hostId, "remote-test");
+  assert.equal(wire.generation, "generation-1");
+  listeners.get("message")({ data: { method: "model/list", params: {} } });
+  assert.equal(queued[1].payload.type, "app-host-port-message");
+  assert.deepEqual(queued[1].payload.data, { method: "model/list", params: {} });
+
+  observer({
+    source: windowStub,
+    origin: "https://evil.example",
+    data: { type: "codex_desktop:connect-app-server-manager", hostId: "evil", generation: "evil" },
+    ports: [port],
+  });
+  assert.equal(queued.length, 2);
+});
+
 test("Git worker bridge transfers a dedicated port with the official request identity", async () => {
   // 验证连接控制帧先于官方端口交接，后续 Git RPC 才不会在中继创建之前丢失。
   const binding = sourceSection(BRIDGE_SOURCE, "  async function connectGitWorker", "  function attachBridge");

@@ -20,6 +20,7 @@ const WS_DEFLATE_THRESHOLD = Number(process.env.OPENCODEX_WS_DEFLATE_THRESHOLD |
 const WS_DEFLATE_CONCURRENCY = Number(process.env.OPENCODEX_WS_DEFLATE_CONCURRENCY || 4);
 const WS_DEFLATE_LEVEL = Number(process.env.OPENCODEX_WS_DEFLATE_LEVEL || 3);
 const WS_DEBUG_ENABLED = process.env.OPENCODEX_DEBUG_WS === "1";
+const OPENCODEX_WS_CONTROL_PROBE = process.env.OPENCODEX_THREAD_READ_PROBE === "1";
 const WS_MAX_CLIENTS = Math.max(1, Number(process.env.OPENCODEX_WS_MAX_CLIENTS) || 128);
 const WS_MAX_PAYLOAD_BYTES = Math.max(
   1024 * 1024,
@@ -33,7 +34,35 @@ const APP_HOST_RELAY_MAX_ENTRIES = Math.max(1, Number(process.env.OPENCODEX_APP_
 const WS_IPC_MAX_IN_FLIGHT = Math.max(32, Number(process.env.OPENCODEX_WS_IPC_MAX_IN_FLIGHT) || 4096);
 const ROUTE_ID_SCAN_MAX_NODES = 128;
 const BROADCAST_DEDUPE_MAX_ENTRIES_PER_SOCKET = 16;
+// 公网/NAT 链路上空闲连接会被中途设备静默回收，服务端心跳用于主动探测存活并保持映射。
+const WS_PING_INTERVAL_MS = Math.max(
+  1000,
+  Number(process.env.OPENCODEX_WS_PING_INTERVAL_MS || 20_000)
+);
+const WS_PONG_TIMEOUT_MS = Math.max(
+  WS_PING_INTERVAL_MS,
+  Number(process.env.OPENCODEX_WS_PONG_TIMEOUT_MS || WS_PING_INTERVAL_MS * 2)
+);
 const BROADCAST_DEDUPE_MAX_WINDOW_MS = 60_000;
+// 长会话默认每页只取 20 个 item，避免单个重工具轮次首次渲染上千条记录。
+const THREAD_ITEMS_PAGE_LIMIT = Math.max(1, Number(process.env.OPENCODEX_THREAD_ITEMS_PAGE_LIMIT) || 20);
+
+function limitThreadItemsPage(data) {
+  // 只收窄官方 sendRequest 管道里的 thread/items/list 页大小，其余协议与后续 cursor 分页保持原样。
+  if (!Array.isArray(data) || data[0] !== "push" || !Array.isArray(data[1])) return data;
+  const pipeline = data[1];
+  if (pipeline[0] !== "pipeline" || !Array.isArray(pipeline[2]) || pipeline[2][0] !== "sendRequest" || !Array.isArray(pipeline[3])) {
+    return data;
+  }
+  const args = pipeline[3];
+  const params = args[1];
+  if (args[0] !== "thread/items/list" || !params || typeof params !== "object" || Array.isArray(params)) return data;
+  const limit = Number(params.limit);
+  if (!Number.isFinite(limit) || limit <= THREAD_ITEMS_PAGE_LIMIT) return data;
+  const nextArgs = [args[0], { ...params, limit: THREAD_ITEMS_PAGE_LIMIT }, ...args.slice(2)];
+  const nextPipeline = [...pipeline.slice(0, 3), nextArgs];
+  return ["push", nextPipeline, ...data.slice(2)];
+}
 
 function byteLength(value) {
   // WebSocket bufferedAmount 用字节衡量；日志里也统一按 UTF-8 字节估算，方便对齐网络层现象。
@@ -629,6 +658,16 @@ function createWsHub(
     return typeof value === "string" && value.length > 0 && value.length <= 160;
   }
 
+  function appServerManagerBinding(message) {
+    // manager 直连端口必须带官方主进程校验的 hostId/generation，缺字段时不能退化成通用 app-host。
+    const hostId = typeof message.hostId === "string" ? message.hostId.trim() : "";
+    const generation = message.generation;
+    const validGeneration =
+      (typeof generation === "string" && generation.length > 0 && generation.length <= 160) ||
+      (Number.isSafeInteger(generation) && generation >= 0);
+    return hostId.length > 0 && hostId.length <= 256 && validGeneration ? { hostId, generation } : null;
+  }
+
   function handleAppHostConnect(ws, req, message) {
     // 浏览器发起 connect 后，gateway 才创建 Electron MessageChannelMain 并交给官方 listener。
     const clientId = normalizedWsClientId(ws, message);
@@ -639,6 +678,17 @@ function createWsHub(
         mappedClientId: shortId(ws.__codexWebClientId || ""),
         portId: shortId(portId),
       });
+      return true;
+    }
+    const service = message.service === "git" ? "git" : message.service === "app-server-manager" ? "app-server-manager" : "app-host";
+    const managerBinding = service === "app-server-manager" ? appServerManagerBinding(message) : null;
+    if (service === "app-server-manager" && !managerBinding) {
+      diagnosticWarn("ws-hub", "app_server_manager_connect_rejected", {
+        clientId: shortId(clientId),
+        portId: shortId(portId),
+        hostId: shortId(message.hostId || ""),
+      });
+      safeSend(ws, { type: "app-host-port-error", portId, error: "Invalid app-server manager binding" });
       return true;
     }
     if (typeof createAppHostRelay !== "function") {
@@ -677,6 +727,8 @@ function createWsHub(
       generation: ++nextAppHostRelayGeneration,
       portId,
       clientId,
+      service,
+      hostId: managerBinding?.hostId,
       ws,
       relay: null,
       registered: false,
@@ -687,8 +739,10 @@ function createWsHub(
       const relay = createAppHostRelay({
         clientId,
         portId,
-        // 只开放明确支持的两个端口服务，复用已有鉴权、限额及重连隔离。
-        service: message.service === "git" ? "git" : "app-host",
+        // 通用 app-host、git worker 与 app-server manager 直连端口分别交给对应官方 listener。
+        service,
+        hostId: managerBinding?.hostId,
+        generation: managerBinding?.generation,
         remoteAddress: req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "",
         onClose(reason) {
           // 旧 generation 的 close 只能释放自身资源，不能通知当前浏览器 relay。
@@ -709,6 +763,10 @@ function createWsHub(
         onMessage(data) {
           // 旧字符串保持原帧；新版结构化克隆值编码成 JSON-safe wire 数据后再进入 WebSocket。
           if (!relayIsCurrent(relays, context)) return;
+          try {
+            // 观察器属于独立展示层；hub 仍只负责透明转发，不解析 App Server 协议或路由语义。
+            observeAppHostFrame?.({ clientId, data, direction: "server", portId });
+          } catch {}
           let wireData;
           try {
             wireData = appHostMessageCodec.encodeMessageData(data);
@@ -813,6 +871,17 @@ function createWsHub(
         );
       }
       return true;
+    }
+    const limitedData = limitThreadItemsPage(data);
+    if (limitedData !== data) {
+      data = limitedData;
+      if (DEBUG_LOGS) {
+        diagnosticLog("ws-hub", "thread_items_page_limited", {
+          clientId: shortId(clientId),
+          portId: shortId(portId),
+          limit: THREAD_ITEMS_PAGE_LIMIT,
+        });
+      }
     }
     let context = relays.get(portId);
     if (!context && ws.__recoverable) throw new Error("RPC port is missing");
@@ -922,6 +991,9 @@ function createWsHub(
     }
     if (message.type === "app-host-connect") return handleAppHostConnect(ws, req, message);
     if (message.type === "app-host-port-message") return handleAppHostPortMessage(ws, req, message);
+    if (OPENCODEX_WS_CONTROL_PROBE && String(message.type || "").includes("app-host")) {
+      diagnosticWarn("ws-hub", "app_host_control_missed", { type: String(message.type || "").slice(0, 40), clientId: shortId(ws.__codexWebClientId || ""), recoverable: !!ws.__recoverable });
+    }
     return false;
   }
 
@@ -946,6 +1018,11 @@ function createWsHub(
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.__codexRemoteAddress = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "";
+      // 浏览器 WebSocket 在协议层自动回 pong，无需页面配合；这里只记录最近一次 pong 时间。
+      ws.__codexLastPongAt = Date.now();
+      ws.on("pong", () => {
+        ws.__codexLastPongAt = Date.now();
+      });
       clients.add(ws);
       if (DEBUG_LOGS) {
         // WS 握手/关闭属于页面生命周期噪声，默认不写入常规日志；认证失败和异常仍会保留。
@@ -1058,10 +1135,36 @@ function createWsHub(
     });
   });
 
+  // 定时探活：超过 WS_PONG_TIMEOUT_MS 没收到 pong 就主动关闭，让前端按退避重连，
+  // 而不是让半死连接一直占着路由表却收不到事件。
+  const heartbeat = setInterval(() => {
+    const nowMs = Date.now();
+    for (const ws of clients) {
+      // readyState 1 = OPEN；其余状态交给 close/error 清理，不再发探测帧。
+      if (ws.readyState !== 1) continue;
+      const lastPongAt = Number(ws.__codexLastPongAt || 0);
+      if (lastPongAt && nowMs - lastPongAt > WS_PONG_TIMEOUT_MS) {
+        diagnosticWarn("ws-hub", "heartbeat_timeout", {
+          clientId: shortId(ws.__codexWebClientId || ""),
+          silentMs: nowMs - lastPongAt,
+          remoteAddress: socketRemoteAddress(ws),
+        });
+        try {
+          ws.close(4008, "heartbeat timeout");
+        } catch {}
+        continue;
+      }
+      try {
+        ws.ping();
+      } catch {}
+    }
+  }, WS_PING_INTERVAL_MS);
+  if (typeof heartbeat.unref === "function") heartbeat.unref();
+
   return { broadcast, clients, sendTo, hasClient, onClientReady, onClientRemoved, recovery };
 }
 
 module.exports = {
   createWsHub,
-  __test: { routeIdFromPayload },
+  __test: { limitThreadItemsPage, routeIdFromPayload },
 };

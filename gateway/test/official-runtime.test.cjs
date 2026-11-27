@@ -107,6 +107,45 @@ test("forwards structured official app-host messages and preserves close signals
   assert.deepEqual(closed, ["official_closed"]);
 });
 
+test("binds app-server manager ports through the official listener", async () => {
+  const port = { id: "manager-port" };
+  const calls = [];
+  let cleaned = false;
+  const listener = async (event, message) => {
+    calls.push({ event, message });
+    return () => { cleaned = true; };
+  };
+  const officialIpc = {
+    handlers: new Map(),
+    listeners: new Map([["codex_desktop:connect-app-server-manager", new Set([listener])]]),
+    hiddenWebContents: { id: 1 },
+  };
+  const dependencies = { officialIpc, waitForReady: async () => true, createEvent: (context) => context };
+  const cleanup = await __test.connectOfficialAppHostPort(port, {
+    service: "app-server-manager",
+    hostId: "remote-test",
+    generation: "generation-2",
+    clientId: "manager-client",
+    portId: "manager-port",
+  }, dependencies);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].event.ports[0], port);
+  assert.deepEqual(calls[0].message, { hostId: "remote-test", generation: "generation-2" });
+  assert.equal(typeof cleanup, "function");
+  cleanup();
+  assert.equal(cleaned, true);
+
+  await assert.rejects(__test.connectOfficialAppHostPort(port, {
+    service: "app-server-manager",
+    hostId: "remote-test",
+  }, dependencies), /Invalid app-server manager binding/);
+  await assert.rejects(__test.connectOfficialAppHostPort(port, {
+    service: "app-server-manager",
+    hostId: "remote-test",
+    generation: "generation-2",
+  }, { ...dependencies, officialIpc: { ...officialIpc, listeners: new Map() } }), /No official Electron IPC listener/);
+});
+
 function threadStreamStateMessage(conversationId, sourceClientId, change) {
   return {
     type: "broadcast",
